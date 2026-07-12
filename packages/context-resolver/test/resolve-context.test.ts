@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { ContextPackSchema, type ContextPack, type MemoryItem, type MemoryScope } from '@memlume/contracts';
+import { ContextPackSchema, MemoryItemSchema, createUuidV7, type ContextPack, type MemoryItem, type MemoryScope } from '@memlume/contracts';
 import { openDatabase, type SqliteDatabase } from '@memlume/database/internal';
 import { afterEach, describe, expect, test } from 'vitest';
 
@@ -16,6 +16,8 @@ type MemoryDraft = {
   readonly scope: MemoryScope;
   readonly title?: string;
   readonly priority?: number;
+  readonly validFrom?: string;
+  readonly validUntil?: string;
 };
 
 type MemoryStore = {
@@ -23,11 +25,21 @@ type MemoryStore = {
 };
 type MemoryStoreConstructor = new (database: SqliteDatabase) => MemoryStore;
 type ContextResolverConstructor = new (store: MemoryStore) => {
-  resolve(input: { readonly intent: string; readonly scope: MemoryScope; readonly task: string | null; readonly contextBudget: number }): ContextPack;
+  resolve(input: {
+    readonly intent: string;
+    readonly scope: MemoryScope;
+    readonly task: string | null;
+    readonly contextBudget: number;
+    readonly entities?: readonly string[];
+    readonly availableTools?: readonly string[];
+  }): ContextPack;
 };
 
 const { MemoryStore } = retrieval as { MemoryStore?: MemoryStoreConstructor };
-const { ContextResolver } = resolverModule as { ContextResolver?: ContextResolverConstructor };
+const { ContextResolver, ESTIMATED_TEXT_UNIT_CHARS } = resolverModule as {
+  ContextResolver?: ContextResolverConstructor;
+  ESTIMATED_TEXT_UNIT_CHARS?: number;
+};
 
 const databases: SqliteDatabase[] = [];
 const directories: string[] = [];
@@ -50,6 +62,55 @@ function policy(target: string, constraints: { readonly exclusive?: boolean; rea
     action: { type: 'route_tool', target },
     constraints,
   };
+}
+
+function insertProcedure(
+  database: SqliteDatabase,
+  trigger: Record<string, unknown>,
+  scope: MemoryScope = { level: 'global' },
+): MemoryItem {
+  const now = new Date().toISOString();
+  const memory = MemoryItemSchema.parse({
+    id: createUuidV7(),
+    kind: 'procedure',
+    title: 'Image workflow',
+    canonicalText: 'Run the image workflow.',
+    structuredData: { trigger, steps: [{ order: 1, action: 'Prepare the image.' }] },
+    scope,
+    status: 'active',
+    priority: 0,
+    confidence: 1,
+    explicitness: 1,
+    createdAt: now,
+    updatedAt: now,
+  });
+  database
+    .prepare(`
+      INSERT INTO memory_items (
+        id, kind, title, canonical_text, structured_data, scope_data, status, priority,
+        confidence, explicitness, source_event_id, created_at, updated_at, valid_from,
+        valid_until, superseded_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .run(
+      memory.id,
+      memory.kind,
+      memory.title ?? null,
+      memory.canonicalText,
+      JSON.stringify(memory.structuredData),
+      JSON.stringify(memory.scope),
+      memory.status,
+      memory.priority,
+      memory.confidence,
+      memory.explicitness,
+      memory.sourceEventId ?? null,
+      memory.createdAt,
+      memory.updatedAt,
+      memory.validFrom ?? null,
+      memory.validUntil ?? null,
+      memory.supersededBy ?? null,
+    );
+  return memory;
 }
 
 afterEach(() => {
@@ -87,10 +148,190 @@ describe('ContextResolver', () => {
     });
 
     expect(pack.traceId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    expect(ESTIMATED_TEXT_UNIT_CHARS).toBe(4);
     expect(pack.directives.map((directive) => directive.memoryId)).toEqual([project.id, global.id]);
     expect(pack.directives[0]).toMatchObject({ mandatory: true, priority: 1 });
     expect(pack.explanation.sourceMemoryIds).toEqual([project.id, global.id]);
     expect(ContextPackSchema.parse(pack)).toEqual(pack);
+  });
+
+  test('requires every policy and procedure trigger entity and available tool', () => {
+    const { database, store, resolver } = createResolver();
+    const trigger = {
+      intents: ['image_generation'],
+      entities: ['logo'],
+      requiredToolAvailability: ['image-tool'],
+    };
+    const guardedPolicy = store.save({
+      kind: 'policy',
+      canonicalText: 'Use the guarded image route.',
+      structuredData: { ...policy('guarded-image-route'), trigger },
+      scope: { level: 'global' },
+    });
+    const guardedProcedure = insertProcedure(database, trigger);
+
+    const missing = resolver.resolve({
+      intent: 'image_generation',
+      scope: { level: 'global' },
+      task: null,
+      contextBudget: 100,
+    });
+    expect(missing.directives).toEqual([]);
+    expect(missing.procedures).toEqual([]);
+
+    const missingTool = resolver.resolve({
+      intent: 'image_generation',
+      scope: { level: 'global' },
+      task: null,
+      contextBudget: 100,
+      entities: ['logo'],
+    });
+    expect(missingTool.directives).toEqual([]);
+    expect(missingTool.procedures).toEqual([]);
+
+    const missingEntity = resolver.resolve({
+      intent: 'image_generation',
+      scope: { level: 'global' },
+      task: null,
+      contextBudget: 100,
+      availableTools: ['image-tool'],
+    });
+    expect(missingEntity.directives).toEqual([]);
+    expect(missingEntity.procedures).toEqual([]);
+
+    const matching = resolver.resolve({
+      intent: 'image_generation',
+      scope: { level: 'global' },
+      task: null,
+      contextBudget: 100,
+      entities: ['logo'],
+      availableTools: ['image-tool'],
+    });
+    expect(matching.directives.map((directive) => directive.memoryId)).toEqual([guardedPolicy.id]);
+    expect(matching.procedures.map((procedure) => procedure.memoryId)).toEqual([guardedProcedure.id]);
+  });
+
+  test('excludes future and expired memories while keeping the inclusive current-date fact', () => {
+    const { store, resolver } = createResolver();
+    const today = new Date().toISOString().slice(0, 10);
+    store.save({
+      kind: 'policy',
+      canonicalText: 'This future route must not be included.',
+      structuredData: policy('future-route'),
+      scope: { level: 'global' },
+      validFrom: '2999-01-01',
+    });
+    store.save({
+      kind: 'policy',
+      canonicalText: 'This expired route must not be included.',
+      structuredData: policy('expired-route'),
+      scope: { level: 'global' },
+      validUntil: '2000-01-01',
+    });
+    store.save({
+      kind: 'fact',
+      title: 'Future fact',
+      canonicalText: 'The timed logo fact is only true in the future.',
+      structuredData: { subject: 'logo', predicate: 'timed', object: 'future', confidence: 1 },
+      scope: { level: 'global' },
+      validFrom: '2999-01-01',
+    });
+    store.save({
+      kind: 'fact',
+      title: 'Expired fact',
+      canonicalText: 'The timed logo fact is no longer true.',
+      structuredData: { subject: 'logo', predicate: 'timed', object: 'expired', confidence: 1 },
+      scope: { level: 'global' },
+      validUntil: '2000-01-01',
+    });
+    const current = store.save({
+      kind: 'fact',
+      title: 'Current fact',
+      canonicalText: 'The timed logo fact is true today.',
+      structuredData: { subject: 'logo', predicate: 'timed', object: 'current', confidence: 1 },
+      scope: { level: 'global' },
+      validFrom: today,
+      validUntil: today,
+    });
+
+    const pack = resolver.resolve({
+      intent: 'image_generation',
+      scope: { level: 'global' },
+      task: 'timed logo fact',
+      contextBudget: 100,
+    });
+
+    expect(pack.directives).toEqual([]);
+    expect(pack.knowledge).toEqual([{ memoryId: current.id, title: 'Current fact', summary: current.canonicalText }]);
+  });
+
+  test('applies fact payload validity dates to FTS results', () => {
+    const { store, resolver } = createResolver();
+    store.save({
+      kind: 'fact',
+      title: 'Future payload fact',
+      canonicalText: 'The payload timed logo fact only applies in the future.',
+      structuredData: {
+        subject: 'logo',
+        predicate: 'payload_timed',
+        object: 'future',
+        validFrom: '2999-01-01',
+        confidence: 1,
+      },
+      scope: { level: 'global' },
+    });
+    store.save({
+      kind: 'fact',
+      title: 'Expired payload fact',
+      canonicalText: 'The payload timed logo fact no longer applies.',
+      structuredData: {
+        subject: 'logo',
+        predicate: 'payload_timed',
+        object: 'expired',
+        validUntil: '2000-01-01',
+        confidence: 1,
+      },
+      scope: { level: 'global' },
+    });
+
+    const pack = resolver.resolve({
+      intent: 'image_generation',
+      scope: { level: 'global' },
+      task: 'payload timed logo fact',
+      contextBudget: 100,
+    });
+
+    expect(pack.knowledge).toEqual([]);
+  });
+
+  test('lets the highest-ranked exclusive route tool exclude conflicting routes', () => {
+    const { store, resolver } = createResolver();
+    const global = store.save({
+      kind: 'policy',
+      canonicalText: 'Use the global image route.',
+      structuredData: policy('global-image-route', { exclusive: true }),
+      scope: { level: 'global' },
+      priority: 999,
+    });
+    const project = store.save({
+      kind: 'policy',
+      canonicalText: 'Use the exclusive project image route.',
+      structuredData: policy('project-image-route', { exclusive: true }),
+      scope: { level: 'project', projectId: 'memlume' },
+      priority: 1,
+    });
+
+    const pack = resolver.resolve({
+      intent: 'image_generation',
+      scope: { level: 'project', projectId: 'memlume' },
+      task: null,
+      contextBudget: 100,
+    });
+
+    expect(pack.directives).toEqual([
+      expect.objectContaining({ memoryId: project.id, actionTarget: 'project-image-route', mandatory: true }),
+    ]);
+    expect(pack.explanation.exclusions).toEqual([{ memoryId: global.id, reason: 'exclusive_conflict' }]);
   });
 
   test('excludes inactive and scope-mismatched memories', () => {
@@ -195,7 +436,10 @@ describe('ContextResolver', () => {
     ]);
     expect(validated.explanation).toHaveProperty(
       'budget',
-      expect.objectContaining({ limit: 1, included: [expect.objectContaining({ memoryId: mandatory.id })] }),
+      expect.objectContaining({
+        limitUnits: 1,
+        included: [expect.objectContaining({ memoryId: mandatory.id, estimatedTextUnits: expect.any(Number) })],
+      }),
     );
   });
 

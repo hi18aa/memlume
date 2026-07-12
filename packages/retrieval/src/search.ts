@@ -3,6 +3,7 @@ import {
   MemoryKindSchema,
   MemoryScopeSchema,
   MemoryStatusSchema,
+  NonEmptyTextSchema,
   UuidV7Schema,
   createUuidV7,
   type JsonValue,
@@ -34,12 +35,26 @@ export interface SaveMemoryInput {
   readonly supersededBy?: string;
 }
 
-export type UpdateMemoryInput = Partial<Omit<SaveMemoryInput, 'kind'>>;
+export type UpdateMemoryInput = Partial<Omit<SaveMemoryInput, 'kind'>> & {
+  readonly actor: string;
+  readonly reason: string;
+};
 
 export interface MemoryQuery {
   readonly scope?: MemoryScope;
   readonly status?: MemoryStatus;
   readonly kinds?: readonly MemoryKind[];
+}
+
+export interface MemoryVersion {
+  readonly id: string;
+  readonly memoryId: string;
+  readonly version: number;
+  readonly canonicalText: string;
+  readonly structuredData: JsonValue;
+  readonly changedBy: string;
+  readonly changeReason: string;
+  readonly createdAt: string;
 }
 
 type MemoryRow = {
@@ -59,6 +74,17 @@ type MemoryRow = {
   valid_from: string | null;
   valid_until: string | null;
   superseded_by: string | null;
+};
+
+type MemoryVersionRow = {
+  id: string;
+  memory_id: string;
+  version: number;
+  canonical_text: string;
+  structured_data: string;
+  changed_by: string;
+  change_reason: string;
+  created_at: string;
 };
 
 const memoryColumns = `
@@ -116,19 +142,38 @@ export class MemoryStore {
     if (!isManualMemoryKind(existing.kind) || existing.status !== 'active') {
       throw new Error('Only active manual memories can be updated.');
     }
+    const { actor, reason, ...changes } = input;
+    const changedBy = NonEmptyTextSchema.parse(actor);
+    const changeReason = NonEmptyTextSchema.parse(reason);
+    const now = new Date().toISOString();
 
     const updated = MemoryItemSchema.parse({
       ...existing,
-      ...input,
+      ...changes,
       id: existing.id,
       kind: existing.kind,
       status: 'active',
       createdAt: existing.createdAt,
-      updatedAt: new Date().toISOString(),
+      updatedAt: now,
     });
 
-    this.database.transaction(() => this.replace(updated)).immediate();
+    this.database.transaction(() => {
+      this.insertVersion(existing, changedBy, changeReason, now);
+      this.replace(updated);
+    }).immediate();
     return updated;
+  }
+
+  listVersions(id: string): MemoryVersion[] {
+    const rows = this.database
+      .prepare(`
+        SELECT id, memory_id, version, canonical_text, structured_data, changed_by, change_reason, created_at
+        FROM memory_versions
+        WHERE memory_id = ?
+        ORDER BY version
+      `)
+      .all(UuidV7Schema.parse(id)) as MemoryVersionRow[];
+    return rows.map(toMemoryVersion);
   }
 
   get(id: string): MemoryItem | undefined {
@@ -212,6 +257,30 @@ export class MemoryStore {
     this.replaceSearch(memory);
   }
 
+  private insertVersion(memory: MemoryItem, changedBy: string, changeReason: string, createdAt: string): void {
+    const version = (
+      this.database
+        .prepare('SELECT COALESCE(MAX(version), 0) + 1 AS version FROM memory_versions WHERE memory_id = ?')
+        .get(memory.id) as { version: number }
+    ).version;
+    this.database
+      .prepare(`
+        INSERT INTO memory_versions (
+          id, memory_id, version, canonical_text, structured_data, changed_by, change_reason, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        createUuidV7(),
+        memory.id,
+        version,
+        memory.canonicalText,
+        JSON.stringify(memory.structuredData),
+        changedBy,
+        changeReason,
+        createdAt,
+      );
+  }
+
   private replaceSearch(memory: MemoryItem): void {
     this.database.prepare('DELETE FROM memory_search WHERE memory_id = ?').run(memory.id);
     this.database
@@ -288,6 +357,19 @@ function toMemoryItem(row: MemoryRow): MemoryItem {
     validUntil: row.valid_until ?? undefined,
     supersededBy: row.superseded_by ?? undefined,
   });
+}
+
+function toMemoryVersion(row: MemoryVersionRow): MemoryVersion {
+  return {
+    id: UuidV7Schema.parse(row.id),
+    memoryId: UuidV7Schema.parse(row.memory_id),
+    version: row.version,
+    canonicalText: row.canonical_text,
+    structuredData: JSON.parse(row.structured_data) as JsonValue,
+    changedBy: NonEmptyTextSchema.parse(row.changed_by),
+    changeReason: NonEmptyTextSchema.parse(row.change_reason),
+    createdAt: row.created_at,
+  };
 }
 
 function normalizeQuery(filters: MemoryQuery): MemoryQuery {

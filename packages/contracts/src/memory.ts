@@ -250,6 +250,7 @@ export const ContextDirectiveSchema = z.object({
   memoryId: UuidV7Schema,
   sourceEventId: UuidV7Schema.optional(),
   text: NonEmptyTextSchema,
+  actionTarget: NonEmptyTextSchema.optional(),
   priority: z.number().int(),
   mandatory: z.boolean(),
 });
@@ -284,25 +285,31 @@ export type ContextDecision = z.infer<typeof ContextDecisionSchema>;
 export const ContextBudgetInclusionSchema = z.object({
   memoryId: UuidV7Schema,
   reason: NonEmptyTextSchema,
-  units: z.number().int().positive(),
+  estimatedTextUnits: z.number().int().positive(),
 });
 export const ContextBudgetOmissionSchema = z.object({
   memoryId: UuidV7Schema,
   reason: z.literal('budget'),
 });
 export const ContextBudgetSchema = z.object({
-  limit: z.number().int().nonnegative(),
-  used: z.number().int().nonnegative(),
+  limitUnits: z.number().int().nonnegative(),
+  usedUnits: z.number().int().nonnegative(),
   included: z.array(ContextBudgetInclusionSchema),
   omitted: z.array(ContextBudgetOmissionSchema),
   truncated: z.boolean(),
 });
 export type ContextBudget = z.infer<typeof ContextBudgetSchema>;
 
+export const ContextExclusionSchema = z.object({
+  memoryId: UuidV7Schema,
+  reason: z.literal('exclusive_conflict'),
+});
+
 export const ContextPackExplanationSchema = z.object({
   toolSelection: NonEmptyTextSchema.optional(),
   sourceMemoryIds: z.array(UuidV7Schema),
   budget: ContextBudgetSchema,
+  exclusions: z.array(ContextExclusionSchema),
 });
 export type ContextPackExplanation = z.infer<typeof ContextPackExplanationSchema>;
 

@@ -229,6 +229,7 @@ describe('shared memory contracts', () => {
         {
           memoryId: ids.memory,
           text: 'Use codex_img_gen_skill.',
+          actionTarget: 'codex_img_gen_skill',
           priority: 1000,
           mandatory: true,
         },
@@ -241,16 +242,18 @@ describe('shared memory contracts', () => {
         toolSelection: 'The global policy routes image generation.',
         sourceMemoryIds: [ids.memory, ids.preference, ids.fact, ids.decision],
         budget: {
-          limit: 100,
-          used: 20,
-          included: [{ memoryId: ids.memory, reason: 'mandatory', units: 5 }],
+          limitUnits: 100,
+          usedUnits: 20,
+          included: [{ memoryId: ids.memory, reason: 'mandatory', estimatedTextUnits: 5 }],
           omitted: [],
           truncated: false,
         },
+        exclusions: [],
       },
     };
 
     expect(ContextPackSchema.safeParse(pack).success).toBe(true);
+    expect(ContextPackSchema.parse(pack).directives[0]?.actionTarget).toBe('codex_img_gen_skill');
     const { traceId: _, ...untracedPack } = pack;
     expect(ContextPackSchema.safeParse(untracedPack).success).toBe(false);
     expect(ContextPackSchema.safeParse({ ...pack, traceId: 'trace-1' }).success).toBe(false);
