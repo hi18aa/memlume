@@ -99,6 +99,11 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
 }
 
 const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
+  if (isPayloadTooLargeError(error)) {
+    response.status(413).json({ error: 'payload_too_large' });
+    return;
+  }
+
   if (isInvalidRequestError(error)) {
     response.status(400).json({ error: 'invalid_request' });
     return;
@@ -115,10 +120,15 @@ function isInvalidRequestError(error: unknown): boolean {
     return false;
   }
 
-  const { code, status, type } = error as { readonly code?: unknown; readonly status?: unknown; readonly type?: unknown };
-  return (
-    code === 'SQLITE_CONSTRAINT_FOREIGNKEY' ||
-    (error instanceof SyntaxError && status === 400) ||
-    (status === 413 && type === 'entity.too.large')
-  );
+  const { code, status } = error as { readonly code?: unknown; readonly status?: unknown };
+  return code === 'SQLITE_CONSTRAINT_FOREIGNKEY' || (error instanceof SyntaxError && status === 400);
+}
+
+function isPayloadTooLargeError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+
+  const { status, type } = error as { readonly status?: unknown; readonly type?: unknown };
+  return status === 413 && type === 'entity.too.large';
 }

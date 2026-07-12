@@ -168,7 +168,7 @@ describe('localhost daemon API', () => {
     expect(invalid.body).toEqual({ error: 'invalid_request' });
   });
 
-  test('returns a safe 400 for oversized and malformed JSON bodies', async () => {
+  test('returns a safe 413 for oversized and 400 for malformed JSON bodies', async () => {
     const daemon = await startDaemon({ databasePath: createDatabasePath(), port: 0 });
     daemons.push(daemon);
 
@@ -177,8 +177,8 @@ describe('localhost daemon API', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ rawContent: 'x'.repeat(1024 * 1024), eventType: 'test', source: { type: 'test' } }),
     });
-    expect(tooLarge.response.status).toBe(400);
-    expect(tooLarge.body).toEqual({ error: 'invalid_request' });
+    expect(tooLarge.response.status).toBe(413);
+    expect(tooLarge.body).toEqual({ error: 'payload_too_large' });
 
     const malformed = await requestJson(daemon, '/v1/events', {
       method: 'POST',
