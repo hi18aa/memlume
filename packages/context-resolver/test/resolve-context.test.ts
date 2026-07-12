@@ -146,7 +146,11 @@ describe('ContextResolver', () => {
     const decision = store.save({
       kind: 'decision',
       canonicalText: 'Use SVG as the source format.',
-      structuredData: { rationale: ['SVG stays sharp at all logo sizes.'] },
+      structuredData: {
+        title: 'Use SVG as the source format.',
+        status: 'active',
+        rationale: ['SVG stays sharp at all logo sizes.'],
+      },
       scope: { level: 'global' },
     });
 
@@ -193,5 +197,28 @@ describe('ContextResolver', () => {
       'budget',
       expect.objectContaining({ limit: 1, included: [expect.objectContaining({ memoryId: mandatory.id })] }),
     );
+  });
+
+  test('records optional memories omitted by a tiny context budget', () => {
+    const { store, resolver } = createResolver();
+    const optional = store.save({
+      kind: 'policy',
+      canonicalText: 'This optional route must be omitted.',
+      structuredData: policy('optional-image-route'),
+      scope: { level: 'global' },
+    });
+
+    const pack = resolver.resolve({
+      intent: 'image_generation',
+      scope: { level: 'global' },
+      task: null,
+      contextBudget: 1,
+    });
+
+    expect(pack.directives).toEqual([]);
+    expect(pack.explanation.budget).toMatchObject({
+      truncated: true,
+      omitted: [{ memoryId: optional.id, reason: 'budget' }],
+    });
   });
 });

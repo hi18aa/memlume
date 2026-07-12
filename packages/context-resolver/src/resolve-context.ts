@@ -28,6 +28,7 @@ type Candidate = {
   readonly memoryId: string;
   readonly units: number;
   readonly mandatory: boolean;
+  readonly reason: string;
   apply(): void;
 };
 
@@ -74,7 +75,9 @@ export class ContextResolver {
         budget: {
           limit: input.contextBudget,
           used: 0,
-          included: [] as { memoryId: string; units: number }[],
+          included: [] as { memoryId: string; reason: string; units: number }[],
+          omitted: [] as { memoryId: string; reason: 'budget' }[],
+          truncated: false,
         },
       },
     };
@@ -82,22 +85,25 @@ export class ContextResolver {
     const candidates: Candidate[] = [
       ...directives
         .filter((directive) => directive.mandatory)
-        .map((directive) => candidate(directive, directive.text, true, () => pack.directives.push(directive))),
+        .map((directive) => candidate(directive, directive.text, true, 'mandatory', () => pack.directives.push(directive))),
       ...directives
         .filter((directive) => !directive.mandatory)
-        .map((directive) => candidate(directive, directive.text, false, () => pack.directives.push(directive))),
-      ...procedures.map((procedure) => candidate(procedure, `${procedure.name}${procedure.steps.join('')}`, false, () => pack.procedures.push(procedure))),
-      ...preferences.map((preference) => candidate(preference, preference.text, false, () => pack.preferences.push(preference))),
-      ...facts.map((fact) => candidate(fact, `${fact.title}${fact.summary}`, false, () => pack.knowledge.push(fact))),
-      ...decisions.map((decision) => candidate(decision, decision.text, false, () => pack.decisions.push(decision))),
+        .map((directive) => candidate(directive, directive.text, false, 'policy', () => pack.directives.push(directive))),
+      ...procedures.map((procedure) => candidate(procedure, `${procedure.name}${procedure.steps.join('')}`, false, 'procedure', () => pack.procedures.push(procedure))),
+      ...preferences.map((preference) => candidate(preference, preference.text, false, 'preference', () => pack.preferences.push(preference))),
+      ...facts.map((fact) => candidate(fact, `${fact.title}${fact.summary}`, false, 'fact', () => pack.knowledge.push(fact))),
+      ...decisions.map((decision) => candidate(decision, decision.text, false, 'decision', () => pack.decisions.push(decision))),
     ];
 
     for (const item of candidates) {
       if (item.mandatory || pack.explanation.budget.used + item.units <= input.contextBudget) {
         item.apply();
         pack.explanation.sourceMemoryIds.push(item.memoryId);
-        pack.explanation.budget.included.push({ memoryId: item.memoryId, units: item.units });
+        pack.explanation.budget.included.push({ memoryId: item.memoryId, reason: item.reason, units: item.units });
         pack.explanation.budget.used += item.units;
+      } else {
+        pack.explanation.budget.omitted.push({ memoryId: item.memoryId, reason: 'budget' });
+        pack.explanation.budget.truncated = true;
       }
     }
 
@@ -156,7 +162,8 @@ function candidate(
   item: { readonly memoryId: string },
   text: string,
   mandatory: boolean,
+  reason: string,
   apply: () => void,
 ): Candidate {
-  return { memoryId: item.memoryId, units: Math.ceil(text.length / 4), mandatory, apply };
+  return { memoryId: item.memoryId, units: Math.ceil(text.length / 4), mandatory, reason, apply };
 }

@@ -128,12 +128,79 @@ describe('shared memory contracts', () => {
         structuredData: { ...policy, action: { type: 'route_tool', target: '' } },
       }).success,
     ).toBe(false);
-    expect(MemoryItemSchema.safeParse({ ...memory, kind: 'fact', structuredData: null }).success).toBe(true);
+    expect(MemoryItemSchema.safeParse({ ...memory, kind: 'fact', structuredData: null }).success).toBe(false);
     expect(
       MemoryItemSchema.safeParse({
         ...memory,
         createdAt: '12-07-2026',
       }).success,
+    ).toBe(false);
+  });
+
+  test('requires structured preference, fact, and decision payloads', () => {
+    const memory = {
+      id: ids.memory,
+      canonicalText: 'A structured memory.',
+      scope: { level: 'global' },
+      status: 'active',
+      priority: 0,
+      confidence: 1,
+      explicitness: 1,
+      createdAt: '2026-07-12T15:00:00.000Z',
+      updatedAt: '2026-07-12T15:00:00.000Z',
+    };
+
+    const preference = {
+      ...memory,
+      kind: 'preference',
+      structuredData: {
+        domain: 'design',
+        subject: 'logo',
+        dimension: 'style',
+        value: 'legible',
+        strength: 1,
+        confidence: 1,
+        contexts: ['image_generation'],
+      },
+    };
+    const fact = {
+      ...memory,
+      kind: 'fact',
+      structuredData: {
+        subject: 'logo',
+        predicate: 'source_size',
+        object: '1024px',
+        validFrom: '2026-07-12',
+        validUntil: null,
+        confidence: 1,
+      },
+    };
+    const decision = {
+      ...memory,
+      kind: 'decision',
+      structuredData: {
+        title: 'Use SVG.',
+        status: 'active',
+        rationale: ['It remains sharp at every size.'],
+      },
+    };
+
+    expect(MemoryItemSchema.safeParse(preference).success).toBe(true);
+    expect(MemoryItemSchema.safeParse(fact).success).toBe(true);
+    expect(MemoryItemSchema.safeParse(decision).success).toBe(true);
+    expect(MemoryItemSchema.safeParse({ ...preference, structuredData: null }).success).toBe(false);
+    expect(
+      MemoryItemSchema.safeParse({ ...preference, structuredData: { ...preference.structuredData, value: '' } }).success,
+    ).toBe(false);
+    expect(MemoryItemSchema.safeParse({ ...fact, structuredData: { ...fact.structuredData, object: null } }).success).toBe(
+      false,
+    );
+    expect(
+      MemoryItemSchema.safeParse({ ...fact, structuredData: { ...fact.structuredData, validFrom: '2026-99-99' } }).success,
+    ).toBe(false);
+    expect(MemoryItemSchema.safeParse({ ...decision, structuredData: null }).success).toBe(false);
+    expect(
+      MemoryItemSchema.safeParse({ ...decision, structuredData: { rationale: [] } }).success,
     ).toBe(false);
   });
 
@@ -173,6 +240,13 @@ describe('shared memory contracts', () => {
       explanation: {
         toolSelection: 'The global policy routes image generation.',
         sourceMemoryIds: [ids.memory, ids.preference, ids.fact, ids.decision],
+        budget: {
+          limit: 100,
+          used: 20,
+          included: [{ memoryId: ids.memory, reason: 'mandatory', units: 5 }],
+          omitted: [],
+          truncated: false,
+        },
       },
     };
 

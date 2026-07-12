@@ -53,6 +53,35 @@ afterEach(() => {
 });
 
 describe('MemoryStore', () => {
+  test('rejects malformed manual payloads before persistence', () => {
+    const { store } = createStore();
+    const invalid = [
+      {
+        kind: 'preference',
+        canonicalText: 'A malformed preference.',
+        structuredData: null,
+        scope: { level: 'global' },
+      },
+      {
+        kind: 'fact',
+        canonicalText: 'A malformed fact.',
+        structuredData: { subject: 'logo', predicate: 'source_size', object: null, confidence: 1 },
+        scope: { level: 'global' },
+      },
+      {
+        kind: 'decision',
+        canonicalText: 'A malformed decision.',
+        structuredData: { rationale: [] },
+        scope: { level: 'global' },
+      },
+    ];
+
+    for (const memory of invalid) {
+      expect(() => store.save(memory as never)).toThrow();
+    }
+    expect(store.list()).toEqual([]);
+  });
+
   test('saves only manual active memories, validates stored JSON, and refreshes FTS5 on update', () => {
     const { store } = createStore();
     const fact = store.save({

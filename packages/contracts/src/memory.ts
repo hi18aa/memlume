@@ -10,6 +10,14 @@ const PreservedTextSchema = z.string().refine((value) => value.trim().length > 0
 
 export const JsonValueSchema = z.json();
 export type JsonValue = z.infer<typeof JsonValueSchema>;
+const NonEmptyJsonValueSchema = JsonValueSchema.refine(
+  (value) =>
+    value !== null &&
+    (typeof value !== 'string' || value.trim().length > 0) &&
+    (!Array.isArray(value) || value.length > 0) &&
+    (Array.isArray(value) || typeof value !== 'object' || Object.keys(value).length > 0),
+  'Expected a non-empty JSON value.',
+);
 
 export const MemoryKindSchema = z.enum([
   'policy',
@@ -112,7 +120,7 @@ export const PreferenceDataSchema = z.object({
   domain: NonEmptyTextSchema,
   subject: NonEmptyTextSchema,
   dimension: NonEmptyTextSchema,
-  value: JsonValueSchema,
+  value: NonEmptyJsonValueSchema,
   strength: z.number().min(0).max(1),
   confidence: z.number().min(0).max(1),
   contexts: z.array(NonEmptyTextSchema).optional(),
@@ -122,7 +130,7 @@ export type PreferenceData = z.infer<typeof PreferenceDataSchema>;
 export const FactDataSchema = z.object({
   subject: NonEmptyTextSchema,
   predicate: NonEmptyTextSchema,
-  object: JsonValueSchema,
+  object: NonEmptyJsonValueSchema,
   validFrom: IsoDateSchema.optional(),
   validUntil: IsoDateSchema.nullable().optional(),
   confidence: z.number().min(0).max(1),
@@ -130,6 +138,8 @@ export const FactDataSchema = z.object({
 export type FactData = z.infer<typeof FactDataSchema>;
 
 export const DecisionDataSchema = z.object({
+  title: NonEmptyTextSchema,
+  status: MemoryStatusSchema,
   rationale: z.array(NonEmptyTextSchema).min(1),
   supersedes: UuidV7Schema.nullable().optional(),
 });
@@ -166,13 +176,53 @@ export const PolicyMemoryItemSchema = MemoryItemMetadataSchema.extend({
 });
 export type PolicyMemoryItem = z.infer<typeof PolicyMemoryItemSchema>;
 
-export const OtherMemoryItemSchema = MemoryItemMetadataSchema.extend({
-  kind: z.enum(['procedure', 'preference', 'fact', 'decision', 'capability']),
-  structuredData: JsonValueSchema,
+export const ProcedureMemoryItemSchema = MemoryItemMetadataSchema.extend({
+  kind: z.literal('procedure'),
+  structuredData: ProcedureDataSchema,
 });
+export type ProcedureMemoryItem = z.infer<typeof ProcedureMemoryItemSchema>;
+
+export const PreferenceMemoryItemSchema = MemoryItemMetadataSchema.extend({
+  kind: z.literal('preference'),
+  structuredData: PreferenceDataSchema,
+});
+export type PreferenceMemoryItem = z.infer<typeof PreferenceMemoryItemSchema>;
+
+export const FactMemoryItemSchema = MemoryItemMetadataSchema.extend({
+  kind: z.literal('fact'),
+  structuredData: FactDataSchema,
+});
+export type FactMemoryItem = z.infer<typeof FactMemoryItemSchema>;
+
+export const DecisionMemoryItemSchema = MemoryItemMetadataSchema.extend({
+  kind: z.literal('decision'),
+  structuredData: DecisionDataSchema,
+});
+export type DecisionMemoryItem = z.infer<typeof DecisionMemoryItemSchema>;
+
+export const CapabilityMemoryItemSchema = MemoryItemMetadataSchema.extend({
+  kind: z.literal('capability'),
+  structuredData: CapabilityDataSchema,
+});
+export type CapabilityMemoryItem = z.infer<typeof CapabilityMemoryItemSchema>;
+
+export const OtherMemoryItemSchema = z.discriminatedUnion('kind', [
+  ProcedureMemoryItemSchema,
+  PreferenceMemoryItemSchema,
+  FactMemoryItemSchema,
+  DecisionMemoryItemSchema,
+  CapabilityMemoryItemSchema,
+]);
 export type OtherMemoryItem = z.infer<typeof OtherMemoryItemSchema>;
 
-export const MemoryItemSchema = z.discriminatedUnion('kind', [PolicyMemoryItemSchema, OtherMemoryItemSchema]);
+export const MemoryItemSchema = z.discriminatedUnion('kind', [
+  PolicyMemoryItemSchema,
+  ProcedureMemoryItemSchema,
+  PreferenceMemoryItemSchema,
+  FactMemoryItemSchema,
+  DecisionMemoryItemSchema,
+  CapabilityMemoryItemSchema,
+]);
 export type MemoryItem = z.infer<typeof MemoryItemSchema>;
 
 export const EventSourceSchema = z
@@ -231,16 +281,28 @@ export const ContextDecisionSchema = z.object({
 });
 export type ContextDecision = z.infer<typeof ContextDecisionSchema>;
 
+export const ContextBudgetInclusionSchema = z.object({
+  memoryId: UuidV7Schema,
+  reason: NonEmptyTextSchema,
+  units: z.number().int().positive(),
+});
+export const ContextBudgetOmissionSchema = z.object({
+  memoryId: UuidV7Schema,
+  reason: z.literal('budget'),
+});
+export const ContextBudgetSchema = z.object({
+  limit: z.number().int().nonnegative(),
+  used: z.number().int().nonnegative(),
+  included: z.array(ContextBudgetInclusionSchema),
+  omitted: z.array(ContextBudgetOmissionSchema),
+  truncated: z.boolean(),
+});
+export type ContextBudget = z.infer<typeof ContextBudgetSchema>;
+
 export const ContextPackExplanationSchema = z.object({
   toolSelection: NonEmptyTextSchema.optional(),
   sourceMemoryIds: z.array(UuidV7Schema),
-  budget: z
-    .object({
-      limit: z.number().int().nonnegative(),
-      used: z.number().int().nonnegative(),
-      included: z.array(z.object({ memoryId: UuidV7Schema, units: z.number().int().positive() })),
-    })
-    .optional(),
+  budget: ContextBudgetSchema,
 });
 export type ContextPackExplanation = z.infer<typeof ContextPackExplanationSchema>;
 
