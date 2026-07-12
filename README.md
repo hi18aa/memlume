@@ -180,4 +180,4 @@ Keep changes small, add or update the nearest Vitest coverage for non-trivial be
 
 ## License
 
-No `LICENSE` file has been selected or committed yet. Do not treat this source as open source or redistribute it until the project maintainers choose and publish a license.
+Memlume is released under the [MIT License](LICENSE).

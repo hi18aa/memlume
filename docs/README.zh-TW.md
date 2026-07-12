@@ -180,4 +180,4 @@ pnpm build
 
 ## 授權
 
-目前尚未選定或提交 `LICENSE` 檔案。在專案維護者選定並發布授權前，請勿把此原始碼視為 open source 或重新散布。
+Memlume 採用 [MIT License](../LICENSE) 授權。

@@ -180,4 +180,4 @@ pnpm build
 
 ## 许可
 
-目前尚未选定或提交 `LICENSE` 文件。在项目维护者选定并发布许可之前，请勿把此源码视为 open source 或重新分发。
+Memlume 采用 [MIT License](../LICENSE) 许可。
