@@ -334,6 +334,39 @@ describe('ContextResolver', () => {
     expect(pack.explanation.exclusions).toEqual([{ memoryId: global.id, reason: 'exclusive_conflict' }]);
   });
 
+  test('prioritizes a project route over a global exclusive route and explains the winner', () => {
+    const { store, resolver } = createResolver();
+    const global = store.save({
+      kind: 'policy',
+      canonicalText: 'Use the global route even when a project route is more specific.',
+      structuredData: policy('global-image-route', { exclusive: true }),
+      scope: { level: 'global' },
+      priority: 999,
+    });
+    const project = store.save({
+      kind: 'policy',
+      canonicalText: 'Use the project route, whose long text exceeds the tiny budget.',
+      structuredData: policy('project-image-route'),
+      scope: { level: 'project', projectId: 'memlume' },
+      priority: 1,
+    });
+
+    const pack = resolver.resolve({
+      intent: 'image_generation',
+      scope: { level: 'project', projectId: 'memlume' },
+      task: null,
+      contextBudget: 1,
+    });
+
+    expect(pack.directives).toEqual([
+      expect.objectContaining({ memoryId: project.id, actionTarget: 'project-image-route', mandatory: true }),
+    ]);
+    expect(pack.explanation.exclusions).toEqual([{ memoryId: global.id, reason: 'exclusive_conflict' }]);
+    expect(pack.explanation.toolSelection).toContain('project-image-route');
+    expect(pack.explanation.toolSelection).toContain(project.id);
+    expect(pack.explanation.toolSelection).toContain('scope_then_priority');
+  });
+
   test('excludes inactive and scope-mismatched memories', () => {
     const { database, store, resolver } = createResolver();
     const inactive = store.save({
@@ -415,6 +448,7 @@ describe('ContextResolver', () => {
       canonicalText: 'Always use the required image route before any optional advice.',
       structuredData: policy('required-image-route', { exclusive: true }),
       scope: { level: 'global' },
+      priority: 1,
     });
     store.save({
       kind: 'policy',

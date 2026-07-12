@@ -73,20 +73,20 @@ export class ContextResolver {
       .filter((memory) => memory.kind === 'policy')
       .map((memory) => ({ memory, data: PolicyDataSchema.parse(memory.structuredData) }))
       .filter((policy) => matchesTrigger(policy.data.trigger, triggerContext));
-    const exclusiveRoute = policies.find(
-      (policy) => policy.data.constraints.exclusive === true && policy.data.action.type === 'route_tool',
-    );
-    const exclusions = exclusiveRoute === undefined
+    const routePolicies = policies
+      .filter((policy) => policy.data.action.type === 'route_tool')
+      .sort((left, right) => compareMemorySpecificity(left.memory, right.memory));
+    const routeWinner = routePolicies[0];
+    const requiresSingleRoute = routePolicies.some((policy) => policy.data.constraints.exclusive === true);
+    const exclusions = !requiresSingleRoute || routeWinner === undefined
       ? []
-      : policies.filter((policy) =>
-          policy.memory.id !== exclusiveRoute.memory.id &&
-          policy.data.action.type === 'route_tool' &&
-          policy.data.action.target !== exclusiveRoute.data.action.target,
+      : routePolicies.filter((policy) =>
+          policy.memory.id !== routeWinner.memory.id && policy.data.action.target !== routeWinner.data.action.target,
         );
     const excludedPolicyIds = new Set(exclusions.map((policy) => policy.memory.id));
     const directives = policies
       .filter((policy) => !excludedPolicyIds.has(policy.memory.id))
-      .map(toDirective);
+      .map((policy) => toDirective(policy, requiresSingleRoute && policy.memory.id === routeWinner?.memory.id));
     const procedures = applicable
       .filter((memory) => memory.kind === 'procedure')
       .map((memory) => toProcedure(memory, triggerContext))
@@ -111,6 +111,10 @@ export class ContextResolver {
       knowledge: [] as ContextKnowledge[],
       decisions: [] as ContextDecision[],
       explanation: {
+        toolSelection:
+          routeWinner === undefined
+            ? undefined
+            : `Route winner ${routeWinner.data.action.target} from memory ${routeWinner.memory.id} by scope_then_priority.`,
         sourceMemoryIds: [] as string[],
         exclusions: exclusions.map((policy) => ({ memoryId: policy.memory.id, reason: 'exclusive_conflict' as const })),
         budget: {
@@ -169,7 +173,7 @@ function findFacts(store: MemoryStore, task: string | null, scope: MemoryScope, 
     .map(toKnowledge);
 }
 
-function toDirective(policy: ApplicablePolicy): ContextDirective {
+function toDirective(policy: ApplicablePolicy, forceMandatory = false): ContextDirective {
   const { memory, data } = policy;
   return {
     memoryId: memory.id,
@@ -177,7 +181,7 @@ function toDirective(policy: ApplicablePolicy): ContextDirective {
     text: memory.canonicalText,
     actionTarget: data.action.target,
     priority: memory.priority,
-    mandatory: data.constraints.required === true || data.constraints.exclusive === true,
+    mandatory: forceMandatory || data.constraints.required === true || data.constraints.exclusive === true,
   };
 }
 
