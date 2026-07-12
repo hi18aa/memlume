@@ -83,6 +83,7 @@ describe('SQLite migration', () => {
     expect(upgraded.prepare('SELECT id FROM schema_migrations ORDER BY id').all()).toEqual([
       { id: '001_initial' },
       { id: '002_event_reference_dedup' },
+      { id: '003_shared_brains' },
     ]);
 
     upgraded.exec(`
@@ -98,6 +99,7 @@ describe('SQLite migration', () => {
     expect(legacyUpgrade.prepare('SELECT id FROM schema_migrations ORDER BY id').all()).toEqual([
       { id: '001_initial' },
       { id: '002_event_reference_dedup' },
+      { id: '003_shared_brains' },
     ]);
     expect(
       legacyUpgrade
