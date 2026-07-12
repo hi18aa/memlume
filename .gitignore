@@ -9,3 +9,8 @@ data/
 *.sqlite
 *.sqlite-*
 *.log
+
+# Local development context
+AGENTS.md
+docs/Memlume_AI_Brain_Project_Spec.md
+docs/plans/
