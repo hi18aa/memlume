@@ -12,12 +12,34 @@ importers:
         specifier: ^7.0.2
         version: 7.0.2
 
+  packages/context-resolver:
+    dependencies:
+      '@memlume/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@memlume/retrieval':
+        specifier: workspace:*
+        version: link:../retrieval
+    devDependencies:
+      '@memlume/database':
+        specifier: workspace:*
+        version: link:../database
+      '@types/node':
+        specifier: ^24.10.1
+        version: 24.13.3
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@24.13.3)(vite@8.1.4(@types/node@24.13.3))
+
   packages/contracts:
     dependencies:
       zod:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
+      '@types/node':
+        specifier: ^24.10.1
+        version: 24.13.3
       vitest:
         specifier: ^4.1.10
         version: 4.1.10(@types/node@24.13.3)(vite@8.1.4(@types/node@24.13.3))
@@ -36,6 +58,22 @@ importers:
         version: 24.13.3
 
   packages/event-journal:
+    dependencies:
+      '@memlume/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@memlume/database':
+        specifier: workspace:*
+        version: link:../database
+    devDependencies:
+      '@types/node':
+        specifier: ^24.10.1
+        version: 24.13.3
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@24.13.3)(vite@8.1.4(@types/node@24.13.3))
+
+  packages/retrieval:
     dependencies:
       '@memlume/contracts':
         specifier: workspace:*

@@ -234,6 +234,13 @@ export type ContextDecision = z.infer<typeof ContextDecisionSchema>;
 export const ContextPackExplanationSchema = z.object({
   toolSelection: NonEmptyTextSchema.optional(),
   sourceMemoryIds: z.array(UuidV7Schema),
+  budget: z
+    .object({
+      limit: z.number().int().nonnegative(),
+      used: z.number().int().nonnegative(),
+      included: z.array(z.object({ memoryId: UuidV7Schema, units: z.number().int().positive() })),
+    })
+    .optional(),
 });
 export type ContextPackExplanation = z.infer<typeof ContextPackExplanationSchema>;
 
