@@ -70,6 +70,31 @@ describe('Memlume MCP server', () => {
     await server.close();
   });
 
+  test('exposes the remember object schema to MCP clients', async () => {
+    const { client, server } = await connect();
+    const { tools } = await client.listTools();
+    const remember = tools.find((tool) => tool.name === 'memlume.remember');
+    const inputSchema = remember?.inputSchema as {
+      readonly additionalProperties?: boolean;
+      readonly properties?: Record<string, unknown>;
+      readonly required?: readonly string[];
+      readonly type?: string;
+    };
+
+    expect(inputSchema).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      required: expect.arrayContaining(['canonicalText', 'scope', 'kind', 'structuredData']),
+    });
+    expect(inputSchema.properties).toEqual(expect.objectContaining({
+      canonicalText: expect.anything(),
+      scope: expect.anything(),
+      kind: expect.objectContaining({ enum: expect.arrayContaining(['policy', 'preference', 'fact', 'decision']) }),
+      structuredData: expect.objectContaining({ anyOf: expect.any(Array) }),
+    }));
+    await server.close();
+  });
+
   test('resolve_context posts its arguments and returns the daemon JSON as structured content', async () => {
     const { client, server } = await connect();
     const body = { context: { traceId: 'trace-1', directives: [] } };
@@ -126,6 +151,24 @@ describe('Memlume MCP server', () => {
         body: { rawContent: 'Use SQLite.', eventType: 'decision', source: { type: 'mcp', agent: 'test' } },
       },
     ]);
+    await server.close();
+  });
+
+  test('does not forward a remember request whose data does not match its kind', async () => {
+    const { client, server } = await connect();
+
+    await expect(
+      client.callTool({
+        name: 'memlume.remember',
+        arguments: {
+          kind: 'policy',
+          canonicalText: 'SQLite is local.',
+          scope: { level: 'global' },
+          structuredData: { subject: 'SQLite', predicate: 'is', object: 'local', confidence: 1 },
+        },
+      }),
+    ).resolves.toMatchObject({ isError: true });
+    expect(requests).toEqual([]);
     await server.close();
   });
 

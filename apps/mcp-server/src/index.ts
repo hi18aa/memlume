@@ -61,6 +61,13 @@ const RememberSchema = z.discriminatedUnion('kind', [
   MemoryRequestBaseSchema.extend({ kind: z.literal('decision'), structuredData: DecisionDataSchema }),
 ]);
 
+const RememberInputSchema = MemoryRequestBaseSchema.extend({
+  kind: z.enum(['policy', 'preference', 'fact', 'decision']).describe('Memory kind.'),
+  structuredData: z
+    .union([PolicyDataSchema, PreferenceDataSchema, FactDataSchema, DecisionDataSchema])
+    .describe('Data for the selected memory kind.'),
+}).strict();
+
 const SearchSchema = z
   .object({
     query: NonEmptyTextSchema.refine((value) => /[\p{L}\p{N}_]/u.test(value), 'Expected searchable text.').describe('Memory search query.'),
@@ -103,9 +110,15 @@ export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL }: McpServerOpt
     {
       title: 'Save Memlume memory',
       description: 'Save a policy, preference, fact, or decision through the local Memlume daemon.',
-      inputSchema: RememberSchema,
+      inputSchema: RememberInputSchema,
     },
-    async (input) => daemonTool(safeDaemonUrl, '/v1/memories', 'POST', input),
+    async (input) => {
+      const parsed = RememberSchema.safeParse(input);
+      if (!parsed.success) {
+        return { content: [{ type: 'text', text: 'Invalid remember request.' }], isError: true };
+      }
+      return daemonTool(safeDaemonUrl, '/v1/memories', 'POST', parsed.data);
+    },
   );
 
   server.registerTool(
