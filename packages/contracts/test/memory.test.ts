@@ -15,6 +15,7 @@ const ids = {
   preference: '018f9d4e-7c2c-7b91-8dc0-61749dbcc01e',
   fact: '018f9d4e-7c2d-7b91-8dc0-61749dbcc01e',
   decision: '018f9d4e-7c2e-7b91-8dc0-61749dbcc01e',
+  trace: '018f9d4e-7c2f-7b91-8dc0-61749dbcc01e',
 } as const;
 
 const policy = {
@@ -36,16 +37,33 @@ describe('shared memory contracts', () => {
 
     expect(
       MemoryScopeSchema.parse({
-        level: 'project',
+        level: 'task',
         domain: 'development',
         agentId: 'codex',
         workspace: 'C:/work/memlume',
         projectId: 'memlume',
         taskId: 'task-3',
       }),
-    ).toMatchObject({ level: 'project', projectId: 'memlume' });
+    ).toMatchObject({ level: 'task', taskId: 'task-3' });
 
     expect(MemoryScopeSchema.safeParse({ level: 'organization' }).success).toBe(false);
+  });
+
+  test('requires a matching scope identifier and rejects more-specific identifiers', () => {
+    expect(MemoryScopeSchema.safeParse({ level: 'global' }).success).toBe(true);
+    expect(MemoryScopeSchema.safeParse({ level: 'domain', domain: 'development' }).success).toBe(true);
+    expect(MemoryScopeSchema.safeParse({ level: 'agent', domain: 'development', agentId: 'codex' }).success).toBe(
+      true,
+    );
+    expect(MemoryScopeSchema.safeParse({ level: 'global', domain: 'development' }).success).toBe(false);
+    expect(MemoryScopeSchema.safeParse({ level: 'domain' }).success).toBe(false);
+    expect(MemoryScopeSchema.safeParse({ level: 'agent' }).success).toBe(false);
+    expect(MemoryScopeSchema.safeParse({ level: 'workspace' }).success).toBe(false);
+    expect(MemoryScopeSchema.safeParse({ level: 'project' }).success).toBe(false);
+    expect(MemoryScopeSchema.safeParse({ level: 'task' }).success).toBe(false);
+    expect(
+      MemoryScopeSchema.safeParse({ level: 'project', projectId: 'memlume', taskId: 'task-3' }).success,
+    ).toBe(false);
   });
 
   test('requires a policy intent and valid non-empty action target', () => {
@@ -91,6 +109,26 @@ describe('shared memory contracts', () => {
     expect(MemoryItemSchema.safeParse({ ...memory, canonicalText: '   ' }).success).toBe(false);
     expect(MemoryItemSchema.safeParse({ ...memory, confidence: 1.1 }).success).toBe(false);
     expect(MemoryItemSchema.safeParse({ ...memory, priority: 1.5 }).success).toBe(false);
+    expect(MemoryItemSchema.safeParse({ ...memory, structuredData: null }).success).toBe(false);
+    expect(
+      MemoryItemSchema.safeParse({
+        ...memory,
+        structuredData: { ...policy, action: undefined },
+      }).success,
+    ).toBe(false);
+    expect(
+      MemoryItemSchema.safeParse({
+        ...memory,
+        structuredData: { ...policy, trigger: undefined },
+      }).success,
+    ).toBe(false);
+    expect(
+      MemoryItemSchema.safeParse({
+        ...memory,
+        structuredData: { ...policy, action: { type: 'route_tool', target: '' } },
+      }).success,
+    ).toBe(false);
+    expect(MemoryItemSchema.safeParse({ ...memory, kind: 'fact', structuredData: null }).success).toBe(true);
     expect(
       MemoryItemSchema.safeParse({
         ...memory,
@@ -117,6 +155,7 @@ describe('shared memory contracts', () => {
 
   test('requires a traceable context pack with complete directives', () => {
     const pack = {
+      traceId: ids.trace,
       intent: 'image_generation',
       scope: { level: 'project', projectId: 'memlume' },
       directives: [
@@ -138,6 +177,9 @@ describe('shared memory contracts', () => {
     };
 
     expect(ContextPackSchema.safeParse(pack).success).toBe(true);
+    const { traceId: _, ...untracedPack } = pack;
+    expect(ContextPackSchema.safeParse(untracedPack).success).toBe(false);
+    expect(ContextPackSchema.safeParse({ ...pack, traceId: 'trace-1' }).success).toBe(false);
     expect(
       ContextPackSchema.safeParse({
         ...pack,

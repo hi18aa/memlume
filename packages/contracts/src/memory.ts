@@ -31,14 +31,44 @@ export const MemoryStatusSchema = z.enum([
 ]);
 export type MemoryStatus = z.infer<typeof MemoryStatusSchema>;
 
-export const MemoryScopeSchema = z.object({
-  level: z.enum(['global', 'domain', 'agent', 'workspace', 'project', 'task']),
-  domain: NonEmptyTextSchema.optional(),
-  agentId: NonEmptyTextSchema.optional(),
-  workspace: NonEmptyTextSchema.optional(),
-  projectId: NonEmptyTextSchema.optional(),
-  taskId: NonEmptyTextSchema.optional(),
-});
+export const MemoryScopeSchema = z.discriminatedUnion('level', [
+  z.object({ level: z.literal('global') }).strict(),
+  z.object({ level: z.literal('domain'), domain: NonEmptyTextSchema }).strict(),
+  z
+    .object({
+      level: z.literal('agent'),
+      domain: NonEmptyTextSchema.optional(),
+      agentId: NonEmptyTextSchema,
+    })
+    .strict(),
+  z
+    .object({
+      level: z.literal('workspace'),
+      domain: NonEmptyTextSchema.optional(),
+      agentId: NonEmptyTextSchema.optional(),
+      workspace: NonEmptyTextSchema,
+    })
+    .strict(),
+  z
+    .object({
+      level: z.literal('project'),
+      domain: NonEmptyTextSchema.optional(),
+      agentId: NonEmptyTextSchema.optional(),
+      workspace: NonEmptyTextSchema.optional(),
+      projectId: NonEmptyTextSchema,
+    })
+    .strict(),
+  z
+    .object({
+      level: z.literal('task'),
+      domain: NonEmptyTextSchema.optional(),
+      agentId: NonEmptyTextSchema.optional(),
+      workspace: NonEmptyTextSchema.optional(),
+      projectId: NonEmptyTextSchema.optional(),
+      taskId: NonEmptyTextSchema,
+    })
+    .strict(),
+]);
 export type MemoryScope = z.infer<typeof MemoryScopeSchema>;
 
 export const PolicyTriggerSchema = z.object({
@@ -114,12 +144,10 @@ export const CapabilityDataSchema = z.object({
 });
 export type CapabilityData = z.infer<typeof CapabilityDataSchema>;
 
-export const MemoryItemSchema = z.object({
+const MemoryItemMetadataSchema = z.object({
   id: UuidV7Schema,
-  kind: MemoryKindSchema,
   title: NonEmptyTextSchema.optional(),
   canonicalText: NonEmptyTextSchema,
-  structuredData: JsonValueSchema,
   scope: MemoryScopeSchema,
   status: MemoryStatusSchema,
   priority: z.number().int(),
@@ -132,6 +160,19 @@ export const MemoryItemSchema = z.object({
   updatedAt: IsoUtcDateTimeSchema,
   supersededBy: UuidV7Schema.optional(),
 });
+export const PolicyMemoryItemSchema = MemoryItemMetadataSchema.extend({
+  kind: z.literal('policy'),
+  structuredData: PolicyDataSchema,
+});
+export type PolicyMemoryItem = z.infer<typeof PolicyMemoryItemSchema>;
+
+export const OtherMemoryItemSchema = MemoryItemMetadataSchema.extend({
+  kind: z.enum(['procedure', 'preference', 'fact', 'decision', 'capability']),
+  structuredData: JsonValueSchema,
+});
+export type OtherMemoryItem = z.infer<typeof OtherMemoryItemSchema>;
+
+export const MemoryItemSchema = z.discriminatedUnion('kind', [PolicyMemoryItemSchema, OtherMemoryItemSchema]);
 export type MemoryItem = z.infer<typeof MemoryItemSchema>;
 
 export const EventSourceSchema = z
@@ -197,6 +238,7 @@ export const ContextPackExplanationSchema = z.object({
 export type ContextPackExplanation = z.infer<typeof ContextPackExplanationSchema>;
 
 export const ContextPackSchema = z.object({
+  traceId: UuidV7Schema,
   intent: NonEmptyTextSchema,
   scope: MemoryScopeSchema,
   directives: z.array(ContextDirectiveSchema),
