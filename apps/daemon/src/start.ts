@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+
 import { startDaemon, type RunningDaemon } from './server.js';
 
 export type { RunningDaemon } from './server.js';
@@ -63,7 +66,12 @@ export function parseStartOptions(args: readonly string[]): StartOptions {
 }
 
 export function startFromArgs(args: readonly string[]): Promise<RunningDaemon> {
-  return startDaemon(parseStartOptions(args));
+  const options = parseStartOptions(args);
+  const parentDirectory = dirname(options.databasePath);
+  if (parentDirectory !== '.') {
+    mkdirSync(parentDirectory, { recursive: true });
+  }
+  return startDaemon(options);
 }
 
 export async function main(args: readonly string[], io: Io = defaultIo): Promise<number> {
@@ -83,8 +91,9 @@ export async function main(args: readonly string[], io: Io = defaultIo): Promise
     return 1;
   }
 
+  const stopping = stopOnSignal(daemon);
   io.stderr(`Memlume daemon listening on http://${daemon.address.address}:${daemon.address.port}\n`);
-  await stopOnSignal(daemon);
+  await stopping;
   return 0;
 }
 
