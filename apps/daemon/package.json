@@ -9,9 +9,10 @@
   "types": "./dist/index.d.ts",
   "files": ["dist"],
   "scripts": {
-    "build": "pnpm --filter @memlume/context-resolver build && tsc -p tsconfig.json",
-    "test": "pnpm --filter @memlume/context-resolver build && vitest run",
-    "typecheck": "pnpm --filter @memlume/context-resolver build && tsc -p tsconfig.json --noEmit"
+    "build:dependencies": "pnpm --filter=@memlume/daemon... --filter=!@memlume/daemon --if-present run build",
+    "build": "pnpm run build:dependencies && tsc -p tsconfig.json",
+    "test": "pnpm run build:dependencies && vitest run",
+    "typecheck": "pnpm run build:dependencies && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@memlume/contracts": "workspace:*",

@@ -99,7 +99,7 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
 }
 
 const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
-  if (error instanceof ZodError || isMalformedJson(error)) {
+  if (isInvalidRequestError(error)) {
     response.status(400).json({ error: 'invalid_request' });
     return;
   }
@@ -107,6 +107,18 @@ const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => 
   response.status(500).json({ error: 'internal_error' });
 };
 
-function isMalformedJson(error: unknown): boolean {
-  return error instanceof SyntaxError && (error as SyntaxError & { status?: unknown }).status === 400;
+function isInvalidRequestError(error: unknown): boolean {
+  if (error instanceof ZodError) {
+    return true;
+  }
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+
+  const { code, status, type } = error as { readonly code?: unknown; readonly status?: unknown; readonly type?: unknown };
+  return (
+    code === 'SQLITE_CONSTRAINT_FOREIGNKEY' ||
+    (error instanceof SyntaxError && status === 400) ||
+    (status === 413 && type === 'entity.too.large')
+  );
 }

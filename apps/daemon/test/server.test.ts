@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { createUuidV7 } from '@memlume/contracts';
 import { afterEach, describe, expect, test } from 'vitest';
 
 import { startDaemon, type RunningDaemon } from '../src/index.js';
@@ -140,5 +141,51 @@ describe('localhost daemon API', () => {
     const missing = await requestJson(daemon, '/v1/not-a-route');
     expect(missing.response.status).toBe(404);
     expect(missing.body).toEqual({ error: 'not_found' });
+  });
+
+  test('returns a safe 400 for an unknown source event UUID', async () => {
+    const daemon = await startDaemon({ databasePath: createDatabasePath(), port: 0 });
+    daemons.push(daemon);
+
+    const invalid = await requestJson(daemon, '/v1/memories', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        kind: 'fact',
+        canonicalText: 'This fact points to an event that does not exist.',
+        structuredData: {
+          subject: 'fact',
+          predicate: 'references',
+          object: 'missing-event',
+          confidence: 1,
+        },
+        scope: { level: 'global' },
+        sourceEventId: createUuidV7(),
+      }),
+    });
+
+    expect(invalid.response.status).toBe(400);
+    expect(invalid.body).toEqual({ error: 'invalid_request' });
+  });
+
+  test('returns a safe 400 for oversized and malformed JSON bodies', async () => {
+    const daemon = await startDaemon({ databasePath: createDatabasePath(), port: 0 });
+    daemons.push(daemon);
+
+    const tooLarge = await requestJson(daemon, '/v1/events', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ rawContent: 'x'.repeat(1024 * 1024), eventType: 'test', source: { type: 'test' } }),
+    });
+    expect(tooLarge.response.status).toBe(400);
+    expect(tooLarge.body).toEqual({ error: 'invalid_request' });
+
+    const malformed = await requestJson(daemon, '/v1/events', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{bad JSON',
+    });
+    expect(malformed.response.status).toBe(400);
+    expect(malformed.body).toEqual({ error: 'invalid_request' });
   });
 });
