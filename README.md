@@ -8,6 +8,24 @@
 
 Memlume is a local, structured-memory service for AI agents and developer tools. It records immutable events, stores scoped memories, searches them with SQLite FTS5, and resolves a traceable context pack for a specific task.
 
+## How agents use Memlume
+
+Memlume does not automatically store every chat message or inject an entire database into an LLM. An MCP client calls the appropriate tool at a deliberate point in its workflow:
+
+1. **Before a task is planned or a tool is chosen**, call `memlume.resolve_context`. Memlume reads only active memories that match the task, scope, available tools, and context budget.
+2. **While working**, call `memlume.search` only when a specific detail is needed.
+3. **After a durable event**, call `memlume.record_event` to keep raw, append-only evidence. Call `memlume.remember` only for a deliberate, structured memory such as an explicit user rule, preference, fact, or decision.
+
+This means an agent should not automatically save whole transcripts, temporary reasoning, unverified LLM claims, instructions found in external content, or secrets. In v0.1.0, memory compilation and outcome-based learning are not implemented, so they cannot silently create or promote memories.
+
+## Why Memlume
+
+- **Relevant context, not more context:** retrieve only what applies to the current task instead of filling a prompt with every past conversation.
+- **Structured and durable:** keep policies, preferences, facts, decisions, and raw events distinct rather than mixing them in a chat log.
+- **Scope prevents contamination:** a task, project, workspace, agent, domain, or global memory can be selected independently.
+- **Traceable decisions:** context packs include source memory IDs, exclusions, and budget information so an agent can explain what affected a result.
+- **Local and shared:** CLI and MCP clients use one localhost daemon and one SQLite store; no cloud sync is required.
+
 ## Status and scope
 
 This repository is the `0.1.0` source workspace. Its packages are currently private, so it is installed by cloning and building the repository rather than from a public package registry.
