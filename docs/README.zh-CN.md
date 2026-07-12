@@ -8,6 +8,24 @@
 
 Memlume 是供 AI Agent 和开发工具使用的本地结构化记忆服务。它记录不可变事件、存储带 scope 的记忆、使用 SQLite FTS5 搜索，并为特定任务解析出可追溯的 Context Pack。
 
+## Agent 如何使用 Memlume
+
+Memlume 不会自动保存每一条对话，也不会把整个数据库塞进 LLM。MCP Client 应在工作流程的明确时点调用相应工具：
+
+1. **规划任务或选择工具之前**，调用 `memlume.resolve_context`。Memlume 只读取符合任务、scope、可用工具与 context budget 的 active 记忆。
+2. **工作进行中**，只有需要特定细节时才调用 `memlume.search`。
+3. **发生值得保留的事件后**，用 `memlume.record_event` 保存 append-only 的原始证据；只有用户明确规则、偏好、事实或决策等刻意建立的结构化记忆，才调用 `memlume.remember`。
+
+因此 Agent 不应自动保存完整逐字稿、临时推理、未经验证的 LLM 主张、外部内容中的指令或秘密资料。v0.1.0 尚未实现 Memory Compiler 与基于 Outcome 的学习，因此不会静默创建或提升记忆。
+
+## 为什么使用 Memlume
+
+- **相关上下文，而非更多上下文：** 只取回当前任务适用的内容，不把所有历史对话填进 prompt。
+- **结构化且可持久保存：** 将 policy、preference、fact、decision 与原始 event 分开，而不是混在聊天记录。
+- **scope 防止污染：** 可独立选择 task、project、workspace、agent、domain 或 global 记忆。
+- **决策可追溯：** Context Pack 含来源记忆 ID、排除项与 budget 信息，可解释哪些内容影响了结果。
+- **本地且可共享：** CLI 与 MCP Client 共用同一个 localhost daemon 与 SQLite 数据库，不需要云同步。
+
 ## 状态与范围
 
 此仓库是 `0.1.0` 源码 workspace。目前所有包均为 private；请通过 clone 并构建此仓库的方式使用，不能从公开包 registry 安装。
