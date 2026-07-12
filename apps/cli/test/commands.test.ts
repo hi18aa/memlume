@@ -15,10 +15,14 @@ let server: Server;
 let url: string;
 let response: { readonly status: number; readonly body: unknown };
 let requests: RecordedRequest[];
+let rawResponse: string | undefined;
+let hangResponse: boolean;
 
 beforeEach(async () => {
   requests = [];
   response = { status: 200, body: {} };
+  rawResponse = undefined;
+  hangResponse = false;
   server = createServer(async (request, reply) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) {
@@ -30,14 +34,18 @@ beforeEach(async () => {
       url: request.url ?? '',
       body: text === '' ? undefined : JSON.parse(text),
     });
+    if (hangResponse) {
+      return;
+    }
     reply.writeHead(response.status, { 'content-type': 'application/json' });
-    reply.end(JSON.stringify(response.body));
+    reply.end(rawResponse ?? JSON.stringify(response.body));
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 
 afterEach(async () => {
+  server.closeAllConnections();
   await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 });
 
@@ -178,5 +186,72 @@ describe('memlume CLI', () => {
     const result = await run(['--url', url, 'search', 'SQLite']);
 
     expect(result).toEqual({ code: 1, stdout: '', stderr: 'Error: daemon returned 400: invalid_request.\n' });
+  });
+
+  test('returns a nonzero timeout error when the daemon does not respond', async () => {
+    hangResponse = true;
+
+    const result = await run(['--url', url, 'search', 'SQLite']);
+
+    expect(result).toEqual({ code: 1, stdout: '', stderr: 'Error: daemon request timed out.\n' });
+  }, 15_000);
+
+  test('rejects a successful daemon response with an invalid JSON body', async () => {
+    rawResponse = 'not JSON';
+
+    const result = await run(['--url', url, '--json', 'search', 'SQLite']);
+
+    expect(result).toEqual({ code: 1, stdout: '', stderr: 'Error: daemon returned an invalid response.\n' });
+  });
+
+  test('rejects unsafe daemon URLs without leaking them or making a request', async () => {
+    for (const unsafeUrl of [
+      url.replace('http:', 'https:'),
+      'http://localhost:3849',
+      url.replace('http://', 'http://alice:top-secret@'),
+      `${url}/other`,
+      `${url}/?q=secret`,
+      `${url}/#fragment`,
+      'not a URL',
+    ]) {
+      const result = await run(['--url', unsafeUrl, 'search', 'SQLite']);
+
+      expect(result).toEqual({
+        code: 1,
+        stdout: '',
+        stderr: 'Error: daemon URL must be an http://127.0.0.1 or http://[::1] origin.\n',
+      });
+      expect(result.stderr).not.toContain('top-secret');
+    }
+    expect(requests).toEqual([]);
+  });
+
+  test('rejects a blank integer option before making a daemon request', async () => {
+    const result = await run(['--url', url, 'context', 'resolve', '--intent', 'image_generation', '--budget', '']);
+
+    expect(result).toEqual({ code: 1, stdout: '', stderr: 'Error: --budget must be an integer.\n' });
+    expect(requests).toEqual([]);
+  });
+
+  test('rejects a blank unit-number option before making a daemon request', async () => {
+    const result = await run([
+      '--url',
+      url,
+      'remember',
+      'SQLite is local.',
+      '--kind',
+      'fact',
+      '--subject',
+      'Memlume',
+      '--predicate',
+      'uses',
+      '--object',
+      'SQLite',
+      '--confidence',
+      '',
+    ]);
+
+    expect(result).toEqual({ code: 1, stdout: '', stderr: 'Error: --confidence must be a number from 0 to 1.\n' });
+    expect(requests).toEqual([]);
   });
 });

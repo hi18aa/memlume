@@ -3,6 +3,9 @@ import { Command, CommanderError } from 'commander';
 
 type Writer = (text: string) => void;
 
+const REQUEST_TIMEOUT_MS = 10_000;
+const DAEMON_URL_ERROR = 'daemon URL must be an http://127.0.0.1 or http://[::1] origin.';
+
 interface Io {
   readonly stdout: Writer;
   readonly stderr: Writer;
@@ -32,8 +35,8 @@ class DaemonResponseError extends Error {
 }
 
 class DaemonConnectionError extends Error {
-  constructor(url: string) {
-    super(`unable to reach daemon at ${url}.`);
+  constructor() {
+    super('unable to reach daemon.');
   }
 }
 
@@ -330,6 +333,9 @@ function nonNegativeInteger(value: string, option: string): number {
 }
 
 function integer(value: string, option: string): number {
+  if (value.trim() === '') {
+    throw new Error(`${option} must be an integer.`);
+  }
   const parsed = Number(value);
   if (!Number.isInteger(parsed)) {
     throw new Error(`${option} must be an integer.`);
@@ -342,6 +348,9 @@ function optionalUnitNumber(value: string | undefined, option: string): number |
 }
 
 function unitNumber(value: string | undefined, option: string): number {
+  if (value === undefined || value.trim() === '') {
+    throw new Error(`${option} must be a number from 0 to 1.`);
+  }
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
     throw new Error(`${option} must be a number from 0 to 1.`);
@@ -350,25 +359,63 @@ function unitNumber(value: string | undefined, option: string): number {
 }
 
 async function request(url: string, path: string, method: 'GET' | 'POST', body?: unknown): Promise<unknown> {
-  const endpoint = `${url.replace(/\/+$/, '')}${path}`;
+  const endpoint = daemonEndpoint(url, path);
   let response: Response;
   try {
-    response = await fetch(endpoint, body === undefined ? { method } : { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  } catch {
-    throw new DaemonConnectionError(url);
+    response = await fetch(endpoint, {
+      method,
+      ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (isTimeoutError(error)) {
+      throw new Error('daemon request timed out.');
+    }
+    throw new DaemonConnectionError();
+  }
+
+  if (response.ok) {
+    try {
+      return await response.json();
+    } catch {
+      throw new Error('daemon returned an invalid response.');
+    }
   }
 
   let result: unknown;
   try {
     result = await response.json();
   } catch {
-    result = { error: 'invalid_response' };
+    result = undefined;
+  }
+  throw new DaemonResponseError(response.status, daemonErrorCode(result));
+}
+
+function daemonEndpoint(value: string, path: string): URL {
+  let daemonUrl: URL;
+  try {
+    daemonUrl = new URL(value);
+  } catch {
+    throw new Error(DAEMON_URL_ERROR);
   }
 
-  if (!response.ok) {
-    throw new DaemonResponseError(response.status, daemonErrorCode(result));
+  if (
+    daemonUrl.protocol !== 'http:' ||
+    (daemonUrl.hostname !== '127.0.0.1' && daemonUrl.hostname !== '[::1]') ||
+    daemonUrl.username !== '' ||
+    daemonUrl.password !== '' ||
+    daemonUrl.pathname !== '/' ||
+    daemonUrl.search !== '' ||
+    daemonUrl.hash !== ''
+  ) {
+    throw new Error(DAEMON_URL_ERROR);
   }
-  return result;
+
+  return new URL(path, daemonUrl);
+}
+
+function isTimeoutError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'name' in error && error.name === 'TimeoutError';
 }
 
 function daemonErrorCode(result: unknown): string {
