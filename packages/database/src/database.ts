@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 
-import { initialMigration } from './migrations/001_initial.js';
+import { applyMigrations } from './migration-runner.js';
 
 export type SqliteDatabase = Database.Database;
 
@@ -16,7 +16,7 @@ export function openDatabase(filename: string): SqliteDatabase {
 
   try {
     configureDatabase(database);
-    initialMigration.up(database);
+    applyMigrations(database);
     return database;
   } catch (error) {
     database.close();

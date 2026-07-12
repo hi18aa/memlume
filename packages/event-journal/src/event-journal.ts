@@ -10,15 +10,19 @@ import {
   type EventSource,
   type JsonValue,
 } from '@memlume/contracts';
-import type { SqliteDatabase } from '@memlume/database';
+import type { SqliteDatabase } from '@memlume/database/internal';
 
 export interface AppendEventInput {
   readonly rawContent: string;
   readonly eventType: string;
-  readonly source: EventSource;
+  readonly source: EventSourceInput;
   readonly structuredData?: JsonValue;
   readonly occurredAt?: string;
 }
+
+export type EventSourceInput = Omit<EventSource, 'reference'> & {
+  readonly reference?: string | null;
+};
 
 export type StoredEvent = Event & {
   readonly contentHash: string;
@@ -106,18 +110,18 @@ export class EventJournal {
   }
 
   private appendInTransaction(input: AppendEventInput): StoredEvent {
+    const source = EventSourceSchema.parse(withoutNullSourceReference(input.source));
     const event = EventSchema.parse({
       id: createUuidV7(),
       rawContent: input.rawContent,
       eventType: input.eventType,
-      source: input.source,
+      source,
       structuredData: input.structuredData,
-      occurredAt: input.occurredAt ?? new Date().toISOString(),
+      occurredAt: input.occurredAt === undefined ? new Date().toISOString() : input.occurredAt,
     });
-    const source = EventSourceSchema.parse(event.source);
-    const sourceReference = source.reference ?? null;
+    const sourceReference = source.reference;
     const contentHash = hashContent(event.rawContent);
-    const existing = this.findByHashAndReference(contentHash, sourceReference);
+    const existing = sourceReference === undefined ? undefined : this.findByHashAndReference(contentHash, sourceReference);
 
     if (existing) {
       return existing;
@@ -136,14 +140,15 @@ export class EventJournal {
         structuredData,
         source.type ?? 'unknown',
         source.agent ?? null,
-        sourceReference,
+        sourceReference ?? null,
         sourceData,
         event.occurredAt,
         ingestedAt,
         contentHash,
       );
     } catch (error) {
-      const duplicate = this.findByHashAndReference(contentHash, sourceReference);
+      const duplicate =
+        sourceReference === undefined ? undefined : this.findByHashAndReference(contentHash, sourceReference);
       if (duplicate) {
         return duplicate;
       }
@@ -153,7 +158,7 @@ export class EventJournal {
     return this.getById(event.id)!;
   }
 
-  private findByHashAndReference(contentHash: string, sourceReference: string | null): StoredEvent | undefined {
+  private findByHashAndReference(contentHash: string, sourceReference: string): StoredEvent | undefined {
     return this.toStoredEvent(
       this.findByHashAndReferenceStatement.get(contentHash, sourceReference) as EventRow | undefined,
     );
@@ -175,8 +180,8 @@ export class EventJournal {
       source,
     });
 
-    if (!/^[0-9a-f]{64}$/i.test(row.content_hash)) {
-      throw new Error('Stored event has an invalid content hash.');
+    if (row.content_hash !== hashContent(event.rawContent)) {
+      throw new Error('Stored event content hash does not match its raw content.');
     }
 
     return {
@@ -205,4 +210,13 @@ function createUuidV7(): string {
 
 function hashContent(rawContent: string): string {
   return createHash('sha256').update(rawContent).digest('hex');
+}
+
+function withoutNullSourceReference(source: EventSourceInput): EventSourceInput | Omit<EventSourceInput, 'reference'> {
+  if (source.reference !== null) {
+    return source;
+  }
+
+  const { reference: _, ...withoutReference } = source;
+  return withoutReference;
 }

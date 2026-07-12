@@ -3,7 +3,7 @@ import type { SqliteDatabase } from '../database.js';
 export interface Migration {
   readonly id: string;
   up(database: SqliteDatabase): void;
-  down(database: SqliteDatabase): void;
+  down?(database: SqliteDatabase): void;
 }
 
 const upSql = `
@@ -23,7 +23,8 @@ const upSql = `
   );
 
   CREATE UNIQUE INDEX IF NOT EXISTS idx_events_content_hash
-    ON events(content_hash, COALESCE(source_reference, ''));
+    ON events(content_hash, source_reference)
+    WHERE source_reference IS NOT NULL;
 
   CREATE TRIGGER IF NOT EXISTS events_reject_update
     BEFORE UPDATE ON events

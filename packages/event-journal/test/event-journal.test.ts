@@ -5,7 +5,8 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, test } from 'vitest';
 
-import { initialMigration, openDatabase } from '../../database/src/index.js';
+import * as publicDatabase from '../../database/src/index.js';
+import { initialMigration, openDatabase } from '../../database/src/internal.js';
 import { EventJournal } from '../src/index.js';
 
 const databases: ReturnType<typeof openDatabase>[] = [];
@@ -17,7 +18,7 @@ function createJournal() {
   const database = openDatabase(join(directory, 'memlume.sqlite'));
   databases.push(database);
 
-  return { database, journal: new EventJournal(database) };
+  return { database, filename: join(directory, 'memlume.sqlite'), journal: new EventJournal(database) };
 }
 
 afterEach(() => {
@@ -30,8 +31,13 @@ afterEach(() => {
 });
 
 describe('SQLite migration', () => {
+  test('keeps raw SQLite access and rollback helpers out of the database root entry', () => {
+    expect(publicDatabase).not.toHaveProperty('openDatabase');
+    expect(publicDatabase).not.toHaveProperty('initialMigration');
+  });
+
   test('creates the core tables with WAL settings and supports down then up', () => {
-    const { database } = createJournal();
+    const { database, filename } = createJournal();
     initialMigration.up(database);
     const tables = database
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' OR type = 'virtual table'")
@@ -65,6 +71,39 @@ describe('SQLite migration', () => {
     expect(
       database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'events'").get(),
     ).toMatchObject({ name: 'events' });
+
+    expect(
+      database.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_content_hash'").get(),
+    ).toMatchObject({ sql: expect.stringContaining('WHERE source_reference IS NOT NULL') });
+
+    database.close();
+    databases.pop();
+    const upgraded = openDatabase(filename);
+    databases.push(upgraded);
+    expect(upgraded.prepare('SELECT id FROM schema_migrations ORDER BY id').all()).toEqual([
+      { id: '001_initial' },
+      { id: '002_event_reference_dedup' },
+    ]);
+
+    upgraded.exec(`
+      DROP TABLE schema_migrations;
+      DROP INDEX idx_events_content_hash;
+      CREATE UNIQUE INDEX idx_events_content_hash
+        ON events(content_hash, COALESCE(source_reference, ''));
+    `);
+    upgraded.close();
+    databases.pop();
+    const legacyUpgrade = openDatabase(filename);
+    databases.push(legacyUpgrade);
+    expect(legacyUpgrade.prepare('SELECT id FROM schema_migrations ORDER BY id').all()).toEqual([
+      { id: '001_initial' },
+      { id: '002_event_reference_dedup' },
+    ]);
+    expect(
+      legacyUpgrade
+        .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_content_hash'")
+        .get(),
+    ).toMatchObject({ sql: expect.stringContaining('WHERE source_reference IS NOT NULL') });
   });
 });
 
@@ -118,9 +157,25 @@ describe('EventJournal', () => {
         structuredData: BigInt(1) as never,
       }),
     ).toThrow();
+    expect(() =>
+      journal.append({
+        rawContent: 'Null timestamps must be rejected.',
+        eventType: 'user_statement',
+        source: { agent: 'codex-cli' },
+        occurredAt: null as never,
+      }),
+    ).toThrow();
+    expect(() =>
+      journal.append({
+        rawContent: 'Malformed timestamps must be rejected.',
+        eventType: 'user_statement',
+        source: { agent: 'codex-cli' },
+        occurredAt: '2026-07-12' as never,
+      }),
+    ).toThrow();
   });
 
-  test('deduplicates matching content and source reference, including missing references', () => {
+  test('deduplicates only matching content with an explicit source reference', () => {
     const { database, journal } = createJournal();
     const input = {
       rawContent: 'Use local SQLite first.',
@@ -131,12 +186,46 @@ describe('EventJournal', () => {
     const duplicate = journal.append({ ...input, occurredAt: '2026-07-12T16:00:00.000Z' });
     const differentReference = journal.append({ ...input, source: { agent: 'codex-cli', reference: 'task:5' } });
     const missingReference = journal.append({ ...input, source: { agent: 'codex-cli' } });
-    const duplicateMissingReference = journal.append({ ...input, source: { agent: 'codex-cli' } });
+    const differentAgentWithoutReference = journal.append({ ...input, source: { agent: 'another-agent' } });
+    const nullReference = journal.append({
+      ...input,
+      source: { agent: 'third-agent', reference: null },
+    });
 
     expect(duplicate).toEqual(first);
     expect(differentReference.id).not.toBe(first.id);
-    expect(duplicateMissingReference).toEqual(missingReference);
-    expect(database.prepare('SELECT COUNT(*) AS count FROM events').get()).toEqual({ count: 3 });
+    expect(differentAgentWithoutReference.id).not.toBe(missingReference.id);
+    expect(nullReference.id).not.toBe(missingReference.id);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM events').get()).toEqual({ count: 5 });
+  });
+
+  test('rejects an event whose stored hash no longer matches its raw content', () => {
+    const { database, journal } = createJournal();
+    const id = '018f9d4e-7c2a-7b91-8dc0-61749dbcc01e';
+
+    database
+      .prepare(`
+        INSERT INTO events (
+          id, event_type, raw_content, structured_data, source_type, source_agent, source_reference,
+          source_data, occurred_at, ingested_at, content_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        id,
+        'user_statement',
+        'The hash is intentionally wrong.',
+        JSON.stringify({ category: 'test' }),
+        'cli',
+        'codex-cli',
+        'tampered-event',
+        JSON.stringify({ type: 'cli', agent: 'codex-cli', reference: 'tampered-event' }),
+        '2026-07-12T15:00:00.000Z',
+        '2026-07-12T15:00:00.000Z',
+        '0'.repeat(64),
+      );
+
+    expect(() => journal.getById(id)).toThrow(/content hash/i);
+    expect(() => journal.findBySourceReference('tampered-event')).toThrow(/content hash/i);
   });
 
   test('database triggers reject direct event updates and deletes', () => {
