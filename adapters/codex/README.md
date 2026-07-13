@@ -32,13 +32,13 @@ $env:MEMLUME_BRAIN_ID = 'your-project-brain-uuidv7'
 
 | Codex event | Memlume 行為 |
 | --- | --- |
-| `SessionStart` | 驗證設定與 Adapter envelope；不會寫入 Core。 |
+| `SessionStart` | 準備本機 Adapter envelope 與 runtime；不可用時靜默略過，不會在此階段驗證 daemon、身分或 mount，也不會寫入 Core。 |
 | `UserPromptSubmit` | 先讀取 Project Brain 的 Shared Context，再以暫時 `additionalContext` 注入本回合；同時把明確記憶請求交給 Core。 |
 | `Stop` | 記錄本回合最後的 assistant 輸出作為 task audit，永遠回傳 `{}`；它不是 session 結束事件。 |
 
 例如使用者說「`記住專案使用 pnpm`」，Plugin 會以 Project scope 與指定 Brain 交給 Memlume Core。Core 決定是否保存、改為候選項目、忽略或拒絕，也會執行敏感資料防護及 mount 權限檢查。Codex 原有記憶與設定仍獨立存在。
 
-Shared Context 是本回合暫時的提示內容，不會修改 Codex transcript、設定檔或原生記憶。系統指示與使用者當前指示永遠優先於 Shared Context。
+Plugin 本身不會讀取或寫入 Codex transcript、原生記憶或設定檔；它只回傳官方 `UserPromptSubmit` hook 的 developer-context 輸出。Codex 要如何顯示或持久化這項輸出，會隨 Codex 版本而變動，因此不應將它視為 Plugin 對 transcript 持久化行為的保證；請以目前版本的 [Codex Hooks 文件](https://learn.chatgpt.com/docs/hooks#userpromptsubmit) 為準。Shared Context 會明確標記為背景參考，系統、developer 與當前使用者指示永遠優先。
 
 若 daemon 暫時不可用，hook 仍會成功結束，不會阻斷 Codex。只有明確記憶請求能進入本機 outbox 等待下次 `UserPromptSubmit` 重送；`Stop` 的 audit 不會被離線宣稱為已保存，也不會假裝 session-end 重送。
 
