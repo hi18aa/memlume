@@ -44,6 +44,7 @@ export interface IssueContextReceiptInput {
   readonly traceId: string;
   readonly agentId: string;
   readonly brainIds: readonly string[];
+  readonly sourceMemoryIds?: readonly string[];
   readonly issuedAt?: string;
   readonly expiresAt?: string;
 }
@@ -62,8 +63,25 @@ export class OutcomeReceiptError extends Error {
   }
 }
 
+export class OutcomeReceiptRateLimitError extends OutcomeReceiptError {
+  constructor() {
+    super('Context receipt rate limit reached.');
+    this.name = 'OutcomeReceiptRateLimitError';
+  }
+}
+
+export class OutcomeFeedbackRateLimitError extends OutcomeReceiptError {
+  constructor() {
+    super('Feedback for this memory was already recorded recently by this installation.');
+    this.name = 'OutcomeFeedbackRateLimitError';
+  }
+}
+
 const CONTEXT_RECEIPT_TTL_MS = 15 * 60 * 1000;
 const MAX_USAGE_PER_RECEIPT = 256;
+const MAX_RECEIPTS_PER_AGENT_PER_MINUTE = 10;
+const MAX_ACTIVE_RECEIPTS_PER_AGENT = 10;
+const FEEDBACK_CLAIM_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Append-only usage/outcome records and a transparent feedback score.
@@ -77,8 +95,15 @@ export class OutcomeStore {
     const traceId = UuidV7Schema.parse(input.traceId);
     const agentId = NonEmptyTextSchema.parse(input.agentId);
     const brainIds = normalizeBrainIds(input.brainIds);
+    const sourceMemoryIds = uniqueUuidV7(input.sourceMemoryIds ?? []);
+    if (sourceMemoryIds.length > 256) {
+      throw new OutcomeReceiptError('Context receipt cannot contain more than 256 source memories.');
+    }
     if (brainIds.length === 0) {
       throw new OutcomeReceiptError('Context receipt requires at least one mounted Brain.');
+    }
+    if (sourceMemoryIds.length > 0 && !this.memoryIdsMounted(sourceMemoryIds, brainIds)) {
+      throw new OutcomeMemoryAccessError();
     }
     const issuedAt = input.issuedAt === undefined ? new Date().toISOString() : IsoUtcDateTimeSchema.parse(input.issuedAt);
     const expiresAt = input.expiresAt === undefined
@@ -87,23 +112,43 @@ export class OutcomeStore {
     if (Date.parse(expiresAt) <= Date.parse(issuedAt)) {
       throw new OutcomeReceiptError('Context receipt expiry must be after issue time.');
     }
-    const receipt = ContextReceiptSchema.parse({ traceId, agentId, brainIds, issuedAt, expiresAt, consumedAt: null });
-    this.database
-      .prepare(`
-        INSERT INTO context_receipts (trace_id, agent_id, brain_ids, issued_at, expires_at, consumed_at)
-        VALUES (?, ?, ?, ?, ?, NULL)
-      `)
-      .run(receipt.traceId, receipt.agentId, JSON.stringify(receipt.brainIds), receipt.issuedAt, receipt.expiresAt);
-    return receipt;
+    const receipt = ContextReceiptSchema.parse({ traceId, agentId, brainIds, sourceMemoryIds, issuedAt, expiresAt, consumedAt: null });
+    return this.database.transaction(() => {
+      const recentCutoff = new Date(Date.parse(receipt.issuedAt) - 60 * 1000).toISOString();
+      const recent = this.database
+        .prepare('SELECT COUNT(*) AS count FROM context_receipts WHERE agent_id = ? AND issued_at > ?')
+        .get(receipt.agentId, recentCutoff) as { readonly count: number };
+      const active = this.database
+        .prepare('SELECT COUNT(*) AS count FROM context_receipts WHERE agent_id = ? AND consumed_at IS NULL AND expires_at > ?')
+        .get(receipt.agentId, receipt.issuedAt) as { readonly count: number };
+      if (recent.count >= MAX_RECEIPTS_PER_AGENT_PER_MINUTE || active.count >= MAX_ACTIVE_RECEIPTS_PER_AGENT) {
+        throw new OutcomeReceiptRateLimitError();
+      }
+      this.database
+        .prepare(`
+          INSERT INTO context_receipts (trace_id, agent_id, brain_ids, source_memory_ids, issued_at, expires_at, consumed_at)
+          VALUES (?, ?, ?, ?, ?, ?, NULL)
+        `)
+        .run(
+          receipt.traceId,
+          receipt.agentId,
+          JSON.stringify(receipt.brainIds),
+          JSON.stringify(receipt.sourceMemoryIds),
+          receipt.issuedAt,
+          receipt.expiresAt,
+        );
+      return receipt;
+    })();
   }
 
-  assertReceipt(traceId: string, agentId: string, brainIds: readonly string[]): ContextReceipt {
+  assertReceipt(traceId: string, agentId: string, brainIds: readonly string[], memoryIds: readonly string[] = []): ContextReceipt {
     const parsedTraceId = UuidV7Schema.parse(traceId);
     const parsedAgentId = NonEmptyTextSchema.parse(agentId);
     const allowedBrainIds = normalizeBrainIds(brainIds);
+    const requestedMemoryIds = uniqueUuidV7(memoryIds);
     if (allowedBrainIds.length === 0) throw new OutcomeReceiptError();
     const row = this.database
-      .prepare('SELECT trace_id, agent_id, brain_ids, issued_at, expires_at, consumed_at FROM context_receipts WHERE trace_id = ?')
+      .prepare('SELECT trace_id, agent_id, brain_ids, source_memory_ids, issued_at, expires_at, consumed_at FROM context_receipts WHERE trace_id = ?')
       .get(parsedTraceId) as ReceiptRow | undefined;
     if (row === undefined) throw new OutcomeReceiptError();
     const receipt = toReceipt(row);
@@ -111,7 +156,8 @@ export class OutcomeStore {
       receipt.agentId !== parsedAgentId ||
       receipt.consumedAt !== null ||
       Date.parse(receipt.expiresAt) <= Date.now() ||
-      allowedBrainIds.some((brainId) => !receipt.brainIds.includes(brainId))
+      allowedBrainIds.some((brainId) => !receipt.brainIds.includes(brainId)) ||
+      requestedMemoryIds.some((memoryId) => !receipt.sourceMemoryIds.includes(memoryId))
     ) {
       throw new OutcomeReceiptError();
     }
@@ -120,26 +166,66 @@ export class OutcomeStore {
 
   recordUsageWithReceipt(input: RecordMemoryUsageInput, writableBrainIds: readonly string[], traceId: string, agentId: string): MemoryUsage {
     return this.database.transaction(() => {
-      this.assertReceipt(traceId, agentId, writableBrainIds);
+      const memoryId = UuidV7Schema.parse(input.memoryId);
+      const parsedOutcome = input.outcome === undefined || input.outcome === null
+        ? null
+        : MemoryUsageOutcomeSchema.parse(input.outcome);
+      this.assertReceipt(traceId, agentId, writableBrainIds, [memoryId]);
+      const parsedTraceId = UuidV7Schema.parse(traceId);
       const count = this.database
         .prepare('SELECT COUNT(*) AS count FROM memory_usage WHERE trace_id = ?')
-        .get(UuidV7Schema.parse(traceId)) as { readonly count: number };
+        .get(parsedTraceId) as { readonly count: number };
       if (count.count >= MAX_USAGE_PER_RECEIPT) {
         throw new OutcomeReceiptError('Context receipt usage limit reached.');
       }
-      return this.recordUsage({ ...input, traceId }, writableBrainIds);
+      this.assertNoDuplicateUsage(parsedTraceId, memoryId, parsedOutcome);
+      if (parsedOutcome !== null) {
+        this.claimFeedback(agentId, memoryId, parsedTraceId, 'memory_usage', parsedOutcome);
+      }
+      return this.recordUsage({ ...input, outcome: parsedOutcome, traceId }, writableBrainIds);
     })();
   }
 
   setUsageOutcomeWithReceipt(usageId: string, outcome: MemoryUsageOutcome, writableBrainIds: readonly string[], traceId: string, agentId: string): MemoryUsage {
-    this.assertReceipt(traceId, agentId, writableBrainIds);
-    return this.setUsageOutcome(usageId, outcome, writableBrainIds);
+    return this.database.transaction(() => {
+      const receipt = this.assertReceipt(traceId, agentId, writableBrainIds);
+      const parsedOutcome = MemoryUsageOutcomeSchema.parse(outcome);
+      const id = UuidV7Schema.parse(usageId);
+      const row = this.database
+        .prepare('SELECT id, memory_id, task_id, agent_id, retrieval_rank, was_included, outcome, used_at, trace_id FROM memory_usage WHERE id = ?')
+        .get(id) as UsageRow | undefined;
+      if (row === undefined || row.trace_id !== receipt.traceId || row.agent_id !== receipt.agentId || !receipt.sourceMemoryIds.includes(row.memory_id)) {
+        throw new OutcomeReceiptError();
+      }
+      const count = this.database
+        .prepare('SELECT COUNT(*) AS count FROM memory_usage WHERE trace_id = ?')
+        .get(receipt.traceId) as { readonly count: number };
+      if (count.count >= MAX_USAGE_PER_RECEIPT) {
+        throw new OutcomeReceiptError('Context receipt usage limit reached.');
+      }
+      this.assertNoDuplicateUsage(receipt.traceId, row.memory_id, parsedOutcome);
+      this.claimFeedback(receipt.agentId, row.memory_id, receipt.traceId, 'memory_usage', parsedOutcome);
+      return this.recordUsage({
+        memoryId: row.memory_id,
+        taskId: row.task_id,
+        agentId: row.agent_id,
+        retrievalRank: row.retrieval_rank,
+        wasIncluded: row.was_included === 1,
+        outcome: parsedOutcome,
+        traceId: receipt.traceId,
+      }, writableBrainIds);
+    })();
   }
 
   recordOutcomeWithReceipt(input: RecordMemoryOutcomeInput, writableBrainIds: readonly string[], traceId: string, agentId: string): MemoryOutcome {
     return this.database.transaction(() => {
-      this.assertReceipt(traceId, agentId, writableBrainIds);
-      const outcome = this.recordOutcome(input, writableBrainIds);
+      const usedMemoryIds = uniqueUuidV7(input.usedMemoryIds);
+      this.assertReceipt(traceId, agentId, writableBrainIds, usedMemoryIds);
+      const parsedTraceId = UuidV7Schema.parse(traceId);
+      for (const memoryId of usedMemoryIds) {
+        this.claimFeedback(agentId, memoryId, parsedTraceId, 'task_outcome', input.result);
+      }
+      const outcome = this.recordOutcome({ ...input, usedMemoryIds }, writableBrainIds);
       this.consumeReceipt(traceId, agentId, writableBrainIds);
       return outcome;
     })();
@@ -324,6 +410,49 @@ export class OutcomeStore {
     return scores;
   }
 
+  private claimFeedback(agentId: string, memoryId: string, traceId: string, signalKind: string, signalValue: string): void {
+    const parsedAgentId = NonEmptyTextSchema.parse(agentId);
+    const parsedMemoryId = UuidV7Schema.parse(memoryId);
+    const parsedTraceId = UuidV7Schema.parse(traceId);
+    const recordedAt = new Date().toISOString();
+    const cutoff = new Date(Date.parse(recordedAt) - FEEDBACK_CLAIM_TTL_MS).toISOString();
+    this.database.prepare('DELETE FROM feedback_signal_claims WHERE recorded_at <= ?').run(cutoff);
+    const existing = this.database
+      .prepare(`
+        SELECT trace_id
+        FROM feedback_signal_claims
+        WHERE agent_id = ? AND memory_id = ? AND recorded_at > ?
+        ORDER BY recorded_at DESC
+        LIMIT 1
+      `)
+      .get(parsedAgentId, parsedMemoryId, cutoff) as { readonly trace_id: string } | undefined;
+    if (existing !== undefined && existing.trace_id !== parsedTraceId) {
+      throw new OutcomeFeedbackRateLimitError();
+    }
+    this.database
+      .prepare(`
+        INSERT INTO feedback_signal_claims (id, agent_id, memory_id, trace_id, signal_kind, signal_value, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(createUuidV7(), parsedAgentId, parsedMemoryId, parsedTraceId, signalKind, signalValue, recordedAt);
+  }
+
+  private assertNoDuplicateUsage(traceId: string, memoryId: string, outcome: MemoryUsageOutcome | null): void {
+    const duplicate = this.database
+      .prepare(`
+        SELECT 1
+        FROM memory_usage
+        WHERE trace_id = ?
+          AND memory_id = ?
+          AND (outcome = ? OR (outcome IS NULL AND ? IS NULL))
+        LIMIT 1
+      `)
+      .get(traceId, memoryId, outcome, outcome);
+    if (duplicate !== undefined) {
+      throw new OutcomeReceiptError('This memory outcome was already recorded for the context receipt.');
+    }
+  }
+
   private assertMemoriesMounted(memoryIds: readonly string[], brainIds: readonly string[]): void {
     if (memoryIds.length === 0 || brainIds.length === 0 || !this.memoryIdsMounted(memoryIds, brainIds)) {
       throw new OutcomeMemoryAccessError();
@@ -373,6 +502,7 @@ type ReceiptRow = {
   readonly trace_id: string;
   readonly agent_id: string;
   readonly brain_ids: string;
+  readonly source_memory_ids: string;
   readonly issued_at: string;
   readonly expires_at: string;
   readonly consumed_at: string | null;
@@ -410,6 +540,7 @@ function toReceipt(row: ReceiptRow): ContextReceipt {
     traceId: row.trace_id,
     agentId: row.agent_id,
     brainIds: JSON.parse(row.brain_ids),
+    sourceMemoryIds: parseUuidArray(row.source_memory_ids),
     issuedAt: row.issued_at,
     expiresAt: row.expires_at,
     consumedAt: row.consumed_at,

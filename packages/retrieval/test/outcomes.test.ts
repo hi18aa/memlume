@@ -78,7 +78,7 @@ describe('outcome store', () => {
       scope: { level: 'global' },
     });
     const traceId = '018f9d4e-7c2f-7b91-8dc0-61749dbcc01e';
-    const receipt = outcomes.issueReceipt({ traceId, agentId: 'hermes-installation', brainIds: [DEFAULT_PERSONAL_BRAIN_ID] });
+    const receipt = outcomes.issueReceipt({ traceId, agentId: 'hermes-installation', brainIds: [DEFAULT_PERSONAL_BRAIN_ID], sourceMemoryIds: [memory.id] });
     expect(receipt.traceId).toBe(traceId);
     const usage = outcomes.recordUsageWithReceipt({
       memoryId: memory.id,
@@ -103,5 +103,108 @@ describe('outcome store', () => {
       usedMemoryIds: [memory.id],
       usedToolIds: [],
     }, [DEFAULT_PERSONAL_BRAIN_ID], traceId, 'hermes-installation')).toThrow(OutcomeReceiptError);
+  });
+
+  test('binds receipt feedback to included memories and rejects duplicate signals', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'memlume-outcome-receipt-binding-'));
+    directories.push(directory);
+    const database = openDatabase(join(directory, 'memlume.sqlite'));
+    databases.push(database);
+    const store = new MemoryStore(database);
+    const outcomes = new OutcomeStore(database);
+    const included = store.save({
+      kind: 'fact',
+      canonicalText: 'Included receipt memory.',
+      structuredData: { subject: 'project', predicate: 'has', object: 'included', confidence: 1 },
+      scope: { level: 'global' },
+    });
+    const omitted = store.save({
+      kind: 'fact',
+      canonicalText: 'Omitted receipt memory.',
+      structuredData: { subject: 'project', predicate: 'has', object: 'omitted', confidence: 1 },
+      scope: { level: 'global' },
+    });
+    const traceId = '018f9d4e-7c2f-7b91-8dc0-61749dbcc01f';
+    const receipt = outcomes.issueReceipt({
+      traceId,
+      agentId: 'hermes-installation',
+      brainIds: [DEFAULT_PERSONAL_BRAIN_ID],
+      sourceMemoryIds: [included.id],
+    });
+    expect(receipt.sourceMemoryIds).toEqual([included.id]);
+    expect(() => outcomes.recordUsageWithReceipt({
+      memoryId: omitted.id,
+      taskId: 'binding-task',
+      agentId: 'hermes-installation',
+      wasIncluded: true,
+      outcome: 'adopted',
+    }, [DEFAULT_PERSONAL_BRAIN_ID], traceId, 'hermes-installation')).toThrow(OutcomeReceiptError);
+
+    const usage = outcomes.recordUsageWithReceipt({
+      memoryId: included.id,
+      taskId: 'binding-task',
+      agentId: 'hermes-installation',
+      wasIncluded: true,
+      outcome: 'adopted',
+    }, [DEFAULT_PERSONAL_BRAIN_ID], traceId, 'hermes-installation');
+    expect(() => outcomes.recordUsageWithReceipt({
+      memoryId: included.id,
+      taskId: 'binding-task',
+      agentId: 'hermes-installation',
+      wasIncluded: true,
+      outcome: 'adopted',
+    }, [DEFAULT_PERSONAL_BRAIN_ID], traceId, 'hermes-installation')).toThrow(OutcomeReceiptError);
+    expect(() => outcomes.setUsageOutcomeWithReceipt(usage.id, 'adopted', [DEFAULT_PERSONAL_BRAIN_ID], traceId, 'hermes-installation')).toThrow(OutcomeReceiptError);
+
+    outcomes.recordOutcomeWithReceipt({
+      taskId: 'binding-task',
+      agentId: 'hermes-installation',
+      result: 'success',
+      usedMemoryIds: [included.id],
+      usedToolIds: ['terminal'],
+    }, [DEFAULT_PERSONAL_BRAIN_ID], traceId, 'hermes-installation');
+    const nextTraceId = '018f9d4e-7c2f-7b91-8dc0-61749dbcc031';
+    outcomes.issueReceipt({
+      traceId: nextTraceId,
+      agentId: 'hermes-installation',
+      brainIds: [DEFAULT_PERSONAL_BRAIN_ID],
+      sourceMemoryIds: [included.id],
+    });
+    expect(() => outcomes.recordUsageWithReceipt({
+      memoryId: included.id,
+      taskId: 'another-binding-task',
+      agentId: 'hermes-installation',
+      wasIncluded: true,
+      outcome: 'adopted',
+    }, [DEFAULT_PERSONAL_BRAIN_ID], nextTraceId, 'hermes-installation')).toThrow(OutcomeReceiptError);
+  });
+
+  test('rate limits active receipt issuance per installation', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'memlume-outcome-receipt-rate-'));
+    directories.push(directory);
+    const database = openDatabase(join(directory, 'memlume.sqlite'));
+    databases.push(database);
+    const store = new MemoryStore(database);
+    const outcomes = new OutcomeStore(database);
+    const memory = store.save({
+      kind: 'fact',
+      canonicalText: 'Rate limited receipt memory.',
+      structuredData: { subject: 'project', predicate: 'has', object: 'rate-limit', confidence: 1 },
+      scope: { level: 'global' },
+    });
+    for (let index = 0; index < 10; index += 1) {
+      outcomes.issueReceipt({
+        traceId: `018f9d4e-7c2f-7b91-8dc0-61749dbcc0${20 + index}`,
+        agentId: 'hermes-installation',
+        brainIds: [DEFAULT_PERSONAL_BRAIN_ID],
+        sourceMemoryIds: [memory.id],
+      });
+    }
+    expect(() => outcomes.issueReceipt({
+      traceId: '018f9d4e-7c2f-7b91-8dc0-61749dbcc030',
+      agentId: 'hermes-installation',
+      brainIds: [DEFAULT_PERSONAL_BRAIN_ID],
+      sourceMemoryIds: [memory.id],
+    })).toThrow(OutcomeReceiptError);
   });
 });

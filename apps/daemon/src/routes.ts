@@ -22,9 +22,10 @@ import {
   type JsonValue,
 } from '@memlume/contracts';
 import { ContextResolver } from '@memlume/context-resolver';
+import type { SqliteDatabase } from '@memlume/database/internal';
 import { EventBrainConflictError, EventJournal } from '@memlume/event-journal';
 import { assessMemoryConflict, compileMemory, type MemoryProposal } from '@memlume/memory-compiler';
-import { MemoryStore, OutcomeMemoryAccessError, OutcomeReceiptError, OutcomeStore, SourceEventBrainMismatchError } from '@memlume/retrieval';
+import { MemoryStore, OutcomeFeedbackRateLimitError, OutcomeMemoryAccessError, OutcomeReceiptError, OutcomeReceiptRateLimitError, OutcomeStore, SourceEventBrainMismatchError } from '@memlume/retrieval';
 import { BrainStore } from '@memlume/shared-brains';
 import { BrainImportConflictError, BrainImportRequiredError, FullBackupAuthenticationRequiredError, FullRestoreRequiredError, RestoreRecoveryError } from '@memlume/backup';
 import { createHmac, timingSafeEqual } from 'node:crypto';
@@ -147,6 +148,7 @@ const ImportBrainQuerySchema = z.object({
 }).strict();
 
 export interface DaemonServices {
+  readonly database: SqliteDatabase;
   readonly journal: EventJournal;
   readonly store: MemoryStore;
   readonly resolver: ContextResolver;
@@ -175,7 +177,7 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
   });
 
   const requireSetup = requireSetupToken(services.setupToken);
-  const consumedUserConfirmations = new Set<string>();
+  const userConfirmations = new UserConfirmationStore(services.database);
   app.post('/v1/setup/brains', requireSetup, (request, response) => {
     response.status(201).json({ brain: services.brains.createBrain(CreateBrainRequestSchema.parse(request.body)) });
   });
@@ -369,7 +371,7 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     const installation = authenticatedInstallation(response);
     const requiresCandidate = installation !== undefined
       && inferenceClientTypes.has(installation.clientType)
-      && !hasUserMemoryConfirmation(request, services.setupToken, input, consumedUserConfirmations);
+      && !hasUserMemoryConfirmation(request, services.setupToken, input, userConfirmations);
     const memory = requiresCandidate
       ? services.store.saveCandidate({ ...sanitized, brainId })
       : services.store.save({ ...sanitized, brainId });
@@ -578,7 +580,20 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
       return;
     }
     const context = services.resolver.resolve({ ...input, brainIds });
-    services.outcomes.issueReceipt({ traceId: context.traceId, agentId: installation.id, brainIds });
+    try {
+      services.outcomes.issueReceipt({
+        traceId: context.traceId,
+        agentId: installation.id,
+        brainIds,
+        sourceMemoryIds: context.explanation.sourceMemoryIds,
+      });
+    } catch (error) {
+      if (error instanceof OutcomeReceiptRateLimitError) {
+        response.status(429).json({ error: 'rate_limited' });
+        return;
+      }
+      throw error;
+    }
     response.json({ context });
   });
 
@@ -602,6 +617,10 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
       }, brainIds, input.traceId, installation.id);
       response.status(201).json({ usage });
     } catch (error) {
+      if (error instanceof OutcomeFeedbackRateLimitError) {
+        response.status(429).json({ error: 'rate_limited' });
+        return;
+      }
       if (error instanceof OutcomeMemoryAccessError || error instanceof OutcomeReceiptError) {
         response.status(403).json({ error: 'forbidden' });
         return;
@@ -622,6 +641,10 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     try {
       response.status(201).json({ usage: services.outcomes.setUsageOutcomeWithReceipt(usageId, outcome, brainIds, traceId, installation.id) });
     } catch (error) {
+      if (error instanceof OutcomeFeedbackRateLimitError) {
+        response.status(429).json({ error: 'rate_limited' });
+        return;
+      }
       if (error instanceof OutcomeMemoryAccessError || error instanceof OutcomeReceiptError) {
         response.status(403).json({ error: 'forbidden' });
         return;
@@ -653,6 +676,10 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
       }, brainIds, input.traceId, installation.id);
       response.status(201).json({ outcome });
     } catch (error) {
+      if (error instanceof OutcomeFeedbackRateLimitError) {
+        response.status(429).json({ error: 'rate_limited' });
+        return;
+      }
       if (error instanceof OutcomeMemoryAccessError || error instanceof OutcomeReceiptError) {
         response.status(403).json({ error: 'forbidden' });
         return;
@@ -803,7 +830,28 @@ function tokensMatch(expected: string, actual: string | undefined): boolean {
 
 const inferenceClientTypes = new Set(['hermes', 'codex', 'openclaw', 'claude-code']);
 
-function hasUserMemoryConfirmation(request: Request, setupToken: string | undefined, body: unknown, consumed: Set<string>): boolean {
+class UserConfirmationStore {
+  constructor(private readonly database: SqliteDatabase) {}
+
+  consume(signature: string, expiresAt: string): boolean {
+    const consumedAt = new Date().toISOString();
+    return this.database.transaction(() => {
+      this.database.prepare('DELETE FROM user_confirmations WHERE expires_at <= ?').run(consumedAt);
+      const existing = this.database
+        .prepare('SELECT 1 FROM user_confirmations WHERE signature = ?')
+        .get(signature);
+      if (existing !== undefined) {
+        return false;
+      }
+      this.database
+        .prepare('INSERT INTO user_confirmations (signature, consumed_at, expires_at) VALUES (?, ?, ?)')
+        .run(signature, consumedAt, expiresAt);
+      return true;
+    })();
+  }
+}
+
+function hasUserMemoryConfirmation(request: Request, setupToken: string | undefined, body: unknown, confirmations: UserConfirmationStore): boolean {
   if (setupToken === undefined || setupToken.length === 0) return false;
   const actual = request.get('x-memlume-user-confirmation');
   const issuedAt = request.get('x-memlume-user-confirmation-at');
@@ -811,9 +859,8 @@ function hasUserMemoryConfirmation(request: Request, setupToken: string | undefi
   const issuedAtMs = Date.parse(issuedAt);
   if (!Number.isFinite(issuedAtMs) || Math.abs(Date.now() - issuedAtMs) > 5 * 60 * 1000) return false;
   const expected = createHmac('sha256', setupToken).update(canonicalJson({ body, issuedAt })).digest('hex');
-  if (!tokensMatch(expected, actual) || consumed.has(actual)) return false;
-  consumed.add(actual);
-  return true;
+  return tokensMatch(expected, actual)
+    && confirmations.consume(actual, new Date(issuedAtMs + 5 * 60 * 1000).toISOString());
 }
 
 function canonicalJson(value: unknown): string {

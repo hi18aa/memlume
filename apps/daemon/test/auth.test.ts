@@ -19,7 +19,11 @@ function createDatabasePath(): string {
 }
 
 async function start(options: { readonly setupToken?: string } = {}): Promise<RunningDaemon> {
-  const daemon = await startDaemon({ databasePath: createDatabasePath(), port: 0, ...options });
+  return startAt(createDatabasePath(), options);
+}
+
+async function startAt(databasePath: string, options: { readonly setupToken?: string } = {}): Promise<RunningDaemon> {
+  const daemon = await startDaemon({ databasePath, port: 0, ...options });
   daemons.push(daemon);
   return daemon;
 }
@@ -126,7 +130,8 @@ afterEach(async () => {
 
 describe('daemon local authentication and setup API', () => {
   test('keeps direct structured writes from supported agents as candidates without user confirmation', async () => {
-    const daemon = await start({ setupToken: SETUP_TOKEN });
+    const databasePath = createDatabasePath();
+    const daemon = await startAt(databasePath, { setupToken: SETUP_TOKEN });
     const installation = await registerInstallation(daemon, 'governed-agent', 'codex');
     await mountBrain(daemon, installation.id, DEFAULT_PERSONAL_BRAIN_ID, 'read_write');
     const body = {
@@ -161,7 +166,10 @@ describe('daemon local authentication and setup API', () => {
     expect(confirmed.response.status).toBe(201);
     expect(confirmed.body).toMatchObject({ memory: { status: 'active' } });
 
-    const replay = await requestJson(daemon, '/v1/memories', {
+    await daemon.stop();
+    daemons.splice(daemons.indexOf(daemon), 1);
+    const restarted = await startAt(databasePath, { setupToken: SETUP_TOKEN });
+    const replay = await requestJson(restarted, '/v1/memories', {
       method: 'POST',
       headers: { ...adapterHeaders(installation.token), 'x-memlume-user-confirmation': confirmation, 'x-memlume-user-confirmation-at': confirmationAt },
       body: JSON.stringify(body),

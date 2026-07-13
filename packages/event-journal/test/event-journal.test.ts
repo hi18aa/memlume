@@ -96,6 +96,7 @@ describe('SQLite migration', () => {
       { id: '003_shared_brains' },
       { id: '004_memory_outcomes' },
       { id: '005_feedback_receipts' },
+      { id: '006_receipt_hardening' },
     ]);
 
     upgraded.exec(`
@@ -114,6 +115,7 @@ describe('SQLite migration', () => {
       { id: '003_shared_brains' },
       { id: '004_memory_outcomes' },
       { id: '005_feedback_receipts' },
+      { id: '006_receipt_hardening' },
     ]);
     expect(
       legacyUpgrade

@@ -17,6 +17,8 @@ export const ContextReceiptSchema = z.object({
   traceId: UuidV7Schema,
   agentId: NonEmptyTextSchema,
   brainIds: z.array(UuidV7Schema).min(1),
+  /** Only memories actually included in the resolved Context Pack may receive feedback. */
+  sourceMemoryIds: z.array(UuidV7Schema).max(256),
   issuedAt: IsoUtcDateTimeSchema,
   expiresAt: IsoUtcDateTimeSchema,
   consumedAt: IsoUtcDateTimeSchema.nullable(),

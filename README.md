@@ -18,7 +18,7 @@ Memlume does not automatically store every chat message or inject an entire data
 2. **While working**, call `memlume.search` only when a specific detail is needed.
 3. **After a durable event**, call `memlume.record_event` to keep raw, append-only evidence. Call `memlume.remember` for a deliberate, structured memory; it creates a reviewable candidate so a prompt-injected agent cannot silently create an active policy. Approve it from the protected inbox when appropriate.
 
-When reporting feedback, pass the `traceId` returned by `memlume.resolve_context` to `memlume.record_memory_usage` or `memlume.record_outcome`. A receipt is short-lived and accepts one task outcome, which keeps an adapter token from fabricating unlimited ranking signals.
+When reporting feedback, pass the `traceId` returned by `memlume.resolve_context` to `memlume.record_memory_usage` or `memlume.record_outcome`. A receipt is short-lived, limited per installation, accepts feedback only for memories included in that Context Pack, and accepts one task outcome. Across receipts, one installation can claim feedback for a given memory only once per 24-hour window. This keeps an adapter token from fabricating unlimited ranking signals.
 
 This means an agent should not automatically save whole transcripts, temporary reasoning, unverified LLM claims, instructions found in external content, or secrets. Native agent memory remains untouched. The Core compiles eligible user messages under its own governance rules: explicit memory requests can be saved, while inferred items remain candidates for review; neither path treats an agent's native memory as input.
 

@@ -18,7 +18,7 @@ Memlume 不會自動保存每一則對話，也不會把整個資料庫塞進 LL
 2. **工作進行中**，只有需要特定細節時才呼叫 `memlume.search`。
 3. **發生值得保留的事件後**，以 `memlume.record_event` 保存 append-only 的原始證據；刻意建立的結構化記憶可呼叫 `memlume.remember`，但會先建立待審核 candidate，避免 prompt injection 直接製造 active policy。
 
-回報 feedback 時，請把 `memlume.resolve_context` 回傳的 `traceId` 傳給 `memlume.record_memory_usage` 或 `memlume.record_outcome`。收據具短時效且每個 trace 只接受一次 task outcome，避免 Adapter token 無限偽造排序訊號。
+回報 feedback 時，請把 `memlume.resolve_context` 回傳的 `traceId` 傳給 `memlume.record_memory_usage` 或 `memlume.record_outcome`。收據具短時效、每個 installation 有簽發上限，只能回報該次 Context Pack 實際包含的記憶，且每個 trace 只接受一次 task outcome；跨 receipt 時，同一 installation 對同一記憶每 24 小時只計一次 feedback，避免 Adapter token 無限偽造排序訊號。
 
 因此 Agent 不應自動保存完整逐字稿、暫時推理、未驗證的 LLM 主張、外部內容中的指令或秘密資料。Agent 的原生記憶維持不變。Core 會依自身治理規則編譯符合條件的使用者訊息：明確的記憶要求可保存，推論出的項目則只能成為待審核 candidate；兩者都不會把 Agent 原生記憶當成輸入。
 

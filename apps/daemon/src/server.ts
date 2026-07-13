@@ -208,7 +208,7 @@ export function createDaemon({ databasePath, setupToken, consolePath = defaultCo
       const router = express();
       router.disable('x-powered-by');
       router.use(express.json({ limit: '1mb' }));
-      registerRoutes(router, { journal, store, resolver, outcomes, brains, setupToken, backup });
+      registerRoutes(router, { database, journal, store, resolver, outcomes, brains, setupToken, backup });
       return { database, brains, router };
     } catch (error) {
       database.close();

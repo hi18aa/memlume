@@ -36,6 +36,7 @@ describe('shared memory contracts', () => {
       traceId: ids.trace,
       agentId: 'hermes-installation',
       brainIds: [DEFAULT_PERSONAL_BRAIN_ID],
+      sourceMemoryIds: [ids.memory],
       issuedAt: '2026-07-13T00:00:00.000Z',
       expiresAt: '2026-07-13T00:15:00.000Z',
       consumedAt: null,
