@@ -80,6 +80,27 @@ class HermesPluginTests(unittest.TestCase):
         self.assertEqual(audit["message"]["content"], "已記住。")
         self.assertEqual(len([call for call in calls if call["operation"] == "onSessionEnd"]), 1)
 
+    def test_unfinished_sessions_evict_old_turns_without_audit_writes(self):
+        plugin_module = importlib.import_module("memlume_plugin.plugin")
+        calls = []
+        audited = threading.Event()
+
+        def runner(payload, _timeout):
+            calls.append(payload)
+            if payload["operation"] == "afterTask":
+                audited.set()
+            return {}
+
+        plugin = plugin_module.MemlumePlugin(environment=self.environment, runner=runner)
+        for index in range(257):
+            plugin.pre_llm_call(session_id=f"unfinished-{index}", user_message="記住專案使用 pnpm")
+        plugin.post_llm_call(session_id="unfinished-0", assistant_response="這個已被淘汰。")
+        plugin.post_llm_call(session_id="unfinished-256", assistant_response="這個仍在快取內。")
+
+        self.assertTrue(audited.wait(0.3))
+        audits = [call for call in calls if call["operation"] == "afterTask"]
+        self.assertEqual([audit["envelope"]["sessionId"] for audit in audits], ["unfinished-256"])
+
     def test_finalization_without_session_flushes_last_envelope_once_and_bounds_completed_sessions(self):
         plugin_module = importlib.import_module("memlume_plugin.plugin")
         calls = []

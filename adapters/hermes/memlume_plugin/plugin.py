@@ -14,6 +14,7 @@ from uuid import uuid4
 
 BridgeRunner = Callable[[dict[str, Any], float], Any]
 COMPLETED_SESSION_LIMIT = 256
+TURN_LIMIT = 256
 
 
 class MemlumePlugin:
@@ -27,7 +28,7 @@ class MemlumePlugin:
         self._environment = dict(os.environ if environment is None else environment)
         self._runner = runner or _SubprocessBridge(self._environment)
         self._timeout_seconds = timeout_seconds
-        self._turns: dict[str, str] = {}
+        self._turns: OrderedDict[str, str] = OrderedDict()
         self._finished_sessions: OrderedDict[str, None] = OrderedDict()
         self._last_envelope: dict[str, str] | None = None
         self._lock = threading.Lock()
@@ -40,6 +41,9 @@ class MemlumePlugin:
         message_id = f"hermes-{uuid4()}"
         with self._lock:
             self._turns[session_id] = message_id
+            self._turns.move_to_end(session_id)
+            while len(self._turns) > TURN_LIMIT:
+                self._turns.popitem(last=False)
             self._finished_sessions.pop(session_id, None)
             self._last_envelope = envelope
 
