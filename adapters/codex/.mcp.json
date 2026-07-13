@@ -4,7 +4,7 @@
       "command": "node",
       "args": ["./scripts/mcp.mjs"],
       "cwd": ".",
-      "env_vars": ["MEMLUME_HOME", "MEMLUME_TOKEN", "MEMLUME_DAEMON_URL"]
+      "env_vars": ["MEMLUME_HOME", "MEMLUME_TOKEN", "MEMLUME_DAEMON_URL", "MEMLUME_CONFIG_PATH"]
     }
   }
 }

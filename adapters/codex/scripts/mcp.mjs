@@ -2,10 +2,13 @@ import { realpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { hydrateProfileEnvironment } from './profile.mjs';
+
 void start();
 
 async function start() {
   try {
+    await hydrateProfileEnvironment('codex');
     const root = process.env.MEMLUME_HOME;
     if (typeof root !== 'string' || root.trim() === '') throw new Error('Memlume Core is unavailable.');
     const safeRoot = await realpath(root);

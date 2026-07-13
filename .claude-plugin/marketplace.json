@@ -1,0 +1,13 @@
+{
+  "name": "memlume",
+  "owner": {
+    "name": "hi18aa"
+  },
+  "plugins": [
+    {
+      "name": "memlume-claude-code",
+      "source": "./adapters/claude-code",
+      "description": "Connect Claude Code turns to a local Memlume Shared Brain."
+    }
+  ]
+}

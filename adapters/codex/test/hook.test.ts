@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -47,6 +47,37 @@ function environment(daemonUrl: string, outboxDirectory = temporaryDirectory()):
     MEMLUME_PROJECT_ID: projectId,
     MEMLUME_BRAIN_ID: brainId,
     MEMLUME_OUTBOX_DIRECTORY: outboxDirectory,
+  };
+}
+
+function profileEnvironment(daemonUrl: string, outboxDirectory = temporaryDirectory()): NodeJS.ProcessEnv {
+  const directory = temporaryDirectory();
+  const configPath = join(directory, 'config.json');
+  writeFileSync(configPath, JSON.stringify({
+    version: 1,
+    backupDirectory: join(directory, 'backups'),
+    adapters: [{
+      clientType: 'codex',
+      installationId,
+      profileId,
+      projectId,
+      brainId,
+      token,
+      corePath: root,
+      daemonUrl,
+    }],
+  }));
+  return {
+    ...process.env,
+    MEMLUME_CONFIG_PATH: configPath,
+    MEMLUME_OUTBOX_DIRECTORY: outboxDirectory,
+    MEMLUME_HOME: '',
+    MEMLUME_DAEMON_URL: '',
+    MEMLUME_TOKEN: '',
+    MEMLUME_INSTALLATION_ID: '',
+    MEMLUME_PROFILE_ID: '',
+    MEMLUME_PROJECT_ID: '',
+    MEMLUME_BRAIN_ID: '',
   };
 }
 
@@ -125,10 +156,26 @@ describe('Codex plugin hook', () => {
 
     expect(plugin).toMatchObject({ name: 'memlume-codex', mcpServers: './.mcp.json', hooks: './hooks/hooks.json' });
     expect(mcp.mcpServers.memlume.args).toEqual(['./scripts/mcp.mjs']);
-    expect(mcp.mcpServers.memlume.env_vars).toEqual(['MEMLUME_HOME', 'MEMLUME_TOKEN', 'MEMLUME_DAEMON_URL']);
+    expect(mcp.mcpServers.memlume.env_vars).toEqual(['MEMLUME_HOME', 'MEMLUME_TOKEN', 'MEMLUME_DAEMON_URL', 'MEMLUME_CONFIG_PATH']);
     expect(Object.keys(hooks.hooks)).toEqual(['SessionStart', 'UserPromptSubmit', 'Stop']);
     expect(JSON.stringify(hooks)).toContain('PLUGIN_ROOT');
     expect(JSON.stringify(hooks)).toContain('commandWindows');
+  });
+
+  test('publishes the Codex plugin through the repository marketplace catalog', () => {
+    const catalogPath = join(root, '.agents', 'plugins', 'marketplace.json');
+    expect(existsSync(catalogPath)).toBe(true);
+    if (!existsSync(catalogPath)) return;
+    expect(JSON.parse(readFileSync(catalogPath, 'utf8'))).toEqual({
+      name: 'memlume',
+      interface: { displayName: 'Memlume Plugins' },
+      plugins: [{
+        name: 'memlume-codex',
+        source: { source: 'local', path: './adapters/codex' },
+        policy: { installation: 'AVAILABLE', authentication: 'ON_INSTALL' },
+        category: 'Productivity',
+      }],
+    });
   });
 
   test('initializes on SessionStart without sending a Core write', async () => {
@@ -148,6 +195,44 @@ describe('Codex plugin hook', () => {
 
       expect(result).toEqual({ output: {}, stderr: '' });
       expect(requests).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  test('loads the Codex hook profile when Host environment settings are absent', async () => {
+    const requests: Array<{ readonly path: string; readonly authorization: string | undefined }> = [];
+    const server = createServer(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(chunk as Buffer);
+      requests.push({ path: request.url!, authorization: request.headers.authorization });
+      response.setHeader('content-type', 'application/json');
+      if (request.url === '/v1/context/resolve') {
+        response.end(JSON.stringify({ context: context() }));
+        return;
+      }
+      if (request.url === '/v1/memories/capture') {
+        response.statusCode = 201;
+        response.end(JSON.stringify({
+          capture: { memoryId: '00000000-0000-7000-8000-000000000014', status: 'active', brain: brainId, scope, requiresConfirmation: false, source: { eventId: '00000000-0000-7000-8000-000000000015' } },
+        }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end(JSON.stringify({ error: 'not_found' }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      if (address === null || typeof address === 'string') throw new Error('Server address is unavailable.');
+      const result = await invoke(copiedHook(), {
+        hook_event_name: 'UserPromptSubmit', session_id: 'profile-session', turn_id: 'turn-1', prompt: '記住專案使用 pnpm',
+      }, profileEnvironment(`http://127.0.0.1:${address.port}`));
+
+      expect(result.output).toMatchObject({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit' } });
+      await eventually(() => expect(requests.map(({ path }) => path).sort()).toEqual(['/v1/context/resolve', '/v1/memories/capture']));
+      expect(requests.every((request) => request.authorization === `Bearer ${token}`)).toBe(true);
+      expect(JSON.stringify(result)).not.toContain(token);
     } finally {
       server.close();
     }

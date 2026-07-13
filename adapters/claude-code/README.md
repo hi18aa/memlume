@@ -12,7 +12,7 @@ pnpm --filter @memlume/mcp-server build
 claude --plugin-dir ./adapters/claude-code
 ```
 
-Claude Code 會在啟用 Plugin 時詢問設定值。`Memlume adapter token` 使用 Plugin 的 `userConfig.sensitive`，會放到 Claude Code 的安全儲存空間，不會寫入 `plugin.json`、`.mcp.json`、Git 或 Plugin 日誌。請填入已註冊的 Claude Code installation，以及對目標 Project Brain 有 `read` 或 `read_write` mount 的 `brain_id`。
+建議先以 `memlume setup adapter claude-code` 建立本機 profile。Plugin 在未提供 userConfig 時會安全讀取該 profile；若在 Claude Code 填入設定，尤其是 `Memlume adapter token`，`userConfig.sensitive` 會優先使用 Claude Code 的安全儲存空間，不會寫入 `plugin.json`、`.mcp.json`、Git 或 Plugin 日誌。
 
 `memlume_home` 必須是完整的 Memlume repository；Plugin 會確認實際載入的 Adapter SDK 與 MCP Server 都仍位於該目錄內。`daemon_url` 預設為 `http://127.0.0.1:3849`，且 Core 只接受 loopback 位址。
 

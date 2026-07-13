@@ -49,6 +49,38 @@ function environment(plugin, daemonUrl, dataDirectory = temporaryDirectory()) {
   };
 }
 
+function profileEnvironment(plugin, daemonUrl, dataDirectory = temporaryDirectory()) {
+  const directory = temporaryDirectory();
+  const configPath = join(directory, 'config.json');
+  writeFileSync(configPath, JSON.stringify({
+    version: 1,
+    backupDirectory: join(directory, 'backups'),
+    adapters: [{
+      clientType: 'claude-code',
+      installationId,
+      profileId,
+      projectId,
+      brainId,
+      token,
+      corePath: root,
+      daemonUrl,
+    }],
+  }));
+  return {
+    ...process.env,
+    CLAUDE_PLUGIN_ROOT: plugin,
+    CLAUDE_PLUGIN_DATA: dataDirectory,
+    MEMLUME_CONFIG_PATH: configPath,
+    CLAUDE_PLUGIN_OPTION_MEMLUME_HOME: '',
+    CLAUDE_PLUGIN_OPTION_DAEMON_URL: '',
+    CLAUDE_PLUGIN_OPTION_ADAPTER_TOKEN: '',
+    CLAUDE_PLUGIN_OPTION_INSTALLATION_ID: '',
+    CLAUDE_PLUGIN_OPTION_PROFILE_ID: '',
+    CLAUDE_PLUGIN_OPTION_PROJECT_ID: '',
+    CLAUDE_PLUGIN_OPTION_BRAIN_ID: '',
+  };
+}
+
 function invoke(script, body, env) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [script], { env, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -151,13 +183,13 @@ describe('Claude Code plugin adapter', () => {
       hooks: './hooks/hooks.json',
       mcpServers: './.mcp.json',
       userConfig: {
-        memlume_home: { type: 'directory', title: 'Memlume Core directory', description: 'The local Memlume repository containing built Core packages.', required: true },
+        memlume_home: { type: 'directory', title: 'Memlume Core directory', description: 'The local Memlume repository containing built Core packages.', required: false },
         daemon_url: { type: 'string', title: 'Memlume daemon URL', description: 'Loopback URL of the local Memlume daemon.', default: 'http://127.0.0.1:3849' },
-        adapter_token: { type: 'string', title: 'Memlume adapter token', description: 'Token for this Claude Code installation only.', sensitive: true, required: true },
-        installation_id: { type: 'string', title: 'Installation ID', description: 'Memlume installation identity for Claude Code.', required: true },
-        profile_id: { type: 'string', title: 'Profile ID', description: 'Memlume profile identity for Claude Code.', default: 'default', required: true },
-        project_id: { type: 'string', title: 'Project ID', description: 'Memlume project identity for this shared brain.', required: true },
-        brain_id: { type: 'string', title: 'Project Brain ID', description: 'UUIDv7 of the mounted Memlume Project Brain.', required: true },
+        adapter_token: { type: 'string', title: 'Memlume adapter token', description: 'Token for this Claude Code installation only.', sensitive: true, required: false },
+        installation_id: { type: 'string', title: 'Installation ID', description: 'Memlume installation identity for Claude Code.', required: false },
+        profile_id: { type: 'string', title: 'Profile ID', description: 'Memlume profile identity for Claude Code.', default: 'default', required: false },
+        project_id: { type: 'string', title: 'Project ID', description: 'Memlume project identity for this shared brain.', required: false },
+        brain_id: { type: 'string', title: 'Project Brain ID', description: 'UUIDv7 of the mounted Memlume Project Brain.', required: false },
         workspace_path: { type: 'directory', title: 'Workspace path', description: 'Optional workspace path when it differs from Claude Code cwd.', required: false },
       },
     });
@@ -179,6 +211,60 @@ describe('Claude Code plugin adapter', () => {
       },
     });
     assert.equal(rootPackage.scripts['test:claude-code'], 'pnpm --filter @memlume/adapter-sdk build && node --test adapters/claude-code/test/adapter.test.mjs');
+  });
+
+  test('publishes the Claude Code Plugin through the repository marketplace catalog', () => {
+    const catalogPath = join(root, '.claude-plugin', 'marketplace.json');
+    assert.equal(existsSync(catalogPath), true);
+    if (!existsSync(catalogPath)) return;
+    assert.deepEqual(JSON.parse(readFileSync(catalogPath, 'utf8')), {
+      name: 'memlume',
+      owner: { name: 'hi18aa' },
+      plugins: [{
+        name: 'memlume-claude-code',
+        source: './adapters/claude-code',
+        description: 'Connect Claude Code turns to a local Memlume Shared Brain.',
+      }],
+    });
+  });
+
+  test('loads a managed Claude Code profile when Plugin user configuration is omitted', async () => {
+    const requests = [];
+    const server = createServer(async (request, response) => {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      requests.push({ path: request.url, authorization: request.headers.authorization });
+      response.setHeader('content-type', 'application/json');
+      if (request.url === '/v1/context/resolve') {
+        response.end(JSON.stringify({ context: sharedContext() }));
+        return;
+      }
+      if (request.url === '/v1/memories/capture') {
+        response.statusCode = 201;
+        response.end(JSON.stringify({
+          capture: { memoryId: '00000000-0000-7000-8000-000000000014', status: 'active', brain: brainId, scope, requiresConfirmation: false, source: { eventId: '00000000-0000-7000-8000-000000000015' } },
+        }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end(JSON.stringify({ error: 'not_found' }));
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      assert.ok(address !== null && typeof address !== 'string');
+      const plugin = copiedPlugin();
+      const result = await invoke(join(plugin, 'scripts', 'memlume.mjs'), {
+        hook_event_name: 'UserPromptSubmit', session_id: 'claude-profile-session', prompt: '記住專案使用 pnpm',
+      }, profileEnvironment(plugin, `http://127.0.0.1:${address.port}`));
+
+      assert.deepEqual(result.output.hookSpecificOutput?.hookEventName, 'UserPromptSubmit');
+      await eventually(() => assert.deepEqual(requests.map(({ path }) => path).sort(), ['/v1/context/resolve', '/v1/memories/capture']));
+      assert.equal(requests.every((request) => request.authorization === `Bearer ${token}`), true);
+      assert.equal(JSON.stringify(result).includes(token), false);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   test('injects bounded shared context and captures the user prompt without reading Claude memory or transcript', async () => {

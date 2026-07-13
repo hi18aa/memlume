@@ -35,6 +35,10 @@
         "type": "string",
         "minLength": 1
       },
+      "corePath": {
+        "type": "string",
+        "minLength": 1
+      },
       "daemonUrl": {
         "type": "string",
         "minLength": 1

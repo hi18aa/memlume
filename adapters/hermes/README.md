@@ -14,7 +14,9 @@
 pnpm --filter @memlume/adapter-sdk build
 ```
 
-設定的 agent installation 必須已在 Memlume 註冊，並且對目標 Project Brain 有 `read_write` mount。設定值僅放在執行 Hermes 的環境變數，不放進 `plugin.yaml`、版本控制或日誌：
+建議先由 `memlume setup adapter hermes` 建立本機 profile；它會註冊 installation、掛載 Brain、執行 daemon smoke test，並把 token 保留在使用者帳號的 Memlume 設定檔（不會寫入 `plugin.yaml`、Git 或日誌）。Hermes 會自動讀取這個 profile。
+
+下列環境變數仍可用於暫時覆寫 profile，適合進階或 CI 使用：
 
 ```powershell
 $env:MEMLUME_DAEMON_URL = 'http://127.0.0.1:3849'

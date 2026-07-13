@@ -1,10 +1,16 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 const { registerMemlumeOpenClawPlugin } = await import('../src/runtime.mjs');
 
 const brainId = '00000000-0000-7000-8000-000000000013';
+const root = fileURLToPath(new URL('../../../', import.meta.url));
 const configuration = {
   installationId: 'openclaw-installation',
   profileId: 'default',
@@ -164,6 +170,7 @@ test('ships a native OpenClaw package with a declared configuration contract', a
         projectId: { type: 'string', minLength: 1 },
         brainId: { type: 'string', minLength: 1 },
         workspacePath: { type: 'string', minLength: 1 },
+        corePath: { type: 'string', minLength: 1 },
         daemonUrl: { type: 'string', minLength: 1 },
         outboxDirectory: { type: 'string', minLength: 1 },
       },
@@ -178,12 +185,67 @@ test('documents the OpenClaw hook permissions and exposes a targeted verificatio
   const rootPackage = JSON.parse(await readFile(new URL('../../../package.json', import.meta.url), 'utf8'));
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
 
-  assert.equal(rootPackage.scripts['test:openclaw'], 'pnpm --dir adapters/openclaw test');
+  assert.equal(rootPackage.scripts['test:openclaw'], 'pnpm --filter @memlume/adapter-sdk build && pnpm --dir adapters/openclaw test');
   assert.match(readme, /openclaw plugins install --link/);
   assert.match(readme, /allowConversationAccess/);
   assert.match(readme, /allowPromptInjection/);
   assert.match(readme, /MEMLUME_TOKEN/);
   assert.match(readme, /不會讀取、修改或取代 OpenClaw 原生記憶/);
+});
+
+test('uses the private OpenClaw profile token instead of requiring a shared process token', async (context) => {
+  const directory = mkdtempSync(join(tmpdir(), 'memlume-openclaw-profile-'));
+  context.after(() => rmSync(directory, { force: true, recursive: true }));
+  const configPath = join(directory, 'config.json');
+  const profileToken = 'openclaw-profile-token-never-in-plugin-config';
+  const requests = [];
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) {
+      // The adapter SDK owns request serialization; this fixture only needs the route and credentials.
+    }
+    requests.push({ path: request.url, authorization: request.headers.authorization });
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({
+      context: {
+        traceId: '00000000-0000-7000-8000-000000000001',
+        intent: 'shared_memory',
+        scope: { level: 'project', projectId: 'memlume' },
+        directives: [], procedures: [], preferences: [], knowledge: [], decisions: [],
+        explanation: { sourceMemoryIds: [], exclusions: [], budget: { limitUnits: 320, usedUnits: 0, included: [], omitted: [], truncated: false } },
+      },
+    }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    assert.ok(address !== null && typeof address !== 'string');
+    writeFileSync(configPath, JSON.stringify({
+      version: 1,
+      backupDirectory: join(directory, 'backups'),
+      adapters: [{
+        clientType: 'openclaw',
+        installationId: configuration.installationId,
+        profileId: configuration.profileId,
+        projectId: configuration.projectId,
+        brainId,
+        token: profileToken,
+        corePath: root,
+        daemonUrl: `http://127.0.0.1:${address.port}`,
+      }],
+    }));
+    const handlers = new Map();
+    registerMemlumeOpenClawPlugin({
+      config: { ...configuration, corePath: root, daemonUrl: `http://127.0.0.1:${address.port}` },
+      on(name, handler) { handlers.set(name, { handler }); },
+    }, {
+      environment: { MEMLUME_CONFIG_PATH: configPath, MEMLUME_HOME: '', MEMLUME_TOKEN: '' },
+    });
+
+    assert.equal(await handlers.get('before_prompt_build').handler({ prompt: 'continue' }, { sessionId: 'openclaw-session' }), undefined);
+    assert.deepEqual(requests, [{ path: '/v1/context/resolve', authorization: `Bearer ${profileToken}` }]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test('passes non-secret daemon and outbox settings to the Core client factory', async () => {

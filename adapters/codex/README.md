@@ -12,7 +12,9 @@
 
 ## 設定
 
-將下列值放在啟動 Codex 的環境。不要把 adapter token 寫進 `.mcp.json`、`hooks.json` 或 Git。
+建議先執行 `memlume setup adapter codex`。Codex Plugin 與內建 MCP launcher 會從使用者帳號的 Memlume profile 讀取個別 installation 的 token，不會將它寫進 `.mcp.json`、`hooks.json` 或 Git。
+
+下列環境變數可覆寫 profile，適合暫時測試或 CI：
 
 ```powershell
 $env:MEMLUME_HOME = 'C:/work/memlume'
@@ -26,7 +28,7 @@ $env:MEMLUME_BRAIN_ID = 'your-project-brain-uuidv7'
 
 可選的 `MEMLUME_OUTBOX_DIRECTORY` 可指定明確記憶寫入失敗時的本機重送位置。未設定時，Plugin 使用 Codex 提供的 `PLUGIN_DATA`；該位置不可用才會回到 Memlume 預設資料夾。
 
-`MEMLUME_HOME` 必須指向完整 Memlume repository，Plugin 即使被安裝到另一個資料夾，也只會從這個位置載入已建置的 Core。MCP launcher 會確認實際載入的檔案仍在此目錄內。
+`MEMLUME_HOME` 必須指向完整 Memlume repository；profile 的 `corePath` 也有相同要求。Plugin 即使被安裝到另一個資料夾，也只會從這個位置載入已建置的 Core。MCP launcher 會確認實際載入的檔案仍在此目錄內。
 
 ## 每一回合怎麼運作
 

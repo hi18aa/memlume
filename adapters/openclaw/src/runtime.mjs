@@ -114,22 +114,26 @@ function configurationFor(api, context, event, environment) {
     envelope,
     brainId,
     scope: { level: 'project', projectId },
+    corePath: text(pluginConfig.corePath) ?? text(environment.MEMLUME_HOME),
     daemonUrl: text(pluginConfig.daemonUrl) ?? text(environment.MEMLUME_DAEMON_URL) ?? 'http://127.0.0.1:3849',
     outboxDirectory: text(pluginConfig.outboxDirectory) ?? text(environment.MEMLUME_OUTBOX_DIRECTORY),
   };
 }
 
 async function createAdapterClient(environment, configuration) {
-  const root = text(environment.MEMLUME_HOME);
+  const root = configuration.corePath;
   if (root === undefined) throw new Error('Memlume Core is unavailable.');
   const safeRoot = await realpath(root);
   const entry = await realpath(resolve(safeRoot, 'packages', 'adapter-sdk', 'dist', 'index.js'));
   if (!isInside(safeRoot, entry)) throw new Error('Memlume Core is unavailable.');
   const module = await import(pathToFileURL(entry).href);
   if (typeof module.AdapterClient !== 'function') throw new Error('Memlume Core is unavailable.');
+  const profile = typeof module.loadLocalAdapterProfile === 'function'
+    ? module.loadLocalAdapterProfile('openclaw', { environment })
+    : undefined;
   return new module.AdapterClient({
     daemonUrl: configuration.daemonUrl,
-    token: environment.MEMLUME_TOKEN,
+    token: text(environment.MEMLUME_TOKEN) ?? profile?.token,
     ...(configuration.outboxDirectory === undefined ? {} : { outboxDirectory: configuration.outboxDirectory }),
     warn: () => undefined,
   });
