@@ -1,0 +1,25 @@
+{
+  "name": "@memlume/backup",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "pnpm --filter @memlume/database build && tsc -p tsconfig.json",
+    "test": "pnpm run build && node --test",
+    "typecheck": "pnpm --filter @memlume/database build && tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@memlume/database": "workspace:*",
+    "better-sqlite3": "^12.8.0",
+    "fflate": "^0.8.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.10.1"
+  }
+}
