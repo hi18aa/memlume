@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -24,6 +25,62 @@ const OUTBOX_LOCK_RETRY_MS = 10;
 const OUTBOX_LOCK_TIMEOUT_MS = 15_000;
 const SECRET_OUTBOX_WARNING = 'Memlume outbox skipped a message containing a secret.';
 const explicitMemoryRequestPattern = /^\s*(?:(?:請|請你)\s*)?(?:記住|記下|記錄|remember|memorize|save(?:\s+this)?)\s*[,，:：]?\s*/iu;
+
+export interface LocalAdapterProfile {
+  readonly clientType: string;
+  readonly installationId: string;
+  readonly profileId: string;
+  readonly projectId: string;
+  readonly brainId: string;
+  readonly token: string;
+  readonly corePath: string;
+  readonly daemonUrl: string;
+  readonly workspacePath?: string;
+  readonly outboxDirectory?: string;
+}
+
+export interface LoadLocalAdapterProfileOptions {
+  readonly configPath?: string;
+  readonly environment?: NodeJS.ProcessEnv;
+}
+
+/**
+ * 讀取由 Memlume CLI 管理的單一 Agent profile。
+ * 明確傳入的 Host 環境變數會覆寫 profile，讓既有部署不必搬遷設定。
+ */
+export function loadLocalAdapterProfile(clientType: string, { configPath, environment = process.env }: LoadLocalAdapterProfileOptions = {}): LocalAdapterProfile | undefined {
+  const expectedClientType = nonEmptyText(clientType);
+  if (expectedClientType === undefined) return undefined;
+  const configuredPath = nonEmptyText(configPath) ?? nonEmptyText(environment.MEMLUME_CONFIG_PATH) ?? join(homedir(), '.config', 'memlume', 'config.json');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(configuredPath, 'utf8'));
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(parsed) || !Array.isArray(parsed.adapters)) return undefined;
+  const requestedInstallation = nonEmptyText(environment.MEMLUME_INSTALLATION_ID);
+  const requestedProfile = nonEmptyText(environment.MEMLUME_PROFILE_ID);
+  const stored = parsed.adapters.find((profile): profile is LocalAdapterProfile => (
+    isLocalAdapterProfile(profile)
+    && profile.clientType === expectedClientType
+    && (requestedInstallation === undefined || profile.installationId === requestedInstallation)
+    && (requestedProfile === undefined || profile.profileId === requestedProfile)
+  ));
+  if (stored === undefined) return undefined;
+  return compactProfile({
+    ...stored,
+    installationId: nonEmptyText(environment.MEMLUME_INSTALLATION_ID) ?? stored.installationId,
+    profileId: nonEmptyText(environment.MEMLUME_PROFILE_ID) ?? stored.profileId,
+    projectId: nonEmptyText(environment.MEMLUME_PROJECT_ID) ?? stored.projectId,
+    brainId: nonEmptyText(environment.MEMLUME_BRAIN_ID) ?? stored.brainId,
+    token: nonEmptyText(environment.MEMLUME_TOKEN) ?? stored.token,
+    corePath: nonEmptyText(environment.MEMLUME_HOME) ?? stored.corePath,
+    daemonUrl: nonEmptyText(environment.MEMLUME_DAEMON_URL) ?? stored.daemonUrl,
+    workspacePath: nonEmptyText(environment.MEMLUME_WORKSPACE_PATH) ?? stored.workspacePath,
+    outboxDirectory: nonEmptyText(environment.MEMLUME_OUTBOX_DIRECTORY) ?? stored.outboxDirectory,
+  });
+}
 
 export interface AdapterClientOptions {
   readonly daemonUrl: string;
@@ -619,6 +676,39 @@ function hasToken(token: string | undefined): token is string {
 
 function validTimeout(value: number): boolean {
   return Number.isSafeInteger(value) && value > 0;
+}
+
+function compactProfile(profile: LocalAdapterProfile): LocalAdapterProfile {
+  return {
+    clientType: profile.clientType,
+    installationId: profile.installationId,
+    profileId: profile.profileId,
+    projectId: profile.projectId,
+    brainId: profile.brainId,
+    token: profile.token,
+    corePath: profile.corePath,
+    daemonUrl: profile.daemonUrl,
+    ...(profile.workspacePath === undefined ? {} : { workspacePath: profile.workspacePath }),
+    ...(profile.outboxDirectory === undefined ? {} : { outboxDirectory: profile.outboxDirectory }),
+  };
+}
+
+function isLocalAdapterProfile(value: unknown): value is LocalAdapterProfile {
+  if (!isRecord(value)) return false;
+  return nonEmptyText(value.clientType) !== undefined
+    && nonEmptyText(value.installationId) !== undefined
+    && nonEmptyText(value.profileId) !== undefined
+    && nonEmptyText(value.projectId) !== undefined
+    && nonEmptyText(value.brainId) !== undefined
+    && nonEmptyText(value.token) !== undefined
+    && nonEmptyText(value.corePath) !== undefined
+    && nonEmptyText(value.daemonUrl) !== undefined
+    && (value.workspacePath === undefined || nonEmptyText(value.workspacePath) !== undefined)
+    && (value.outboxDirectory === undefined || nonEmptyText(value.outboxDirectory) !== undefined);
+}
+
+function nonEmptyText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

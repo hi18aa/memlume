@@ -1,7 +1,9 @@
 import importlib
+import json
 import os
 from pathlib import Path
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -191,6 +193,48 @@ class HermesPluginTests(unittest.TestCase):
         unconfigured = plugin_module.MemlumePlugin(environment={}, runner=failing_runner)
         self.assertIsNone(unconfigured.pre_llm_call(session_id="hermes-session", user_message="任何訊息"))
         self.assertEqual(len(calls), before_unconfigured)
+
+    def test_loads_a_hermes_profile_when_host_environment_is_not_configured(self):
+        plugin_module = importlib.import_module("memlume_plugin.plugin")
+        calls = []
+        captured = threading.Event()
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps({
+                "version": 1,
+                "backupDirectory": str(Path(directory) / "backups"),
+                "adapters": [{
+                    "clientType": "hermes",
+                    "installationId": "hermes-main",
+                    "profileId": "default",
+                    "projectId": "memlume",
+                    "brainId": "00000000-0000-7000-8000-000000000013",
+                    "token": "hermes-profile-token",
+                    "corePath": "C:/work/memlume",
+                    "daemonUrl": "http://127.0.0.1:3849",
+                }],
+            }), encoding="utf-8")
+
+            def runner(payload, _timeout):
+                calls.append(payload)
+                if payload["operation"] == "onUserMessage":
+                    captured.set()
+                return {}
+
+            plugin = plugin_module.MemlumePlugin(environment={"MEMLUME_CONFIG_PATH": str(config_path)}, runner=runner)
+            plugin.pre_llm_call(session_id="hermes-session", user_message="記住專案使用 pnpm")
+
+        self.assertTrue(captured.wait(0.3))
+        capture = next(call for call in calls if call["operation"] == "onUserMessage")
+        self.assertEqual(capture["envelope"], {
+            "clientType": "hermes",
+            "installationId": "hermes-main",
+            "profileId": "default",
+            "sessionId": "hermes-session",
+            "projectId": "memlume",
+        })
+        self.assertEqual(capture["message"]["brainId"], "00000000-0000-7000-8000-000000000013")
+        self.assertNotIn("hermes-profile-token", repr(calls))
 
 
 if __name__ == "__main__":

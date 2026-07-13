@@ -25,7 +25,7 @@ class MemlumePlugin:
         runner: BridgeRunner | None = None,
         timeout_seconds: float = 0.5,
     ) -> None:
-        self._environment = dict(os.environ if environment is None else environment)
+        self._environment = _with_local_profile(dict(os.environ if environment is None else environment))
         self._runner = runner or _SubprocessBridge(self._environment)
         self._timeout_seconds = timeout_seconds
         self._turns: OrderedDict[str, str] = OrderedDict()
@@ -192,3 +192,50 @@ def register(ctx: Any) -> MemlumePlugin:
     for hook in ("pre_llm_call", "post_llm_call", "on_session_end", "on_session_finalize"):
         ctx.register_hook(hook, getattr(plugin, hook))
     return plugin
+
+
+def _with_local_profile(environment: dict[str, str]) -> dict[str, str]:
+    """以 CLI 管理的 profile 補足 Hermes 所需的本機設定，不輸出任何 secret。"""
+    configured_path = environment.get("MEMLUME_CONFIG_PATH", "").strip()
+    path = Path(configured_path) if configured_path else Path.home() / ".config" / "memlume" / "config.json"
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return environment
+    profiles = parsed.get("adapters") if isinstance(parsed, dict) else None
+    if not isinstance(profiles, list):
+        return environment
+    requested_installation = environment.get("MEMLUME_INSTALLATION_ID", "").strip()
+    requested_profile = environment.get("MEMLUME_PROFILE_ID", "").strip()
+    profile = next((candidate for candidate in profiles if _matches_profile(candidate, requested_installation, requested_profile)), None)
+    if not isinstance(profile, dict):
+        return environment
+    fields = {
+        "MEMLUME_INSTALLATION_ID": "installationId",
+        "MEMLUME_PROFILE_ID": "profileId",
+        "MEMLUME_PROJECT_ID": "projectId",
+        "MEMLUME_BRAIN_ID": "brainId",
+        "MEMLUME_TOKEN": "token",
+        "MEMLUME_HOME": "corePath",
+        "MEMLUME_DAEMON_URL": "daemonUrl",
+        "MEMLUME_WORKSPACE_PATH": "workspacePath",
+        "MEMLUME_OUTBOX_DIRECTORY": "outboxDirectory",
+    }
+    resolved = dict(environment)
+    for destination, source in fields.items():
+        current = resolved.get(destination, "").strip()
+        value = profile.get(source)
+        if not current and isinstance(value, str) and value.strip():
+            resolved[destination] = value.strip()
+    return resolved
+
+
+def _matches_profile(candidate: Any, installation_id: str, profile_id: str) -> bool:
+    return (
+        isinstance(candidate, dict)
+        and candidate.get("clientType") == "hermes"
+        and isinstance(candidate.get("installationId"), str)
+        and isinstance(candidate.get("profileId"), str)
+        and (not installation_id or candidate["installationId"] == installation_id)
+        and (not profile_id or candidate["profileId"] == profile_id)
+    )

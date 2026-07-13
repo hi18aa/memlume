@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, test } from 'node:test';
 
-import { AdapterClient } from '../dist/index.js';
+import { AdapterClient, loadLocalAdapterProfile } from '../dist/index.js';
 
 const directories = [];
 const token = 'adapter-token-that-must-not-be-persisted';
@@ -106,6 +106,57 @@ function deferred() {
 }
 
 describe('AdapterClient', () => {
+  test('loads only the matching local adapter profile and lets explicit host configuration override it', () => {
+    const directory = temporaryOutboxDirectory();
+    const configPath = join(directory, 'config.json');
+    writeFileSync(configPath, JSON.stringify({
+      version: 1,
+      backupDirectory: join(directory, 'backups'),
+      adapters: [
+        {
+          clientType: 'hermes',
+          installationId: 'hermes-main',
+          profileId: 'default',
+          projectId: 'memlume',
+          brainId,
+          token: 'hermes-token',
+          corePath: 'C:/work/memlume',
+          daemonUrl: 'http://127.0.0.1:3849',
+        },
+        {
+          clientType: 'codex',
+          installationId: 'codex-main',
+          profileId: 'default',
+          projectId: 'memlume',
+          brainId,
+          token: 'codex-token',
+          corePath: 'C:/work/memlume',
+          daemonUrl: 'http://127.0.0.1:3849',
+        },
+      ],
+    }));
+
+    const profile = loadLocalAdapterProfile('hermes', {
+      configPath,
+      environment: {
+        MEMLUME_TOKEN: 'explicit-hermes-token',
+        MEMLUME_PROJECT_ID: 'explicit-project',
+      },
+    });
+
+    assert.deepEqual(profile, {
+      clientType: 'hermes',
+      installationId: 'hermes-main',
+      profileId: 'default',
+      projectId: 'explicit-project',
+      brainId,
+      token: 'explicit-hermes-token',
+      corePath: 'C:/work/memlume',
+      daemonUrl: 'http://127.0.0.1:3849',
+    });
+    assert.equal(loadLocalAdapterProfile('claude-code', { configPath, environment: {} }), undefined);
+  });
+
   test('reports rejected and ignored capture outcomes without claiming a saved memory', async () => {
     const fake = fakeFetch(
       { status: 200, body: savedCapture('rejected') },
