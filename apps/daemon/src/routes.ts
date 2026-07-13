@@ -76,6 +76,7 @@ const ReviewCandidateRequestSchema = z.object({
   reason: NonEmptyTextSchema,
   supersedeMemoryId: UuidV7Schema.optional(),
 }).strict();
+const ConsoleReviewCandidateRequestSchema = ReviewCandidateRequestSchema.omit({ actor: true });
 
 const ResolveContextRequestSchema = z
   .object({
@@ -148,9 +149,62 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
   app.get('/v1/setup/brains', requireSetup, (_request, response) => {
     response.json({ brains: services.brains.listBrains() });
   });
+  app.get('/v1/setup/memories', requireSetup, (_request, response) => {
+    response.json({ memories: services.store.list({ brainIds: services.brains.listBrains().map(({ id }) => id) }) });
+  });
+  app.get('/v1/setup/inbox', requireSetup, (_request, response) => {
+    response.json({ memories: services.store.list({ brainIds: services.brains.listBrains().map(({ id }) => id), status: 'candidate' }) });
+  });
+  app.post('/v1/setup/inbox/:memoryId/approve', requireSetup, (request, response) => {
+    const { memoryId } = MemoryParametersSchema.parse(request.params);
+    const input = ConsoleReviewCandidateRequestSchema.parse(request.body);
+    const brainIds = services.brains.listBrains().map(({ id }) => id);
+    const candidate = services.store.get(memoryId, brainIds);
+    if (candidate === undefined) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (candidate.status !== 'candidate') {
+      response.status(409).json({ error: 'candidate_not_pending' });
+      return;
+    }
+    const active = services.store.list({ brainIds: [candidate.brainId], status: 'active' });
+    const resolution = assessMemoryConflict({ proposal: { ...candidate, status: 'active' }, existing: active });
+    if (input.supersedeMemoryId !== undefined && resolution.action !== 'review') {
+      response.status(400).json({ error: 'invalid_supersede' });
+      return;
+    }
+    if (resolution.action === 'reuse') {
+      response.status(409).json({ error: 'active_duplicate' });
+      return;
+    }
+    if (resolution.action === 'review' && input.supersedeMemoryId !== resolution.memoryId) {
+      response.status(400).json({ error: 'confirmation_required' });
+      return;
+    }
+    response.json({ memory: services.store.approveCandidate(memoryId, { ...input, actor: 'memlume-console' }, brainIds) });
+  });
+  app.post('/v1/setup/inbox/:memoryId/reject', requireSetup, (request, response) => {
+    const { memoryId } = MemoryParametersSchema.parse(request.params);
+    const input = ConsoleReviewCandidateRequestSchema.omit({ supersedeMemoryId: true }).parse(request.body);
+    const brainIds = services.brains.listBrains().map(({ id }) => id);
+    const candidate = services.store.get(memoryId, brainIds);
+    if (candidate === undefined) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (candidate.status !== 'candidate') {
+      response.status(409).json({ error: 'candidate_not_pending' });
+      return;
+    }
+    response.json({ memory: services.store.rejectCandidate(memoryId, { ...input, actor: 'memlume-console' }, brainIds) });
+  });
   app.post('/v1/setup/installations', requireSetup, (request, response) => {
     const registration = services.brains.registerInstallation(RegisterInstallationRequestSchema.parse(request.body));
     response.status(201).json(registration);
+  });
+  app.get('/v1/setup/installations', requireSetup, (_request, response) => {
+    response.json({ installations: services.brains.listInstallations() });
   });
   app.post('/v1/setup/mounts', requireSetup, (request, response) => {
     response.status(201).json({ mount: services.brains.mountBrain(MountBrainRequestSchema.parse(request.body)) });

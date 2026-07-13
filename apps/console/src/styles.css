@@ -1,0 +1,46 @@
+:root { color: #e6edf3; background: #10151c; font-family: Inter, "Noto Sans TC", system-ui, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; background: #10151c; }
+button, input, select { font: inherit; }
+button { cursor: pointer; border: 0; border-radius: .45rem; padding: .58rem .9rem; color: #06140d; background: #72e2a8; font-weight: 700; }
+button:disabled { cursor: not-allowed; opacity: .55; }
+input, select { width: 100%; border: 1px solid #405060; border-radius: .4rem; padding: .55rem .65rem; color: inherit; background: #18212b; }
+.site-header { display: flex; align-items: center; justify-content: space-between; gap: 1.5rem; padding: 1rem max(1rem, calc((100vw - 1200px) / 2)); border-bottom: 1px solid #263342; background: #141c25; }
+.site-header > div { display: flex; align-items: baseline; gap: .65rem; color: #9fb1c3; }
+.brand { color: #f5fbff; font-size: 1.2rem; font-weight: 800; text-decoration: none; }
+.token-form { display: grid; grid-template-columns: auto minmax(13rem, 22rem) auto; align-items: center; gap: .5rem; }
+.token-form label { color: #b6c3d0; font-size: .875rem; }
+.shell { display: grid; grid-template-columns: 12rem minmax(0, 1fr); min-height: calc(100vh - 4.75rem); max-width: 1200px; margin: auto; }
+nav { display: flex; flex-direction: column; gap: .25rem; padding: 1.25rem .75rem; border-right: 1px solid #263342; }
+nav a { border-radius: .4rem; padding: .6rem .75rem; color: #b6c3d0; text-decoration: none; }
+nav a.router-link-active, nav a:hover { color: #f5fbff; background: #263342; }
+main { min-width: 0; padding: clamp(1rem, 3vw, 2.5rem); }
+section { max-width: 980px; }
+h1 { margin: 0; font-size: clamp(1.65rem, 3vw, 2.25rem); }
+.lede { margin: .5rem 0 1.5rem; color: #9fb1c3; line-height: 1.6; }
+.notice { margin: 1rem 0; border-left: 3px solid #7897b5; padding: .75rem 1rem; color: #c7d4df; background: #18212b; }
+.notice.error { border-color: #ff8f8f; color: #ffd3d3; }
+.notice.success { border-color: #72e2a8; color: #c7f9dd; }
+.summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .75rem; }
+.summary-grid div { padding: 1rem; border: 1px solid #263342; border-radius: .55rem; background: #141c25; }
+dt { color: #9fb1c3; font-size: .875rem; } dd { margin: .35rem 0 0; font-size: 1.15rem; font-weight: 700; }
+.inline-form, .backup-actions, .agent-form, .mount-form { display: grid; grid-template-columns: minmax(12rem, 1fr) 10rem auto; gap: .6rem; align-items: end; margin: 1rem 0; }
+.agent-form, .mount-form { grid-template-columns: repeat(3, minmax(10rem, 1fr)); }
+.review-reason { display: grid; max-width: 36rem; gap: .35rem; color: #b6c3d0; font-size: .9rem; }
+.actions { display: flex; gap: .45rem; } .actions button { padding: .4rem .6rem; }
+.backup-actions { grid-template-columns: minmax(14rem, 1fr) auto; max-width: 42rem; }
+.backup-actions label { display: grid; gap: .35rem; color: #b6c3d0; font-size: .9rem; }
+.danger { color: #fff; background: #b9414e; }
+.table-wrap { overflow-x: auto; border: 1px solid #263342; border-radius: .55rem; }
+table { width: 100%; border-collapse: collapse; min-width: 36rem; background: #141c25; }
+th, td { padding: .75rem; border-bottom: 1px solid #263342; text-align: left; vertical-align: top; }
+th { color: #9fb1c3; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+tr:last-child td { border-bottom: 0; } code { color: #9ad0ff; font-size: .8rem; }
+.memory-id { user-select: all; } .copy-memory-id { margin: .35rem 0 0; padding: .3rem .5rem; font-size: .8rem; }
+@media (max-width: 700px) {
+  .site-header { align-items: stretch; flex-direction: column; gap: .8rem; }
+  .token-form { grid-template-columns: 1fr auto; } .token-form label { grid-column: 1 / -1; }
+  .shell { display: block; } nav { overflow-x: auto; flex-direction: row; padding: .65rem .75rem; border-right: 0; border-bottom: 1px solid #263342; }
+  nav a { flex: 0 0 auto; } .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .inline-form, .backup-actions, .agent-form, .mount-form { grid-template-columns: 1fr; } main { padding: 1.25rem 1rem; }
+}

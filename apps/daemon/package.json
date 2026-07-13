@@ -9,8 +9,9 @@
   "types": "./dist/index.d.ts",
   "files": ["dist"],
   "scripts": {
+    "build:console": "pnpm --filter @memlume/console build",
     "build:dependencies": "pnpm --filter=@memlume/daemon... --filter=!@memlume/daemon --if-present run build",
-    "build": "pnpm run build:dependencies && tsc -p tsconfig.json",
+    "build": "pnpm run build:console && pnpm run build:dependencies && tsc -p tsconfig.json",
     "start": "node dist/start.js",
     "test": "pnpm run build && vitest run",
     "typecheck": "pnpm run build:dependencies && tsc -p tsconfig.json --noEmit"

@@ -9,12 +9,14 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { type AddressInfo, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { registerRoutes, type BackupLifecycle } from './routes.js';
 
 export interface DaemonOptions {
   readonly databasePath: string;
   readonly setupToken?: string;
+  readonly consolePath?: string;
 }
 
 export interface Daemon {
@@ -32,7 +34,7 @@ export interface RunningDaemon extends Daemon {
   stop(): Promise<void>;
 }
 
-export function createDaemon({ databasePath, setupToken }: DaemonOptions): Daemon {
+export function createDaemon({ databasePath, setupToken, consolePath = defaultConsolePath() }: DaemonOptions): Daemon {
   let runtime: DaemonRuntime | undefined;
   let activeRouter: Express;
   let restoring = false;
@@ -41,6 +43,14 @@ export function createDaemon({ databasePath, setupToken }: DaemonOptions): Daemo
   const drainWaiters: Array<() => void> = [];
   const app = express();
   app.disable('x-powered-by');
+  app.use('/console', express.static(consolePath));
+  app.get('/console/{*path}', (_request, response, next) => {
+    response.sendFile('index.html', { root: consolePath }, (error) => {
+      if (error !== undefined) {
+        next(error);
+      }
+    });
+  });
 
   const backup: BackupLifecycle = {
     async create({ brainId, password }) {
@@ -226,12 +236,12 @@ function requireRuntime(runtime: DaemonRuntime | undefined): DaemonRuntime {
   return runtime;
 }
 
-export async function startDaemon({ databasePath, port = 0, setupToken }: StartDaemonOptions): Promise<RunningDaemon> {
+export async function startDaemon({ databasePath, port = 0, setupToken, consolePath }: StartDaemonOptions): Promise<RunningDaemon> {
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error('Port must be an integer from 0 to 65535.');
   }
 
-  const daemon = createDaemon({ databasePath, setupToken });
+  const daemon = createDaemon({ databasePath, setupToken, ...(consolePath === undefined ? {} : { consolePath }) });
   try {
     const server = await listen(daemon.app, port);
     const address = server.address();
@@ -254,6 +264,10 @@ export async function startDaemon({ databasePath, port = 0, setupToken }: StartD
     daemon.close();
     throw error;
   }
+}
+
+function defaultConsolePath(): string {
+  return fileURLToPath(new URL('../../console/dist', import.meta.url));
 }
 
 function listen(app: Express, port: number): Promise<Server> {

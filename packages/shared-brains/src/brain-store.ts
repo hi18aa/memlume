@@ -70,6 +70,13 @@ export class BrainStore {
     return rows.map(toBrain);
   }
 
+  listInstallations(): AgentInstallation[] {
+    const rows = this.database
+      .prepare('SELECT id, client_type, installation_id, profile_id, display_name FROM agent_installations ORDER BY created_at, id')
+      .all() as AgentInstallationRow[];
+    return rows.map(toAgentInstallation);
+  }
+
   registerInstallation(input: {
     readonly clientType: string;
     readonly installationId: string;

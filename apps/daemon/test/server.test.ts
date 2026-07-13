@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -408,6 +408,104 @@ describe('localhost daemon API', () => {
     const { response, body } = await requestJson(daemon, '/v1/health');
     expect(response.status).toBe(200);
     expect(body).toEqual({ status: 'ok' });
+  });
+
+  test('serves the built Console and its browser routes from the loopback daemon', async () => {
+    const consolePath = mkdtempSync(join(tmpdir(), 'memlume-console-'));
+    directories.push(consolePath);
+    writeFileSync(join(consolePath, 'index.html'), '<!doctype html><title>Memlume Console</title>');
+    const daemon = await startDaemon({ databasePath: createDatabasePath(), port: 0, consolePath });
+    daemons.push(daemon);
+
+    const asset = await fetch(`http://127.0.0.1:${daemon.address.port}/console/`);
+    const route = await fetch(`http://127.0.0.1:${daemon.address.port}/console/brains`);
+
+    expect(daemon.address.address).toBe('127.0.0.1');
+    await expect(asset.text()).resolves.toContain('Memlume Console');
+    await expect(route.text()).resolves.toContain('Memlume Console');
+  });
+
+  test('serves the default production Console built with the daemon', async () => {
+    const daemon = await startDaemon({ databasePath: createDatabasePath(), port: 0 });
+    daemons.push(daemon);
+
+    const response = await fetch(`http://127.0.0.1:${daemon.address.port}/console/`);
+
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toContain('Memlume Console');
+  });
+
+  test('provides Console inventories only to a request with the setup token', async () => {
+    const { daemon, headers } = await startAdapterDaemon();
+    const unauthorized = await requestJson(daemon, '/v1/setup/memories');
+    const memory = await requestJson(daemon, '/v1/memories', {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        kind: 'fact',
+        canonicalText: 'Memlume Console uses local setup APIs.',
+        structuredData: { subject: 'Memlume Console', predicate: 'uses', object: 'local setup APIs', confidence: 1 },
+        scope: { level: 'global' },
+      }),
+    });
+
+    expect(unauthorized.response.status).toBe(401);
+    expect(memory.response.status).toBe(201);
+    const setupHeaders = { 'x-memlume-setup-token': SETUP_TOKEN };
+    const memories = await requestJson(daemon, '/v1/setup/memories', { headers: setupHeaders });
+    const inbox = await requestJson(daemon, '/v1/setup/inbox', { headers: setupHeaders });
+    const installations = await requestJson(daemon, '/v1/setup/installations', { headers: setupHeaders });
+
+    expect(memories.body).toMatchObject({ memories: [expect.objectContaining({ canonicalText: 'Memlume Console uses local setup APIs.' })] });
+    expect(inbox.body).toEqual({ memories: [] });
+    expect(installations.body).toMatchObject({ installations: [expect.objectContaining({ clientType: 'test' })] });
+  });
+
+  test('lets the Console approve or reject candidates through setup-token-only inbox actions', async () => {
+    const { daemon, headers } = await startAdapterDaemon();
+    const candidate = await requestJson(daemon, '/v1/memories/capture', {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        rawContent: 'This project uses pnpm.',
+        eventType: 'user_statement',
+        source: { type: 'test', reference: 'console:reject' },
+        scope: { level: 'project', projectId: 'memlume' },
+      }),
+    });
+    const candidateId = (candidate.body as { readonly capture: { readonly memoryId: string } }).capture.memoryId;
+    const denied = await requestJson(daemon, `/v1/setup/inbox/${candidateId}/reject`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: 'Not trusted.' }),
+    });
+    const rejected = await requestJson(daemon, `/v1/setup/inbox/${candidateId}/reject`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-memlume-setup-token': SETUP_TOKEN },
+      body: JSON.stringify({ reason: 'Not trusted.' }),
+    });
+
+    expect(candidate.response.status).toBe(201);
+    expect(denied.response.status).toBe(401);
+    expect(rejected.body).toMatchObject({ memory: { id: candidateId, status: 'rejected' } });
+    const approvedCandidate = await requestJson(daemon, '/v1/memories/capture', {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        rawContent: 'This project uses bun.',
+        eventType: 'user_statement',
+        source: { type: 'test', reference: 'console:approve' },
+        scope: { level: 'project', projectId: 'memlume' },
+      }),
+    });
+    const approvedId = (approvedCandidate.body as { readonly capture: { readonly memoryId: string } }).capture.memoryId;
+    const approved = await requestJson(daemon, `/v1/setup/inbox/${approvedId}/approve`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-memlume-setup-token': SETUP_TOKEN },
+      body: JSON.stringify({ reason: 'Confirmed by Console.' }),
+    });
+
+    expect(approved.body).toMatchObject({ memory: { id: approvedId, status: 'active' } });
   });
 
   test('records events and saves searchable facts through the same daemon store', async () => {
