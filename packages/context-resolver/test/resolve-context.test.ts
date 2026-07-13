@@ -2,7 +2,15 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { ContextPackSchema, MemoryItemSchema, createUuidV7, type ContextPack, type MemoryItem, type MemoryScope } from '@memlume/contracts';
+import {
+  ContextPackSchema,
+  DEFAULT_PERSONAL_BRAIN_ID,
+  MemoryItemSchema,
+  createUuidV7,
+  type ContextPack,
+  type MemoryItem,
+  type MemoryScope,
+} from '@memlume/contracts';
 import { openDatabase, type SqliteDatabase } from '@memlume/database/internal';
 import { afterEach, describe, expect, test } from 'vitest';
 
@@ -10,6 +18,7 @@ import * as resolverModule from '../src/index.js';
 import * as retrieval from '../../retrieval/src/index.js';
 
 type MemoryDraft = {
+  readonly brainId?: string;
   readonly kind: 'policy' | 'preference' | 'fact' | 'decision';
   readonly canonicalText: string;
   readonly structuredData: Record<string, unknown>;
@@ -23,13 +32,23 @@ type MemoryDraft = {
 type MemoryStore = {
   save(input: MemoryDraft): MemoryItem;
 };
+type OutcomeStore = {
+  recordUsage(input: {
+    readonly memoryId: string;
+    readonly taskId: string;
+    readonly agentId: string;
+    readonly wasIncluded: boolean;
+    readonly outcome?: 'adopted' | 'ignored' | 'corrected' | null;
+  }, brainIds: readonly string[]): unknown;
+};
 type MemoryStoreConstructor = new (database: SqliteDatabase) => MemoryStore;
-type ContextResolverConstructor = new (store: MemoryStore) => {
+type ContextResolverConstructor = new (store: MemoryStore, outcomes?: OutcomeStore) => {
   resolve(input: {
     readonly intent: string;
     readonly scope: MemoryScope;
     readonly task: string | null;
     readonly contextBudget: number;
+    readonly brainIds?: readonly string[];
     readonly entities?: readonly string[];
     readonly availableTools?: readonly string[];
   }): ContextPack;
@@ -44,7 +63,7 @@ const { ContextResolver, ESTIMATED_TEXT_UNIT_CHARS } = resolverModule as {
 const databases: SqliteDatabase[] = [];
 const directories: string[] = [];
 
-function createResolver(): { database: SqliteDatabase; store: MemoryStore; resolver: InstanceType<ContextResolverConstructor> } {
+function createResolver(): { database: SqliteDatabase; store: MemoryStore; outcomes: OutcomeStore; resolver: InstanceType<ContextResolverConstructor> } {
   const directory = mkdtempSync(join(tmpdir(), 'memlume-context-resolver-'));
   directories.push(directory);
   const database = openDatabase(join(directory, 'memlume.sqlite'));
@@ -53,7 +72,8 @@ function createResolver(): { database: SqliteDatabase; store: MemoryStore; resol
   expect(MemoryStore).toBeTypeOf('function');
   expect(ContextResolver).toBeTypeOf('function');
   const store = new MemoryStore!(database);
-  return { database, store, resolver: new ContextResolver!(store) };
+  const outcomes = new (retrieval as { OutcomeStore: new (database: SqliteDatabase) => OutcomeStore }).OutcomeStore(database);
+  return { database, store, outcomes, resolver: new ContextResolver!(store, outcomes) };
 }
 
 function policy(target: string, constraints: { readonly exclusive?: boolean; readonly required?: boolean } = {}) {
@@ -68,10 +88,12 @@ function insertProcedure(
   database: SqliteDatabase,
   trigger: Record<string, unknown>,
   scope: MemoryScope = { level: 'global' },
+  brainId = DEFAULT_PERSONAL_BRAIN_ID,
 ): MemoryItem {
   const now = new Date().toISOString();
   const memory = MemoryItemSchema.parse({
     id: createUuidV7(),
+    brainId,
     kind: 'procedure',
     title: 'Image workflow',
     canonicalText: 'Run the image workflow.',
@@ -110,7 +132,17 @@ function insertProcedure(
       memory.validUntil ?? null,
       memory.supersededBy ?? null,
     );
+  database
+    .prepare('INSERT INTO memory_brains (memory_id, brain_id, created_at) VALUES (?, ?, ?)')
+    .run(memory.id, memory.brainId, memory.createdAt);
   return memory;
+}
+
+function insertBrain(database: SqliteDatabase, id: string, kind: 'project' | 'domain', name: string): void {
+  const now = new Date().toISOString();
+  database
+    .prepare('INSERT INTO brains (id, kind, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+    .run(id, kind, name, now, now);
 }
 
 afterEach(() => {
@@ -123,6 +155,35 @@ afterEach(() => {
 });
 
 describe('ContextResolver', () => {
+  test('uses explainable outcome feedback as a tie-breaker without changing memory history', () => {
+    const { store, outcomes, resolver } = createResolver();
+    const lessUsed = store.save({
+      kind: 'policy',
+      canonicalText: 'Use the general image route.',
+      structuredData: policy('general-image-route'),
+      scope: { level: 'global' },
+      priority: 0,
+    });
+    const adopted = store.save({
+      kind: 'policy',
+      canonicalText: 'Use the tested image route.',
+      structuredData: policy('tested-image-route'),
+      scope: { level: 'global' },
+      priority: 0,
+    });
+    outcomes.recordUsage({ memoryId: adopted.id, taskId: 'task-feedback', agentId: 'hermes', wasIncluded: true, outcome: 'adopted' }, [DEFAULT_PERSONAL_BRAIN_ID]);
+
+    const pack = resolver.resolve({
+      intent: 'image_generation',
+      scope: { level: 'global' },
+      task: null,
+      contextBudget: 100,
+    });
+
+    expect(pack.directives.map(({ memoryId }) => memoryId)).toEqual([adopted.id, lessUsed.id]);
+    expect(store.get(adopted.id, [DEFAULT_PERSONAL_BRAIN_ID])?.canonicalText).toBe('Use the tested image route.');
+  });
+
   test('places a project policy before a global policy and returns traceable context', () => {
     const { store, resolver } = createResolver();
     const global = store.save({
@@ -153,6 +214,253 @@ describe('ContextResolver', () => {
     expect(pack.directives[0]).toMatchObject({ mandatory: true, priority: 1 });
     expect(pack.explanation.sourceMemoryIds).toEqual([project.id, global.id]);
     expect(ContextPackSchema.parse(pack)).toEqual(pack);
+  });
+
+  test('uses the ordered brain allowlist before scope and priority', () => {
+    const { database, store, resolver } = createResolver();
+    const projectBrainId = createUuidV7();
+    const domainBrainId = createUuidV7();
+    const excludedBrainId = createUuidV7();
+    insertBrain(database, projectBrainId, 'project', 'Memlume');
+    insertBrain(database, domainBrainId, 'domain', 'Design');
+    insertBrain(database, excludedBrainId, 'domain', 'Private');
+
+    const personal = store.save({
+      kind: 'policy',
+      canonicalText: 'Use the personal route.',
+      structuredData: policy('personal-route'),
+      scope: { level: 'global' },
+      priority: 999,
+    });
+    const domain = store.save({
+      brainId: domainBrainId,
+      kind: 'policy',
+      canonicalText: 'Use the domain route.',
+      structuredData: policy('domain-route'),
+      scope: { level: 'global' },
+      priority: 10,
+    });
+    const project = store.save({
+      brainId: projectBrainId,
+      kind: 'policy',
+      canonicalText: 'Use the project route.',
+      structuredData: policy('project-route'),
+      scope: { level: 'global' },
+      priority: -100,
+    });
+    const excluded = store.save({
+      brainId: excludedBrainId,
+      kind: 'policy',
+      canonicalText: 'This route is not mounted.',
+      structuredData: policy('excluded-route'),
+      scope: { level: 'global' },
+      priority: 1000,
+    });
+
+    const pack = resolver.resolve({
+      intent: 'image_generation',
+      scope: { level: 'global' },
+      task: null,
+      contextBudget: 100,
+      brainIds: [projectBrainId, domainBrainId, DEFAULT_PERSONAL_BRAIN_ID],
+    });
+
+    expect(pack.directives.map((directive) => directive.memoryId)).toEqual([project.id, domain.id, personal.id]);
+    expect(pack.directives.map((directive) => directive.brainId)).toEqual([
+      projectBrainId,
+      domainBrainId,
+      DEFAULT_PERSONAL_BRAIN_ID,
+    ]);
+    expect(pack.explanation.sourceMemoryIds).not.toContain(excluded.id);
+  });
+
+  test('keeps the first priority when the trusted brain allowlist repeats a brain', () => {
+    const { database, store, resolver } = createResolver();
+    const projectBrainId = createUuidV7();
+    insertBrain(database, projectBrainId, 'project', 'Memlume');
+    const project = store.save({
+      brainId: projectBrainId,
+      kind: 'policy',
+      canonicalText: 'Use the project route.',
+      structuredData: policy('project-route'),
+      scope: { level: 'global' },
+      priority: -100,
+    });
+    const personal = store.save({
+      kind: 'policy',
+      canonicalText: 'Use the personal route.',
+      structuredData: policy('personal-route'),
+      scope: { level: 'global' },
+      priority: 999,
+    });
+
+    const baseInput = {
+      intent: 'image_generation',
+      scope: { level: 'global' } as const,
+      task: null,
+      contextBudget: 100,
+    };
+    const pack = resolver.resolve({
+      ...baseInput,
+      brainIds: [projectBrainId, DEFAULT_PERSONAL_BRAIN_ID, projectBrainId],
+    });
+
+    expect(pack.directives.map((directive) => directive.memoryId)).toEqual([project.id, personal.id]);
+    expect(() => resolver.resolve({ ...baseInput, brainIds: ['not-a-uuid'] })).toThrow();
+  });
+
+  test('keeps brain priority when a lower-brain required directive exceeds the budget', () => {
+    const { database, store, resolver } = createResolver();
+    const projectBrainId = createUuidV7();
+    insertBrain(database, projectBrainId, 'project', 'Memlume');
+    const project = store.save({
+      brainId: projectBrainId,
+      kind: 'policy',
+      canonicalText: 'Project.',
+      structuredData: policy('project-route'),
+      scope: { level: 'global' },
+      priority: -100,
+    });
+    const personal = store.save({
+      kind: 'policy',
+      canonicalText: 'This required personal route intentionally exceeds the tiny context budget.',
+      structuredData: policy('personal-route', { required: true }),
+      scope: { level: 'global' },
+      priority: 999,
+    });
+
+    const pack = resolver.resolve({
+      intent: 'image_generation',
+      scope: { level: 'global' },
+      task: null,
+      contextBudget: 2,
+      brainIds: [projectBrainId, DEFAULT_PERSONAL_BRAIN_ID],
+    });
+
+    expect(pack.directives.map((directive) => directive.memoryId)).toEqual([project.id, personal.id]);
+    expect(pack.directives.map((directive) => directive.mandatory)).toEqual([false, true]);
+    expect(pack.explanation.budget.usedUnits).toBeGreaterThan(2);
+  });
+
+  test('uses the brain allowlist for every context category and traces each source brain', () => {
+    const { database, store, resolver } = createResolver();
+    const projectBrainId = createUuidV7();
+    const excludedBrainId = createUuidV7();
+    insertBrain(database, projectBrainId, 'project', 'Memlume');
+    insertBrain(database, excludedBrainId, 'domain', 'Private');
+
+    const projectPolicy = store.save({
+      brainId: projectBrainId,
+      kind: 'policy',
+      canonicalText: 'Use the shared project route.',
+      structuredData: policy('shared-project-route'),
+      scope: { level: 'global' },
+    });
+    const projectProcedure = insertProcedure(database, { intents: ['image_generation'] }, { level: 'global' }, projectBrainId);
+    const projectPreference = store.save({
+      brainId: projectBrainId,
+      kind: 'preference',
+      canonicalText: 'Prefer the shared project style.',
+      structuredData: {
+        domain: 'design', subject: 'logo', dimension: 'style', value: 'shared', strength: 1, confidence: 1,
+        contexts: ['image_generation'],
+      },
+      scope: { level: 'global' },
+    });
+    const projectFact = store.save({
+      brainId: projectBrainId,
+      kind: 'fact',
+      title: 'Project image fact',
+      canonicalText: 'The project image evidence uses a shared canvas.',
+      structuredData: { subject: 'image', predicate: 'canvas', object: 'shared', confidence: 1 },
+      scope: { level: 'global' },
+    });
+    const projectDecision = store.save({
+      brainId: projectBrainId,
+      kind: 'decision',
+      canonicalText: 'Use the shared project decision.',
+      structuredData: { title: 'Use the shared project decision.', status: 'active', rationale: ['It is shared.'] },
+      scope: { level: 'global' },
+    });
+
+    const excludedPolicy = store.save({
+      brainId: excludedBrainId,
+      kind: 'policy',
+      canonicalText: 'Do not expose this private route.',
+      structuredData: policy('private-route'),
+      scope: { level: 'global' },
+    });
+    const excludedProcedure = insertProcedure(database, { intents: ['image_generation'] }, { level: 'global' }, excludedBrainId);
+    const excludedPreference = store.save({
+      brainId: excludedBrainId,
+      kind: 'preference',
+      canonicalText: 'Do not expose this private preference.',
+      structuredData: { domain: 'design', subject: 'logo', dimension: 'style', value: 'private', strength: 1, confidence: 1, contexts: ['image_generation'] },
+      scope: { level: 'global' },
+    });
+    const excludedFact = store.save({
+      brainId: excludedBrainId,
+      kind: 'fact',
+      title: 'Private image fact',
+      canonicalText: 'The project image evidence is private.',
+      structuredData: { subject: 'image', predicate: 'canvas', object: 'private', confidence: 1 },
+      scope: { level: 'global' },
+    });
+    const excludedDecision = store.save({
+      brainId: excludedBrainId,
+      kind: 'decision',
+      canonicalText: 'Do not expose this private decision.',
+      structuredData: { title: 'Do not expose this private decision.', status: 'active', rationale: ['It is private.'] },
+      scope: { level: 'global' },
+    });
+
+    const pack = resolver.resolve({
+      intent: 'image_generation',
+      scope: { level: 'global' },
+      task: 'project image evidence',
+      contextBudget: 1000,
+      brainIds: [projectBrainId],
+    });
+
+    expect(pack.directives).toEqual([expect.objectContaining({ memoryId: projectPolicy.id, brainId: projectBrainId })]);
+    expect(pack.procedures).toEqual([expect.objectContaining({ memoryId: projectProcedure.id, brainId: projectBrainId })]);
+    expect(pack.preferences).toEqual([expect.objectContaining({ memoryId: projectPreference.id, brainId: projectBrainId })]);
+    expect(pack.knowledge).toEqual([expect.objectContaining({ memoryId: projectFact.id, brainId: projectBrainId })]);
+    expect(pack.decisions).toEqual([expect.objectContaining({ memoryId: projectDecision.id, brainId: projectBrainId })]);
+    expect(pack.explanation.sourceMemoryIds).not.toEqual(
+      expect.arrayContaining([
+        excludedPolicy.id,
+        excludedProcedure.id,
+        excludedPreference.id,
+        excludedFact.id,
+        excludedDecision.id,
+      ]),
+    );
+  });
+
+  test('does not fall back to the personal brain for an empty trusted allowlist', () => {
+    const { store, resolver } = createResolver();
+    store.save({
+      kind: 'policy',
+      canonicalText: 'This personal route must not leak through an empty allowlist.',
+      structuredData: policy('personal-route'),
+      scope: { level: 'global' },
+    });
+
+    const pack = resolver.resolve({
+      intent: 'image_generation',
+      scope: { level: 'global' },
+      task: 'personal route',
+      contextBudget: 100,
+      brainIds: [],
+    });
+
+    expect(pack.directives).toEqual([]);
+    expect(pack.procedures).toEqual([]);
+    expect(pack.preferences).toEqual([]);
+    expect(pack.knowledge).toEqual([]);
+    expect(pack.decisions).toEqual([]);
+    expect(pack.explanation).toMatchObject({ sourceMemoryIds: [], budget: { usedUnits: 0, truncated: false } });
   });
 
   test('requires every policy and procedure trigger entity and available tool', () => {
@@ -262,7 +570,9 @@ describe('ContextResolver', () => {
     });
 
     expect(pack.directives).toEqual([]);
-    expect(pack.knowledge).toEqual([{ memoryId: current.id, title: 'Current fact', summary: current.canonicalText }]);
+    expect(pack.knowledge).toEqual([
+      { memoryId: current.id, brainId: current.brainId, title: 'Current fact', summary: current.canonicalText },
+    ]);
   });
 
   test('applies fact payload validity dates to FTS results', () => {
@@ -364,7 +674,7 @@ describe('ContextResolver', () => {
     expect(pack.explanation.exclusions).toEqual([{ memoryId: global.id, reason: 'exclusive_conflict' }]);
     expect(pack.explanation.toolSelection).toContain('project-image-route');
     expect(pack.explanation.toolSelection).toContain(project.id);
-    expect(pack.explanation.toolSelection).toContain('scope_then_priority');
+    expect(pack.explanation.toolSelection).toContain('brain_then_scope_then_priority');
   });
 
   test('excludes inactive and scope-mismatched memories', () => {
@@ -435,10 +745,12 @@ describe('ContextResolver', () => {
       contextBudget: 100,
     });
 
-    expect(pack.preferences).toEqual([{ memoryId: preference.id, text: preference.canonicalText }]);
-    expect(pack.knowledge).toEqual([{ memoryId: fact.id, title: 'Source art size', summary: fact.canonicalText }]);
-    expect(pack.decisions).toEqual([{ memoryId: decision.id, text: decision.canonicalText }]);
-    expect(pack.explanation.sourceMemoryIds).toEqual([preference.id, fact.id, decision.id]);
+    expect(pack.preferences).toEqual([{ memoryId: preference.id, brainId: preference.brainId, text: preference.canonicalText }]);
+    expect(pack.knowledge).toEqual([
+      { memoryId: fact.id, brainId: fact.brainId, title: 'Source art size', summary: fact.canonicalText },
+    ]);
+    expect(pack.decisions).toEqual([{ memoryId: decision.id, brainId: decision.brainId, text: decision.canonicalText }]);
+    expect(pack.explanation.sourceMemoryIds).toEqual(expect.arrayContaining([preference.id, fact.id, decision.id]));
   });
 
   test('keeps mandatory directives when the explicit context budget is too small', () => {

@@ -1,0 +1,5 @@
+{"id":"english-fts","operation":"search","query":"pnpm","brain":"project","expected":"package-manager"}
+{"id":"chinese-fts","operation":"search","query":"Vue 前端","brain":"project","expected":"frontend-framework"}
+{"id":"temporal-current","operation":"context","intent":"implementation","task":"temporary release rule","scope":{"level":"project","projectId":"memlume"},"brain":"project","expected":"current-temporal","budget":120}
+{"id":"conflict-project-wins","operation":"context","intent":"image_generation","task":null,"scope":{"level":"project","projectId":"memlume"},"brain":"project","expected":"project-image-policy","budget":120}
+{"id":"permission-isolation","operation":"search","query":"private migration","brain":"project","expected":null}

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "memlume": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp.mjs"],
+      "env": {
+        "MEMLUME_HOME": "${user_config.memlume_home}",
+        "MEMLUME_DAEMON_URL": "${user_config.daemon_url}",
+        "MEMLUME_TOKEN": "${user_config.adapter_token}"
+      }
+    }
+  }
+}

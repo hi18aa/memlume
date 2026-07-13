@@ -1,0 +1,67 @@
+{
+  "name": "memlume-claude-code",
+  "version": "0.2.0",
+  "description": "Connect Claude Code turns to a local Memlume Shared Brain.",
+  "author": {
+    "name": "hi18aa",
+    "url": "https://github.com/hi18aa"
+  },
+  "homepage": "https://github.com/hi18aa/memlume",
+  "repository": "https://github.com/hi18aa/memlume.git",
+  "license": "MIT",
+  "keywords": ["memlume", "shared-memory", "claude-code", "mcp"],
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json",
+  "userConfig": {
+    "memlume_home": {
+      "type": "directory",
+      "title": "Memlume Core directory",
+      "description": "The local Memlume repository containing built Core packages.",
+      "required": false
+    },
+    "daemon_url": {
+      "type": "string",
+      "title": "Memlume daemon URL",
+      "description": "Loopback URL of the local Memlume daemon.",
+      "default": "http://127.0.0.1:3849"
+    },
+    "adapter_token": {
+      "type": "string",
+      "title": "Memlume adapter token",
+      "description": "Token for this Claude Code installation only.",
+      "sensitive": true,
+      "required": false
+    },
+    "installation_id": {
+      "type": "string",
+      "title": "Installation ID",
+      "description": "Memlume installation identity for Claude Code.",
+      "required": false
+    },
+    "profile_id": {
+      "type": "string",
+      "title": "Profile ID",
+      "description": "Memlume profile identity for Claude Code.",
+      "default": "default",
+      "required": false
+    },
+    "project_id": {
+      "type": "string",
+      "title": "Project ID",
+      "description": "Memlume project identity for this shared brain.",
+      "required": false
+    },
+    "brain_id": {
+      "type": "string",
+      "title": "Project Brain ID",
+      "description": "UUIDv7 of the mounted Memlume Project Brain.",
+      "required": false
+    },
+    "workspace_path": {
+      "type": "directory",
+      "title": "Workspace path",
+      "description": "Optional workspace path when it differs from Claude Code cwd.",
+      "required": false
+    }
+  }
+}

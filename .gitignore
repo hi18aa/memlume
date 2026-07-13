@@ -9,6 +9,8 @@ data/
 *.sqlite
 *.sqlite-*
 *.log
+__pycache__/
+*.pyc
 
 # Local development context
 AGENTS.md

@@ -1,0 +1,241 @@
+"""將 Hermes General Plugin hook 轉送到 Memlume Adapter SDK。"""
+
+from __future__ import annotations
+
+from collections import OrderedDict
+import json
+import os
+from pathlib import Path
+import subprocess
+import threading
+from typing import Any, Callable, Mapping
+from uuid import uuid4
+
+
+BridgeRunner = Callable[[dict[str, Any], float | None], Any]
+COMPLETED_SESSION_LIMIT = 256
+TURN_LIMIT = 256
+
+
+class MemlumePlugin:
+    def __init__(
+        self,
+        *,
+        environment: Mapping[str, str] | None = None,
+        runner: BridgeRunner | None = None,
+        timeout_seconds: float = 0.5,
+    ) -> None:
+        self._environment = _with_local_profile(dict(os.environ if environment is None else environment))
+        self._runner = runner or _SubprocessBridge(self._environment)
+        self._timeout_seconds = timeout_seconds
+        self._turns: OrderedDict[str, str] = OrderedDict()
+        self._finished_sessions: OrderedDict[str, None] = OrderedDict()
+        self._last_envelope: dict[str, str] | None = None
+        self._lock = threading.Lock()
+
+    def pre_llm_call(self, *, session_id: str, user_message: str, **_kwargs: Any) -> dict[str, str] | None:
+        envelope = self._envelope(session_id)
+        if envelope is None or not isinstance(user_message, str) or user_message.strip() == "":
+            return None
+
+        message_id = f"hermes-{uuid4()}"
+        with self._lock:
+            self._turns[session_id] = message_id
+            self._turns.move_to_end(session_id)
+            while len(self._turns) > TURN_LIMIT:
+                self._turns.popitem(last=False)
+            self._finished_sessions.pop(session_id, None)
+            self._last_envelope = envelope
+
+        scope = {"level": "project", "projectId": envelope["projectId"]}
+        self._background({
+            "operation": "onUserMessage",
+            "envelope": envelope,
+            "message": {"messageId": message_id, "content": user_message, "brainId": self._environment["MEMLUME_BRAIN_ID"], "scope": scope},
+        })
+        context = self._bounded_invoke({
+            "operation": "beforeTask",
+            "input": {"envelope": envelope, "intent": "shared_memory", "scope": scope, "task": None, "contextBudget": 600},
+        })
+        return _ephemeral_context(context)
+
+    def post_llm_call(self, *, session_id: str, assistant_response: str, **_kwargs: Any) -> None:
+        envelope = self._envelope(session_id)
+        if envelope is None or not isinstance(assistant_response, str) or assistant_response.strip() == "":
+            return None
+        with self._lock:
+            message_id = self._turns.get(session_id)
+        if message_id is None:
+            return None
+        self._background({
+            "operation": "afterTask",
+            "envelope": envelope,
+            "message": {"messageId": message_id, "content": assistant_response, "brainId": self._environment["MEMLUME_BRAIN_ID"]},
+        })
+        return None
+
+    def on_session_end(self, *, session_id: str | None, **_kwargs: Any) -> None:
+        envelope = self._envelope(session_id)
+        if envelope is None:
+            return None
+        return self._finish_session(envelope)
+
+    def on_session_finalize(self, *, session_id: str | None, **kwargs: Any) -> None:
+        if isinstance(session_id, str) and session_id.strip() != "":
+            return self.on_session_end(session_id=session_id, **kwargs)
+        with self._lock:
+            envelope = self._last_envelope
+        return None if envelope is None else self._finish_session(envelope)
+
+    def _finish_session(self, envelope: dict[str, str]) -> None:
+        session_id = envelope["sessionId"]
+        with self._lock:
+            if session_id in self._finished_sessions:
+                return None
+            self._finished_sessions[session_id] = None
+            while len(self._finished_sessions) > COMPLETED_SESSION_LIMIT:
+                self._finished_sessions.popitem(last=False)
+            self._turns.pop(session_id, None)
+        self._background({
+            "operation": "onSessionEnd",
+            "envelope": envelope,
+        })
+        return None
+
+    def _envelope(self, session_id: str | None) -> dict[str, str] | None:
+        required = ("MEMLUME_INSTALLATION_ID", "MEMLUME_PROFILE_ID", "MEMLUME_PROJECT_ID", "MEMLUME_BRAIN_ID")
+        if not isinstance(session_id, str) or session_id.strip() == "" or any(self._environment.get(key, "").strip() == "" for key in required):
+            return None
+        envelope = {
+            "clientType": "hermes",
+            "installationId": self._environment["MEMLUME_INSTALLATION_ID"],
+            "profileId": self._environment["MEMLUME_PROFILE_ID"],
+            "sessionId": session_id,
+            "projectId": self._environment["MEMLUME_PROJECT_ID"],
+        }
+        workspace_path = self._environment.get("MEMLUME_WORKSPACE_PATH", "").strip()
+        if workspace_path:
+            envelope["workspacePath"] = workspace_path
+        return envelope
+
+    def _background(self, payload: dict[str, Any]) -> None:
+        threading.Thread(target=self._invoke, args=(payload, None), daemon=True).start()
+
+    def _bounded_invoke(self, payload: dict[str, Any]) -> Any:
+        completed = threading.Event()
+        result: list[Any] = [None]
+
+        def run() -> None:
+            try:
+                result[0] = self._invoke(payload, None)
+            finally:
+                completed.set()
+
+        threading.Thread(target=run, daemon=True).start()
+        return result[0] if completed.wait(max(self._timeout_seconds, 0)) else None
+
+    def _invoke(self, payload: dict[str, Any], timeout: float | None) -> Any:
+        try:
+            return self._runner(payload, timeout)
+        except Exception:
+            return None
+
+
+class _SubprocessBridge:
+    def __init__(self, environment: Mapping[str, str]) -> None:
+        self._environment = dict(environment)
+
+    def __call__(self, payload: dict[str, Any], timeout: float | None) -> Any:
+        bridge = self._environment.get("MEMLUME_NODE_BRIDGE") or str(Path(__file__).resolve().parents[1] / "bridge.mjs")
+        environment = os.environ.copy()
+        environment.update(self._environment)
+        try:
+            completed = subprocess.run(
+                [environment.get("MEMLUME_NODE_BINARY", "node"), bridge],
+                input=json.dumps(payload, ensure_ascii=False) + "\n",
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=timeout,
+                check=False,
+                env=environment,
+            )
+            if completed.returncode != 0:
+                return None
+            response = json.loads(completed.stdout.strip())
+            return response.get("result") if isinstance(response, dict) and response.get("ok") is True else None
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+
+
+def _ephemeral_context(context: Any) -> dict[str, str] | None:
+    if not isinstance(context, dict):
+        return None
+    lines: list[str] = []
+    for key in ("directives", "preferences", "decisions"):
+        for item in context.get(key, []):
+            if isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"].strip():
+                lines.append(item["text"].strip())
+    for item in context.get("knowledge", []):
+        if isinstance(item, dict) and isinstance(item.get("summary"), str) and item["summary"].strip():
+            lines.append(item["summary"].strip())
+    for item in context.get("procedures", []):
+        if isinstance(item, dict) and isinstance(item.get("steps"), list):
+            lines.extend(step.strip() for step in item["steps"] if isinstance(step, str) and step.strip())
+    if not lines:
+        return None
+    return {"context": "Memlume shared context:\n" + "\n".join(f"- {line}" for line in lines)}
+
+
+def register(ctx: Any) -> MemlumePlugin:
+    plugin = MemlumePlugin()
+    for hook in ("pre_llm_call", "post_llm_call", "on_session_end", "on_session_finalize"):
+        ctx.register_hook(hook, getattr(plugin, hook))
+    return plugin
+
+
+def _with_local_profile(environment: dict[str, str]) -> dict[str, str]:
+    """以 CLI 管理的 profile 補足 Hermes 所需的本機設定，不輸出任何 secret。"""
+    configured_path = environment.get("MEMLUME_CONFIG_PATH", "").strip()
+    path = Path(configured_path) if configured_path else Path.home() / ".config" / "memlume" / "config.json"
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return environment
+    profiles = parsed.get("adapters") if isinstance(parsed, dict) else None
+    if not isinstance(profiles, list):
+        return environment
+    requested_installation = environment.get("MEMLUME_INSTALLATION_ID", "").strip()
+    requested_profile = environment.get("MEMLUME_PROFILE_ID", "").strip()
+    profile = next((candidate for candidate in profiles if _matches_profile(candidate, requested_installation, requested_profile)), None)
+    if not isinstance(profile, dict):
+        return environment
+    fields = {
+        "MEMLUME_INSTALLATION_ID": "installationId",
+        "MEMLUME_PROFILE_ID": "profileId",
+        "MEMLUME_PROJECT_ID": "projectId",
+        "MEMLUME_BRAIN_ID": "brainId",
+        "MEMLUME_TOKEN": "token",
+        "MEMLUME_HOME": "corePath",
+        "MEMLUME_DAEMON_URL": "daemonUrl",
+        "MEMLUME_WORKSPACE_PATH": "workspacePath",
+        "MEMLUME_OUTBOX_DIRECTORY": "outboxDirectory",
+    }
+    resolved = dict(environment)
+    for destination, source in fields.items():
+        current = resolved.get(destination, "").strip()
+        value = profile.get(source)
+        if not current and isinstance(value, str) and value.strip():
+            resolved[destination] = value.strip()
+    return resolved
+
+
+def _matches_profile(candidate: Any, installation_id: str, profile_id: str) -> bool:
+    return (
+        isinstance(candidate, dict)
+        and candidate.get("clientType") == "hermes"
+        and isinstance(candidate.get("installationId"), str)
+        and isinstance(candidate.get("profileId"), str)
+        and (not installation_id or candidate["installationId"] == installation_id)
+        and (not profile_id or candidate["profileId"] == profile_id)
+    )

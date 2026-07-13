@@ -1,6 +1,6 @@
 {
   "name": "@memlume/daemon",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "exports": {
@@ -9,23 +9,29 @@
   "types": "./dist/index.d.ts",
   "files": ["dist"],
   "scripts": {
+    "build:console": "pnpm --filter @memlume/console build",
     "build:dependencies": "pnpm --filter=@memlume/daemon... --filter=!@memlume/daemon --if-present run build",
-    "build": "pnpm run build:dependencies && tsc -p tsconfig.json",
+    "build": "pnpm run build:console && pnpm run build:dependencies && tsc -p tsconfig.json",
     "start": "node dist/start.js",
-    "test": "pnpm run build && vitest run",
+    "test": "pnpm run build && vitest run --pool=threads",
+    "test:codex": "vitest --root ../.. run ../../adapters/codex/test/hook.test.ts",
     "typecheck": "pnpm run build:dependencies && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@memlume/backup": "workspace:*",
     "@memlume/contracts": "workspace:*",
     "@memlume/context-resolver": "workspace:*",
     "@memlume/database": "workspace:*",
     "@memlume/event-journal": "workspace:*",
+    "@memlume/memory-compiler": "workspace:*",
     "@memlume/retrieval": "workspace:*",
+    "@memlume/shared-brains": "workspace:*",
     "express": "^5.2.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^24.10.1",
     "vitest": "^4.1.10"
   }

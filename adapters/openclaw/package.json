@@ -1,0 +1,26 @@
+{
+  "name": "@memlume/openclaw-adapter",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "src",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "openclaw": ">=2026.6.8"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.mjs"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.6.8",
+      "minGatewayVersion": "2026.6.8"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/adapter.test.mjs"
+  }
+}

@@ -122,6 +122,30 @@ describe('memlume daemon start entrypoint', () => {
     await expect(fetch(`http://127.0.0.1:${daemon.address.port}/v1/health`)).rejects.toThrow();
   });
 
+  test('reads the setup token from the environment without returning it from setup routes', async () => {
+    const setupToken = 'setup-token-from-environment-test';
+    const previous = process.env.MEMLUME_SETUP_TOKEN;
+    process.env.MEMLUME_SETUP_TOKEN = setupToken;
+    try {
+      const daemon = await startFromArgs(['--database', createDatabasePath(), '--port', '0']);
+      daemons.push(daemon);
+
+      const response = await fetch(`http://127.0.0.1:${daemon.address.port}/v1/setup/brains`, {
+        headers: { 'x-memlume-setup-token': setupToken },
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toEqual({ brains: [expect.objectContaining({ kind: 'personal' })] });
+      expect(JSON.stringify(body)).not.toContain(setupToken);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.MEMLUME_SETUP_TOKEN;
+      } else {
+        process.env.MEMLUME_SETUP_TOKEN = previous;
+      }
+    }
+  });
+
   test('compiled entrypoint creates a missing parent directory and closes on SIGTERM', async () => {
     const workingDirectory = createTemporaryDirectory();
     const entrypoint = fileURLToPath(new URL('../dist/start.js', import.meta.url));

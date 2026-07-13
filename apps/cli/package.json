@@ -1,6 +1,6 @@
 {
   "name": "@memlume/cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "bin": {
@@ -9,10 +9,11 @@
   "files": ["dist"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "vitest run",
+    "test": "vitest run --pool=threads",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@memlume/backup": "workspace:*",
     "commander": "^14.0.3"
   },
   "devDependencies": {

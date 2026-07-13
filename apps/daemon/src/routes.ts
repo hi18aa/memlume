@@ -1,24 +1,40 @@
 import {
   DecisionDataSchema,
+  DEFAULT_PERSONAL_BRAIN_ID,
+  AgentInstallationSchema,
   EventSourceSchema,
   FactDataSchema,
+  BrainKindSchema,
+  BrainMountSchema,
   IsoDateSchema,
   IsoUtcDateTimeSchema,
   JsonValueSchema,
+  MemoryUsageOutcomeSchema,
+  OutcomeResultSchema,
   MemoryScopeSchema,
   NonEmptyTextSchema,
   PolicyDataSchema,
   PreferenceDataSchema,
   UuidV7Schema,
+  redactSensitiveJson,
+  redactSensitiveText,
+  type AgentInstallation,
+  type JsonValue,
 } from '@memlume/contracts';
 import { ContextResolver } from '@memlume/context-resolver';
-import { EventJournal } from '@memlume/event-journal';
-import { MemoryStore } from '@memlume/retrieval';
-import { type ErrorRequestHandler, type Express } from 'express';
+import type { SqliteDatabase } from '@memlume/database/internal';
+import { EventBrainConflictError, EventJournal } from '@memlume/event-journal';
+import { assessMemoryConflict, compileMemory, type MemoryProposal } from '@memlume/memory-compiler';
+import { MemoryStore, OutcomeFeedbackRateLimitError, OutcomeMemoryAccessError, OutcomeReceiptError, OutcomeReceiptRateLimitError, OutcomeStore, SourceEventBrainMismatchError } from '@memlume/retrieval';
+import { BrainStore } from '@memlume/shared-brains';
+import { BrainImportConflictError, BrainImportRequiredError, FullBackupAuthenticationRequiredError, FullRestoreRequiredError, RestoreRecoveryError } from '@memlume/backup';
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import express, { type ErrorRequestHandler, type Express, type Request, type RequestHandler, type Response } from 'express';
 import { z, ZodError } from 'zod';
 
 const AppendEventRequestSchema = z
   .object({
+    brainId: UuidV7Schema.optional(),
     rawContent: z.string(),
     eventType: z.string(),
     source: EventSourceSchema.strict(),
@@ -27,8 +43,13 @@ const AppendEventRequestSchema = z
   })
   .strict();
 
+const CaptureMemoryRequestSchema = AppendEventRequestSchema.extend({
+  scope: MemoryScopeSchema,
+}).strict();
+
 const MemoryRequestBaseSchema = z
   .object({
+    brainId: UuidV7Schema.optional(),
     canonicalText: NonEmptyTextSchema,
     title: NonEmptyTextSchema.optional(),
     scope: MemoryScopeSchema,
@@ -50,7 +71,15 @@ const SaveMemoryRequestSchema = z.discriminatedUnion('kind', [
 
 const SearchQuerySchema = z.object({
   q: NonEmptyTextSchema.refine((value) => /[\p{L}\p{N}_]/u.test(value), 'Expected searchable text.'),
-});
+}).strict();
+
+const MemoryParametersSchema = z.object({ memoryId: UuidV7Schema }).strict();
+const ReviewCandidateRequestSchema = z.object({
+  actor: NonEmptyTextSchema,
+  reason: NonEmptyTextSchema,
+  supersedeMemoryId: UuidV7Schema.optional(),
+}).strict();
+const ConsoleReviewCandidateRequestSchema = ReviewCandidateRequestSchema.omit({ actor: true });
 
 const ResolveContextRequestSchema = z
   .object({
@@ -63,10 +92,83 @@ const ResolveContextRequestSchema = z
   })
   .strict();
 
+const RecordMemoryUsageRequestSchema = z
+  .object({
+    traceId: UuidV7Schema,
+    taskId: NonEmptyTextSchema,
+    retrievalRank: z.number().int().nonnegative().nullable().optional(),
+    wasIncluded: z.boolean(),
+    outcome: MemoryUsageOutcomeSchema.nullable().optional(),
+  })
+  .strict();
+
+const RecordOutcomeRequestSchema = z
+  .object({
+    traceId: UuidV7Schema,
+    taskId: NonEmptyTextSchema,
+    result: OutcomeResultSchema,
+    correctionType: NonEmptyTextSchema.nullable().optional(),
+    correctionData: JsonValueSchema.nullable().optional(),
+    usedMemoryIds: z.array(UuidV7Schema).min(1).max(256),
+    usedToolIds: z.array(NonEmptyTextSchema).max(256),
+  })
+  .strict();
+
+const RecordUsageOutcomeRequestSchema = z
+  .object({
+    traceId: UuidV7Schema,
+    outcome: MemoryUsageOutcomeSchema,
+  })
+  .strict();
+
+const CreateBrainRequestSchema = z
+  .object({
+    kind: BrainKindSchema,
+    name: NonEmptyTextSchema,
+  })
+  .strict();
+
+const RegisterInstallationRequestSchema = z
+  .object({
+    clientType: NonEmptyTextSchema,
+    installationId: NonEmptyTextSchema,
+    profileId: NonEmptyTextSchema,
+    displayName: NonEmptyTextSchema.optional(),
+  })
+  .strict();
+
+const MountBrainRequestSchema = BrainMountSchema.strict();
+const InstallationParametersSchema = z.object({ agentInstallationId: UuidV7Schema }).strict();
+const CreateBackupRequestSchema = z.object({
+  brainId: UuidV7Schema.optional(),
+  password: z.string().min(1).max(1024).optional(),
+}).strict();
+const ImportBrainQuerySchema = z.object({
+  name: z.string().trim().min(1).max(256).optional(),
+}).strict();
+
 export interface DaemonServices {
+  readonly database: SqliteDatabase;
   readonly journal: EventJournal;
   readonly store: MemoryStore;
   readonly resolver: ContextResolver;
+  readonly outcomes: OutcomeStore;
+  readonly brains: BrainStore;
+  readonly setupToken?: string;
+  readonly backup: BackupLifecycle;
+}
+
+export interface BackupLifecycle {
+  create(input: { readonly brainId?: string; readonly password?: string }): Promise<Buffer>;
+  import(input: { readonly bundle: Uint8Array; readonly password?: string; readonly name?: string }): Promise<unknown>;
+  beginRestore(): boolean;
+  cancelRestore(): void;
+  restore(input: { readonly bundle: Uint8Array; readonly password?: string }): Promise<void>;
+  diagnostics(): unknown;
+}
+
+export interface AuthenticatedRequestLocals {
+  readonly agentInstallation: AgentInstallation;
 }
 
 export function registerRoutes(app: Express, services: DaemonServices): void {
@@ -74,21 +176,516 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     response.json({ status: 'ok' });
   });
 
-  app.post('/v1/events', (request, response) => {
-    response.status(201).json({ event: services.journal.append(AppendEventRequestSchema.parse(request.body)) });
+  const requireSetup = requireSetupToken(services.setupToken);
+  const userConfirmations = new UserConfirmationStore(services.database);
+  app.post('/v1/setup/brains', requireSetup, (request, response) => {
+    response.status(201).json({ brain: services.brains.createBrain(CreateBrainRequestSchema.parse(request.body)) });
+  });
+  app.get('/v1/setup/brains', requireSetup, (_request, response) => {
+    response.json({ brains: services.brains.listBrains() });
+  });
+  app.get('/v1/setup/memories', requireSetup, (_request, response) => {
+    response.json({ memories: services.store.list({ brainIds: services.brains.listBrains().map(({ id }) => id) }) });
+  });
+  app.get('/v1/setup/inbox', requireSetup, (_request, response) => {
+    response.json({ memories: services.store.list({ brainIds: services.brains.listBrains().map(({ id }) => id), status: 'candidate' }) });
+  });
+  app.post('/v1/setup/inbox/:memoryId/approve', requireSetup, (request, response) => {
+    const { memoryId } = MemoryParametersSchema.parse(request.params);
+    const input = ConsoleReviewCandidateRequestSchema.parse(request.body);
+    const brainIds = services.brains.listBrains().map(({ id }) => id);
+    const candidate = services.store.get(memoryId, brainIds);
+    if (candidate === undefined) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (candidate.status !== 'candidate') {
+      response.status(409).json({ error: 'candidate_not_pending' });
+      return;
+    }
+    const active = services.store.list({ brainIds: [candidate.brainId], status: 'active' });
+    const resolution = assessMemoryConflict({ proposal: { ...candidate, status: 'active' }, existing: active });
+    if (input.supersedeMemoryId !== undefined && resolution.action !== 'review') {
+      response.status(400).json({ error: 'invalid_supersede' });
+      return;
+    }
+    if (resolution.action === 'reuse') {
+      response.status(409).json({ error: 'active_duplicate' });
+      return;
+    }
+    if (resolution.action === 'review' && input.supersedeMemoryId !== resolution.memoryId) {
+      response.status(400).json({ error: 'confirmation_required' });
+      return;
+    }
+    response.json({ memory: services.store.approveCandidate(memoryId, { ...input, actor: 'memlume-console' }, brainIds) });
+  });
+  app.post('/v1/setup/inbox/:memoryId/reject', requireSetup, (request, response) => {
+    const { memoryId } = MemoryParametersSchema.parse(request.params);
+    const input = ConsoleReviewCandidateRequestSchema.omit({ supersedeMemoryId: true }).parse(request.body);
+    const brainIds = services.brains.listBrains().map(({ id }) => id);
+    const candidate = services.store.get(memoryId, brainIds);
+    if (candidate === undefined) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (candidate.status !== 'candidate') {
+      response.status(409).json({ error: 'candidate_not_pending' });
+      return;
+    }
+    response.json({ memory: services.store.rejectCandidate(memoryId, { ...input, actor: 'memlume-console' }, brainIds) });
+  });
+  app.post('/v1/setup/installations', requireSetup, (request, response) => {
+    const registration = services.brains.registerInstallation(RegisterInstallationRequestSchema.parse(request.body));
+    response.status(201).json(registration);
+  });
+  app.get('/v1/setup/installations', requireSetup, (_request, response) => {
+    response.json({ installations: services.brains.listInstallations() });
+  });
+  app.post('/v1/setup/mounts', requireSetup, (request, response) => {
+    response.status(201).json({ mount: services.brains.mountBrain(MountBrainRequestSchema.parse(request.body)) });
+  });
+  app.get('/v1/setup/installations/:agentInstallationId/brains', requireSetup, (request, response) => {
+    const { agentInstallationId } = InstallationParametersSchema.parse(request.params);
+    response.json({ brains: services.brains.listMountedBrains(agentInstallationId) });
+  });
+  app.post('/v1/setup/installations/:agentInstallationId/token/rotate', requireSetup, (request, response) => {
+    const { agentInstallationId } = InstallationParametersSchema.parse(request.params);
+    response.status(201).json(services.brains.rotateToken(agentInstallationId));
+  });
+  app.get('/v1/setup/diagnostics', requireSetup, (_request, response) => {
+    response.json(services.backup.diagnostics());
+  });
+  app.post('/v1/setup/backups', requireSetup, async (request, response) => {
+    const input = CreateBackupRequestSchema.parse(request.body);
+    try {
+      const bundle = await services.backup.create(input);
+      response
+        .status(200)
+        .type('application/vnd.memlume')
+        .set('content-disposition', 'attachment; filename="memlume-backup.memlume"')
+        .send(bundle);
+    } catch (error) {
+      if (error instanceof FullBackupAuthenticationRequiredError) {
+        response.status(400).json({ error: 'full_backup_password_required' });
+        return;
+      }
+      throw error;
+    }
+  });
+  app.post(
+    '/v1/setup/brains/import',
+    requireSetup,
+    express.raw({ type: ['application/vnd.memlume', 'application/octet-stream'], limit: '64mb' }),
+    async (request: Request, response: Response) => {
+      if (!Buffer.isBuffer(request.body) || request.body.byteLength === 0) {
+        response.status(400).json({ error: 'invalid_backup' });
+        return;
+      }
+      const { name } = ImportBrainQuerySchema.parse(request.query);
+      const password = request.get('x-memlume-backup-password');
+      if (password !== undefined && (password.length === 0 || password.length > 1024)) {
+        response.status(400).json({ error: 'invalid_backup' });
+        return;
+      }
+      try {
+        const imported = await services.backup.import({ bundle: request.body, ...(password === undefined ? {} : { password }), ...(name === undefined ? {} : { name }) });
+        response.status(201).json(imported);
+      } catch (error) {
+        if (error instanceof BrainImportConflictError) {
+          response.status(409).json({ error: 'import_conflict' });
+          return;
+        }
+        if (error instanceof FullBackupAuthenticationRequiredError) {
+          response.status(409).json({ error: 'full_restore_required' });
+          return;
+        }
+        if (error instanceof FullRestoreRequiredError) {
+          response.status(409).json({ error: 'full_restore_required' });
+          return;
+        }
+        response.status(400).json({ error: 'invalid_backup' });
+      }
+    },
+  );
+  app.post(
+    '/v1/setup/backups/restore',
+    requireSetup,
+    beginBackupRestore(services.backup),
+    express.raw({ type: ['application/vnd.memlume', 'application/octet-stream'], limit: '64mb' }),
+    cancelBackupRestore(services.backup),
+    async (request: Request, response: Response) => {
+      if (!Buffer.isBuffer(request.body) || request.body.byteLength === 0) {
+        services.backup.cancelRestore();
+        response.status(400).json({ error: 'invalid_backup' });
+        return;
+      }
+      const password = request.get('x-memlume-backup-password');
+      if (password !== undefined && (password.length === 0 || password.length > 1024)) {
+        services.backup.cancelRestore();
+        response.status(400).json({ error: 'invalid_backup' });
+        return;
+      }
+      try {
+        await services.backup.restore({ bundle: request.body, ...(password === undefined ? {} : { password }) });
+        response.json({ status: 'restored' });
+      } catch (error) {
+        if (error instanceof BrainImportRequiredError) {
+          response.status(409).json({ error: 'brain_import_required' });
+          return;
+        }
+        if (error instanceof RestoreRecoveryError) {
+          response.status(503).json({ error: 'restore_recovery_required' });
+          return;
+        }
+        response.status(400).json({ error: 'invalid_backup' });
+      }
+    },
+  );
+
+  const requireAdapter = requireAdapterToken(services.brains);
+  app.post('/v1/events', requireAdapter, (request, response) => {
+    const input = AppendEventRequestSchema.parse(request.body);
+    const brainId = input.brainId ?? DEFAULT_PERSONAL_BRAIN_ID;
+    if (!hasWriteAccess(response, services.brains, brainId)) {
+      return;
+    }
+    const rawContent = redactSensitiveText(input.rawContent).redacted;
+    const structuredData = input.structuredData === undefined ? undefined : redactSensitiveJson(input.structuredData).redacted;
+    const source = redactEventSource(input.source);
+    response.status(201).json({ event: services.journal.append({ ...input, brainId, rawContent, source, ...(structuredData === undefined ? {} : { structuredData }) }) });
   });
 
-  app.post('/v1/memories', (request, response) => {
-    response.status(201).json({ memory: services.store.save(SaveMemoryRequestSchema.parse(request.body)) });
+  app.post('/v1/memories', requireAdapter, (request, response) => {
+    const input = SaveMemoryRequestSchema.parse(request.body);
+    const brainId = input.brainId ?? DEFAULT_PERSONAL_BRAIN_ID;
+    if (!hasWriteAccess(response, services.brains, brainId)) {
+      return;
+    }
+    const sanitized = SaveMemoryRequestSchema.parse({
+      ...input,
+      canonicalText: redactSensitiveText(input.canonicalText).redacted,
+      ...(input.title === undefined ? {} : { title: redactSensitiveText(input.title).redacted }),
+      structuredData: redactSensitiveJson(input.structuredData).redacted,
+      scope: redactMemoryScope(input.scope),
+    });
+    const installation = authenticatedInstallation(response);
+    const requiresCandidate = installation !== undefined
+      && inferenceClientTypes.has(installation.clientType)
+      && !hasUserMemoryConfirmation(request, services.setupToken, input, userConfirmations);
+    const memory = requiresCandidate
+      ? services.store.saveCandidate({ ...sanitized, brainId })
+      : services.store.save({ ...sanitized, brainId });
+    response.status(201).json({ memory });
   });
 
-  app.get('/v1/memories/search', (request, response) => {
+  app.post('/v1/memories/candidate', requireAdapter, (request, response) => {
+    const input = SaveMemoryRequestSchema.parse(request.body);
+    const brainId = input.brainId ?? DEFAULT_PERSONAL_BRAIN_ID;
+    if (!hasWriteAccess(response, services.brains, brainId)) {
+      return;
+    }
+    const sanitized = SaveMemoryRequestSchema.parse({
+      ...input,
+      canonicalText: redactSensitiveText(input.canonicalText).redacted,
+      ...(input.title === undefined ? {} : { title: redactSensitiveText(input.title).redacted }),
+      structuredData: redactSensitiveJson(input.structuredData).redacted,
+      scope: redactMemoryScope(input.scope),
+    });
+    response.status(201).json({ memory: services.store.saveCandidate({ ...sanitized, brainId }) });
+  });
+
+  app.post('/v1/memories/capture', requireAdapter, (request, response) => {
+    const input = CaptureMemoryRequestSchema.parse(request.body);
+    const brainId = input.brainId ?? DEFAULT_PERSONAL_BRAIN_ID;
+    if (!hasWriteAccess(response, services.brains, brainId)) {
+      return;
+    }
+    const redaction = redactSensitiveText(input.rawContent);
+    const structuredData = input.structuredData === undefined ? undefined : redactSensitiveJson(input.structuredData).redacted;
+    const source = redactEventSource(input.source);
+    const scope = redactMemoryScope(input.scope);
+    const event = services.journal.append({
+      brainId,
+      rawContent: redaction.redacted,
+      eventType: input.eventType,
+      source,
+      ...(structuredData === undefined ? {} : { structuredData }),
+      occurredAt: input.occurredAt,
+    });
+    const compiled = compileMemory({
+      event: redaction.detected ? { ...event, rawContent: input.rawContent } : event,
+      scope,
+    });
+    if (compiled.status === 'ignore' || compiled.status === 'rejected') {
+      response.json({
+        capture: {
+          memoryId: null,
+          status: compiled.status,
+          brain: brainId,
+          scope,
+          requiresConfirmation: false,
+          source: { eventId: event.id },
+        },
+      });
+      return;
+    }
+
+    const proposal = { ...compiled, structuredData: capturedStructuredData(compiled) };
+    const resolution = assessMemoryConflict({
+      proposal,
+      existing: services.store.list({ brainIds: [brainId] }),
+    });
+    const existing = resolution.action === 'reuse'
+      ? services.store.get(resolution.memoryId, [brainId])!
+      : undefined;
+    const memory = existing === undefined
+      ? (compiled.status === 'candidate' || resolution.action === 'review'
+          ? services.store.saveCandidate({ ...proposal, brainId })
+          : services.store.save({ ...proposal, brainId }))
+      : (compiled.status === 'active' && existing.status === 'candidate'
+          ? services.store.approveCandidate(existing.id, {
+            actor: 'memlume',
+            reason: 'Explicit user request confirms pending candidate.',
+          }, [brainId])
+          : existing);
+    response.status(resolution.action === 'reuse' ? 200 : 201).json({
+      capture: {
+        memoryId: memory.id,
+        status: memory.status,
+        brain: memory.brainId,
+        scope: memory.scope,
+        requiresConfirmation: resolution.requiresConfirmation,
+        source: { eventId: event.id },
+      },
+    });
+  });
+
+  app.get('/v1/memories/candidates', requireAdapter, (_request, response) => {
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const brainIds = services.brains.listMountedBrains(installation.id).map(({ brain }) => brain.id);
+    if (brainIds.length === 0) {
+      response.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    response.json({ memories: services.store.list({ brainIds, status: 'candidate' }) });
+  });
+
+  app.post('/v1/memories/:memoryId/approve', requireSetup, requireAdapter, (request, response) => {
+    const { memoryId } = MemoryParametersSchema.parse(request.params);
+    const input = ReviewCandidateRequestSchema.parse(request.body);
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const brainIds = services.brains.listMountedBrains(installation.id).map(({ brain }) => brain.id);
+    const candidate = services.store.get(memoryId, brainIds);
+    if (candidate === undefined) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (candidate.status !== 'candidate') {
+      response.status(409).json({ error: 'candidate_not_pending' });
+      return;
+    }
+    if (!hasWriteAccess(response, services.brains, candidate.brainId)) {
+      return;
+    }
+    const active = services.store.list({ brainIds: [candidate.brainId], status: 'active' });
+    const resolution = assessMemoryConflict({ proposal: { ...candidate, status: 'active' }, existing: active });
+    if (input.supersedeMemoryId !== undefined && resolution.action !== 'review') {
+      response.status(400).json({ error: 'invalid_supersede' });
+      return;
+    }
+    if (resolution.action === 'reuse') {
+      response.status(409).json({ error: 'active_duplicate' });
+      return;
+    }
+    if (resolution.action === 'review' && input.supersedeMemoryId !== resolution.memoryId) {
+      response.status(400).json({ error: 'confirmation_required' });
+      return;
+    }
+    response.json({ memory: services.store.approveCandidate(memoryId, input, brainIds) });
+  });
+
+  app.post('/v1/memories/:memoryId/reject', requireSetup, requireAdapter, (request, response) => {
+    const { memoryId } = MemoryParametersSchema.parse(request.params);
+    const input = ReviewCandidateRequestSchema.omit({ supersedeMemoryId: true }).parse(request.body);
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const brainIds = services.brains.listMountedBrains(installation.id).map(({ brain }) => brain.id);
+    const candidate = services.store.get(memoryId, brainIds);
+    if (candidate === undefined) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (candidate.status !== 'candidate') {
+      response.status(409).json({ error: 'candidate_not_pending' });
+      return;
+    }
+    if (!hasWriteAccess(response, services.brains, candidate.brainId)) {
+      return;
+    }
+    response.json({ memory: services.store.rejectCandidate(memoryId, input, brainIds) });
+  });
+
+  app.get('/v1/memories/:memoryId/history', requireAdapter, (request, response) => {
+    const { memoryId } = MemoryParametersSchema.parse(request.params);
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const brainIds = services.brains.listMountedBrains(installation.id).map(({ brain }) => brain.id);
+    const memories = services.store.listHistory(memoryId, brainIds);
+    if (memories.length === 0) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    response.json({ memories });
+  });
+
+  app.get('/v1/memories/search', requireAdapter, (request, response) => {
     const { q } = SearchQuerySchema.parse(request.query);
-    response.json({ memories: services.store.search(q) });
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const brainIds = services.brains.listMountedBrains(installation.id).map(({ brain }) => brain.id);
+    if (brainIds.length === 0) {
+      response.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    response.json({ memories: services.store.search(q, { brainIds }) });
   });
 
-  app.post('/v1/context/resolve', (request, response) => {
-    response.json({ context: services.resolver.resolve(ResolveContextRequestSchema.parse(request.body)) });
+  app.post('/v1/context/resolve', requireAdapter, (request, response) => {
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const input = ResolveContextRequestSchema.parse(request.body);
+    const brainIds = contextBrainIds(services.brains, installation.id);
+    if (brainIds.length === 0) {
+      response.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const context = services.resolver.resolve({ ...input, brainIds });
+    try {
+      services.outcomes.issueReceipt({
+        traceId: context.traceId,
+        agentId: installation.id,
+        brainIds,
+        sourceMemoryIds: context.explanation.sourceMemoryIds,
+      });
+    } catch (error) {
+      if (error instanceof OutcomeReceiptRateLimitError) {
+        response.status(429).json({ error: 'rate_limited' });
+        return;
+      }
+      throw error;
+    }
+    response.json({ context });
+  });
+
+  app.post('/v1/memories/:memoryId/usage', requireAdapter, (request, response) => {
+    const { memoryId } = MemoryParametersSchema.parse(request.params);
+    const input = RecordMemoryUsageRequestSchema.parse(request.body);
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const brainIds = writableBrainIds(services.brains, installation.id);
+    try {
+      const usage = services.outcomes.recordUsageWithReceipt({
+        memoryId,
+        taskId: input.taskId,
+        agentId: installation.id,
+        retrievalRank: input.retrievalRank,
+        wasIncluded: input.wasIncluded,
+        outcome: input.outcome,
+      }, brainIds, input.traceId, installation.id);
+      response.status(201).json({ usage });
+    } catch (error) {
+      if (error instanceof OutcomeFeedbackRateLimitError) {
+        response.status(429).json({ error: 'rate_limited' });
+        return;
+      }
+      if (error instanceof OutcomeMemoryAccessError || error instanceof OutcomeReceiptError) {
+        response.status(403).json({ error: 'forbidden' });
+        return;
+      }
+      throw error;
+    }
+  });
+
+  app.post('/v1/memory-usage/:usageId/outcome', requireAdapter, (request, response) => {
+    const { usageId } = z.object({ usageId: UuidV7Schema }).strict().parse(request.params);
+    const { traceId, outcome } = RecordUsageOutcomeRequestSchema.parse(request.body);
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const brainIds = writableBrainIds(services.brains, installation.id);
+    try {
+      response.status(201).json({ usage: services.outcomes.setUsageOutcomeWithReceipt(usageId, outcome, brainIds, traceId, installation.id) });
+    } catch (error) {
+      if (error instanceof OutcomeFeedbackRateLimitError) {
+        response.status(429).json({ error: 'rate_limited' });
+        return;
+      }
+      if (error instanceof OutcomeMemoryAccessError || error instanceof OutcomeReceiptError) {
+        response.status(403).json({ error: 'forbidden' });
+        return;
+      }
+      throw error;
+    }
+  });
+
+  app.post('/v1/outcomes', requireAdapter, (request, response) => {
+    const input = RecordOutcomeRequestSchema.parse(request.body);
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const brainIds = writableBrainIds(services.brains, installation.id);
+    const correctionData = input.correctionData === undefined || input.correctionData === null
+      ? input.correctionData
+      : redactSensitiveJson(input.correctionData).redacted;
+    const correctionType = input.correctionType === undefined || input.correctionType === null
+      ? input.correctionType
+      : redactSensitiveText(input.correctionType).redacted;
+    try {
+      const outcome = services.outcomes.recordOutcomeWithReceipt({
+        ...input,
+        agentId: installation.id,
+        ...(correctionData === undefined ? {} : { correctionData }),
+        ...(correctionType === undefined ? {} : { correctionType }),
+      }, brainIds, input.traceId, installation.id);
+      response.status(201).json({ outcome });
+    } catch (error) {
+      if (error instanceof OutcomeFeedbackRateLimitError) {
+        response.status(429).json({ error: 'rate_limited' });
+        return;
+      }
+      if (error instanceof OutcomeMemoryAccessError || error instanceof OutcomeReceiptError) {
+        response.status(403).json({ error: 'forbidden' });
+        return;
+      }
+      throw error;
+    }
   });
 
   app.use((_request, response) => {
@@ -98,7 +695,202 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
   app.use(errorHandler);
 }
 
+function requireSetupToken(setupToken: string | undefined): RequestHandler {
+  return (request, response, next) => {
+    if (setupToken === undefined || setupToken.length === 0) {
+      response.status(503).json({ error: 'setup_unavailable' });
+      return;
+    }
+    if (!tokensMatch(setupToken, request.get('x-memlume-setup-token'))) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    next();
+  };
+}
+
+function beginBackupRestore(backup: BackupLifecycle): RequestHandler {
+  return (request, response, next) => {
+    if (!backup.beginRestore()) {
+      response.status(503).json({ error: 'restore_in_progress' });
+      return;
+    }
+    request.once('aborted', () => backup.cancelRestore());
+    next();
+  };
+}
+
+function cancelBackupRestore(backup: BackupLifecycle): ErrorRequestHandler {
+  return (error, _request, _response, next) => {
+    backup.cancelRestore();
+    next(error);
+  };
+}
+
+function requireAdapterToken(brains: BrainStore): RequestHandler {
+  return (request, response, next) => {
+    const token = bearerToken(request.get('authorization'));
+    if (token === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    try {
+      const agentInstallation: AgentInstallation = brains.authenticateToken(token);
+      response.locals.agentInstallation = agentInstallation;
+      next();
+    } catch {
+      response.status(401).json({ error: 'unauthorized' });
+    }
+  };
+}
+
+function hasWriteAccess(response: { readonly locals: Record<string, unknown>; status: (status: number) => { json(body: unknown): void } }, brains: BrainStore, brainId: string): boolean {
+  const installation = authenticatedInstallation(response);
+  if (installation === undefined) {
+    response.status(401).json({ error: 'unauthorized' });
+    return false;
+  }
+  try {
+    brains.assertAccess(installation.id, brainId, 'read_write');
+    return true;
+  } catch {
+    response.status(403).json({ error: 'forbidden' });
+    return false;
+  }
+}
+
+function authenticatedInstallation(response: { readonly locals: Record<string, unknown> }): AgentInstallation | undefined {
+  const installation = response.locals.agentInstallation;
+  return AgentInstallationSchema.safeParse(installation).data;
+}
+
+function contextBrainIds(brains: BrainStore, agentInstallationId: string): string[] {
+  const priority = { project: 0, domain: 1, personal: 2 } as const;
+  return [...brains.listMountedBrains(agentInstallationId)]
+    .sort(
+      (left, right) =>
+        priority[left.brain.kind] - priority[right.brain.kind] ||
+        left.brain.createdAt.localeCompare(right.brain.createdAt) ||
+        left.brain.id.localeCompare(right.brain.id),
+    )
+    .map(({ brain }) => brain.id);
+}
+
+function writableBrainIds(brains: BrainStore, agentInstallationId: string): string[] {
+  return brains
+    .listMountedBrains(agentInstallationId)
+    .filter(({ access }) => access === 'read_write')
+    .map(({ brain }) => brain.id);
+}
+
+function redactEventSource(source: z.infer<typeof EventSourceSchema>): z.infer<typeof EventSourceSchema> {
+  return EventSourceSchema.parse(
+    Object.fromEntries(
+      Object.entries(source).map(([key, value]) => [key, value === undefined ? undefined : redactSensitiveText(value).redacted]),
+    ),
+  );
+}
+
+function redactMemoryScope(scope: z.infer<typeof MemoryScopeSchema>): z.infer<typeof MemoryScopeSchema> {
+  return MemoryScopeSchema.parse(redactSensitiveJson(scope as unknown as JsonValue).redacted);
+}
+
+function capturedStructuredData(proposal: MemoryProposal): JsonValue {
+  if (proposal.kind === 'policy' && proposal.policyData !== undefined) {
+    return proposal.policyData;
+  }
+  if (proposal.kind === 'preference') {
+    return {
+      domain: 'general',
+      subject: 'user',
+      dimension: proposal.canonicalText,
+      value: proposal.canonicalText,
+      strength: proposal.confidence,
+      confidence: proposal.confidence,
+    };
+  }
+  const packageManager = /^(?:this\s+)?project\s+(?:uses?|使用)\s+(.+)$/iu.exec(proposal.canonicalText)?.[1]
+    ?? /^這個專案使用\s*(.+)$/u.exec(proposal.canonicalText)?.[1];
+  return {
+    subject: packageManager === undefined ? 'statement' : 'project',
+    predicate: packageManager === undefined ? 'content' : 'package_manager',
+    object: packageManager ?? proposal.canonicalText,
+    confidence: proposal.confidence,
+  };
+}
+
+function tokensMatch(expected: string, actual: string | undefined): boolean {
+  if (actual === undefined) {
+    return false;
+  }
+  const expectedBytes = Buffer.from(expected);
+  const actualBytes = Buffer.from(actual);
+  return expectedBytes.byteLength === actualBytes.byteLength && timingSafeEqual(expectedBytes, actualBytes);
+}
+
+const inferenceClientTypes = new Set(['hermes', 'codex', 'openclaw', 'claude-code']);
+
+class UserConfirmationStore {
+  constructor(private readonly database: SqliteDatabase) {}
+
+  consume(signature: string, expiresAt: string): boolean {
+    const consumedAt = new Date().toISOString();
+    return this.database.transaction(() => {
+      this.database.prepare('DELETE FROM user_confirmations WHERE expires_at <= ?').run(consumedAt);
+      const existing = this.database
+        .prepare('SELECT 1 FROM user_confirmations WHERE signature = ?')
+        .get(signature);
+      if (existing !== undefined) {
+        return false;
+      }
+      this.database
+        .prepare('INSERT INTO user_confirmations (signature, consumed_at, expires_at) VALUES (?, ?, ?)')
+        .run(signature, consumedAt, expiresAt);
+      return true;
+    })();
+  }
+}
+
+function hasUserMemoryConfirmation(request: Request, setupToken: string | undefined, body: unknown, confirmations: UserConfirmationStore): boolean {
+  if (setupToken === undefined || setupToken.length === 0) return false;
+  const actual = request.get('x-memlume-user-confirmation');
+  const issuedAt = request.get('x-memlume-user-confirmation-at');
+  if (actual === undefined || !/^[0-9a-f]{64}$/u.test(actual) || issuedAt === undefined) return false;
+  const issuedAtMs = Date.parse(issuedAt);
+  if (!Number.isFinite(issuedAtMs) || Math.abs(Date.now() - issuedAtMs) > 5 * 60 * 1000) return false;
+  const expected = createHmac('sha256', setupToken).update(canonicalJson({ body, issuedAt })).digest('hex');
+  return tokensMatch(expected, actual)
+    && confirmations.consume(actual, new Date(issuedAtMs + 5 * 60 * 1000).toISOString());
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
+}
+
+function bearerToken(authorization: string | undefined): string | undefined {
+  const match = /^Bearer ([^\s]+)$/.exec(authorization ?? '');
+  return match?.[1];
+}
+
 const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
+  if (error instanceof EventBrainConflictError) {
+    response.status(409).json({ error: 'event_brain_conflict' });
+    return;
+  }
+
+  if (error instanceof SourceEventBrainMismatchError) {
+    response.status(400).json({ error: 'invalid_request' });
+    return;
+  }
+
+  if (error instanceof OutcomeMemoryAccessError) {
+    response.status(403).json({ error: 'forbidden' });
+    return;
+  }
+
   if (isPayloadTooLargeError(error)) {
     response.status(413).json({ error: 'payload_too_large' });
     return;

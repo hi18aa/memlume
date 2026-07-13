@@ -1,0 +1,52 @@
+{
+  "id": "memlume-openclaw",
+  "name": "Memlume Shared Brain",
+  "description": "Connect OpenClaw turns to a local Memlume Shared Brain.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "installationId",
+      "profileId",
+      "projectId",
+      "brainId"
+    ],
+    "properties": {
+      "installationId": {
+        "type": "string",
+        "minLength": 1
+      },
+      "profileId": {
+        "type": "string",
+        "minLength": 1
+      },
+      "projectId": {
+        "type": "string",
+        "minLength": 1
+      },
+      "brainId": {
+        "type": "string",
+        "minLength": 1
+      },
+      "workspacePath": {
+        "type": "string",
+        "minLength": 1
+      },
+      "corePath": {
+        "type": "string",
+        "minLength": 1
+      },
+      "daemonUrl": {
+        "type": "string",
+        "minLength": 1
+      },
+      "outboxDirectory": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

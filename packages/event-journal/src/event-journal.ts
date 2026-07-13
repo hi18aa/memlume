@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import {
+  DEFAULT_PERSONAL_BRAIN_ID,
   EventSchema,
   EventSourceSchema,
   IsoUtcDateTimeSchema,
@@ -14,6 +15,7 @@ import {
 import type { SqliteDatabase } from '@memlume/database/internal';
 
 export interface AppendEventInput {
+  readonly brainId?: string;
   readonly rawContent: string;
   readonly eventType: string;
   readonly source: EventSourceInput;
@@ -31,6 +33,13 @@ export type StoredEvent = Event & {
   readonly processingStatus: string;
 };
 
+export class EventBrainConflictError extends Error {
+  constructor() {
+    super('Event is already assigned to a different brain.');
+    this.name = 'EventBrainConflictError';
+  }
+}
+
 type EventRow = {
   id: string;
   event_type: string;
@@ -41,6 +50,7 @@ type EventRow = {
   ingested_at: string;
   processing_status: string;
   content_hash: string;
+  brain_id: string;
 };
 
 const eventColumns = `
@@ -54,24 +64,17 @@ const eventColumns = `
   processing_status,
   content_hash
 `;
+const eventSelectColumns = `${eventColumns}, event_brains.brain_id`;
+const eventFrom = 'FROM events JOIN event_brains ON event_brains.event_id = events.id';
 
 export class EventJournal {
-  private readonly findByIdStatement;
   private readonly findByHashAndReferenceStatement;
-  private readonly findBySourceReferenceStatement;
-  private readonly searchContentStatement;
   private readonly insertStatement;
+  private readonly insertBrainStatement;
 
   constructor(private readonly database: SqliteDatabase) {
-    this.findByIdStatement = database.prepare(`SELECT ${eventColumns} FROM events WHERE id = ?`);
     this.findByHashAndReferenceStatement = database.prepare(
-      `SELECT ${eventColumns} FROM events WHERE content_hash = ? AND source_reference IS ?`,
-    );
-    this.findBySourceReferenceStatement = database.prepare(
-      `SELECT ${eventColumns} FROM events WHERE source_reference = ? ORDER BY ingested_at, id`,
-    );
-    this.searchContentStatement = database.prepare(
-      `SELECT ${eventColumns} FROM events WHERE instr(raw_content, ?) > 0 ORDER BY ingested_at, id`,
+      `SELECT ${eventSelectColumns} ${eventFrom} WHERE events.content_hash = ? AND events.source_reference IS ?`,
     );
     this.insertStatement = database.prepare(`
       INSERT INTO events (
@@ -88,32 +91,65 @@ export class EventJournal {
         content_hash
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
+    this.insertBrainStatement = database.prepare(
+      'INSERT INTO event_brains (event_id, brain_id, created_at) VALUES (?, ?, ?)',
+    );
   }
 
   append(input: AppendEventInput): StoredEvent {
     return this.database.transaction(() => this.appendInTransaction(input)).immediate();
   }
 
-  getById(id: string): StoredEvent | undefined {
-    return this.toStoredEvent(this.findByIdStatement.get(UuidV7Schema.parse(id)) as EventRow | undefined);
+  getById(id: string, brainIds?: readonly string[]): StoredEvent | undefined {
+    const allowedBrainIds = normalizeBrainIds(brainIds);
+    if (allowedBrainIds.length === 0) {
+      return undefined;
+    }
+    return this.toStoredEvent(
+      this.database
+        .prepare(`SELECT ${eventSelectColumns} ${eventFrom} WHERE events.id = ? AND ${brainFilter(allowedBrainIds)}`)
+        .get(UuidV7Schema.parse(id), ...allowedBrainIds) as EventRow | undefined,
+    );
   }
 
-  findBySourceReference(sourceReference: string): StoredEvent[] {
+  findBySourceReference(sourceReference: string, brainIds?: readonly string[]): StoredEvent[] {
     EventSourceSchema.parse({ reference: sourceReference });
-    return (this.findBySourceReferenceStatement.all(sourceReference) as EventRow[]).map((row) => this.toStoredEvent(row)!);
+    const allowedBrainIds = normalizeBrainIds(brainIds);
+    if (allowedBrainIds.length === 0) {
+      return [];
+    }
+    return (
+      this.database
+        .prepare(
+          `SELECT ${eventSelectColumns} ${eventFrom} WHERE events.source_reference = ? AND ${brainFilter(allowedBrainIds)} ORDER BY events.ingested_at, events.id`,
+        )
+        .all(sourceReference, ...allowedBrainIds) as EventRow[]
+    ).map((row) => this.toStoredEvent(row)!);
   }
 
-  searchContent(content: string): StoredEvent[] {
+  searchContent(content: string, brainIds?: readonly string[]): StoredEvent[] {
     if (content.trim().length === 0) {
       throw new Error('Content search requires non-empty text.');
     }
-    return (this.searchContentStatement.all(content) as EventRow[]).map((row) => this.toStoredEvent(row)!);
+    const allowedBrainIds = normalizeBrainIds(brainIds);
+    if (allowedBrainIds.length === 0) {
+      return [];
+    }
+    return (
+      this.database
+        .prepare(
+          `SELECT ${eventSelectColumns} ${eventFrom} WHERE instr(events.raw_content, ?) > 0 AND ${brainFilter(allowedBrainIds)} ORDER BY events.ingested_at, events.id`,
+        )
+        .all(content, ...allowedBrainIds) as EventRow[]
+    ).map((row) => this.toStoredEvent(row)!);
   }
 
   private appendInTransaction(input: AppendEventInput): StoredEvent {
     const source = EventSourceSchema.parse(withoutNullSourceReference(input.source));
+    const brainId = UuidV7Schema.parse(input.brainId ?? DEFAULT_PERSONAL_BRAIN_ID);
     const event = EventSchema.parse({
       id: createUuidV7(),
+      brainId,
       rawContent: input.rawContent,
       eventType: input.eventType,
       source,
@@ -125,6 +161,9 @@ export class EventJournal {
     const existing = sourceReference === undefined ? undefined : this.findByHashAndReference(contentHash, sourceReference);
 
     if (existing) {
+      if (existing.brainId !== event.brainId) {
+        throw new EventBrainConflictError();
+      }
       return existing;
     }
 
@@ -151,12 +190,16 @@ export class EventJournal {
       const duplicate =
         sourceReference === undefined ? undefined : this.findByHashAndReference(contentHash, sourceReference);
       if (duplicate) {
+        if (duplicate.brainId !== event.brainId) {
+          throw new EventBrainConflictError();
+        }
         return duplicate;
       }
       throw error;
     }
+    this.insertBrainStatement.run(event.id, event.brainId, ingestedAt);
 
-    return this.getById(event.id)!;
+    return this.getById(event.id, [event.brainId])!;
   }
 
   private findByHashAndReference(contentHash: string, sourceReference: string): StoredEvent | undefined {
@@ -174,6 +217,7 @@ export class EventJournal {
     const structuredData = row.structured_data === null ? undefined : JsonValueSchema.parse(JSON.parse(row.structured_data));
     const event = EventSchema.parse({
       id: row.id,
+      brainId: row.brain_id,
       eventType: row.event_type,
       rawContent: row.raw_content,
       structuredData,
@@ -205,4 +249,14 @@ function withoutNullSourceReference(source: EventSourceInput): EventSourceInput 
 
   const { reference: _, ...withoutReference } = source;
   return withoutReference;
+}
+
+function normalizeBrainIds(brainIds: readonly string[] | undefined): readonly string[] {
+  return brainIds === undefined
+    ? [DEFAULT_PERSONAL_BRAIN_ID]
+    : brainIds.map((brainId) => UuidV7Schema.parse(brainId));
+}
+
+function brainFilter(brainIds: readonly string[]): string {
+  return `event_brains.brain_id IN (${brainIds.map(() => '?').join(', ')})`;
 }

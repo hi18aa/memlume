@@ -2,10 +2,16 @@ import { describe, expect, test } from 'vitest';
 
 import {
   ContextPackSchema,
+  ContextReceiptSchema,
+  DEFAULT_PERSONAL_BRAIN_ID,
   EventSchema,
   MemoryItemSchema,
   MemoryKindSchema,
   MemoryScopeSchema,
+  MemoryOutcomeSchema,
+  MemoryUsageSchema,
+  MemoryUsageOutcomeSchema,
+  OutcomeResultSchema,
   PolicyDataSchema,
 } from '../src/index.js';
 
@@ -25,6 +31,52 @@ const policy = {
 };
 
 describe('shared memory contracts', () => {
+  test('validates explainable memory usage and task outcomes', () => {
+    expect(ContextReceiptSchema.safeParse({
+      traceId: ids.trace,
+      agentId: 'hermes-installation',
+      brainIds: [DEFAULT_PERSONAL_BRAIN_ID],
+      sourceMemoryIds: [ids.memory],
+      issuedAt: '2026-07-13T00:00:00.000Z',
+      expiresAt: '2026-07-13T00:15:00.000Z',
+      consumedAt: null,
+    }).success).toBe(true);
+    expect(MemoryUsageOutcomeSchema.parse('adopted')).toBe('adopted');
+    expect(OutcomeResultSchema.parse('corrected')).toBe('corrected');
+    expect(MemoryUsageSchema.safeParse({
+      id: ids.memory,
+      memoryId: ids.memory,
+      taskId: 'task-1',
+      agentId: 'hermes-installation',
+      retrievalRank: 1,
+      wasIncluded: true,
+      outcome: 'adopted',
+      usedAt: '2026-07-13T00:00:00.000Z',
+    }).success).toBe(true);
+    expect(MemoryOutcomeSchema.safeParse({
+      id: ids.memory,
+      taskId: 'task-1',
+      agentId: 'hermes-installation',
+      result: 'corrected',
+      correctionType: 'user_correction',
+      correctionData: { note: 'Use pnpm.' },
+      usedMemoryIds: [ids.memory],
+      usedToolIds: ['terminal'],
+      createdAt: '2026-07-13T00:00:00.000Z',
+    }).success).toBe(true);
+    expect(MemoryOutcomeSchema.safeParse({
+      id: ids.memory,
+      taskId: 'task-1',
+      agentId: 'hermes-installation',
+      result: 'success',
+      correctionType: null,
+      correctionData: null,
+      usedMemoryIds: [],
+      usedToolIds: [],
+      createdAt: '2026-07-13T00:00:00.000Z',
+    }).success).toBe(false);
+  });
+
   test('accepts every supported memory kind and scoped identifiers', () => {
     expect(MemoryKindSchema.options).toEqual([
       'policy',
@@ -215,9 +267,33 @@ describe('shared memory contracts', () => {
     });
 
     expect(event.rawContent).toBe(rawContent);
+    expect(event.brainId).toBe(DEFAULT_PERSONAL_BRAIN_ID);
     expect(event.source.agent).toBe('codex-cli');
     expect(EventSchema.safeParse({ ...event, occurredAt: '2026-07-12' }).success).toBe(false);
     expect(EventSchema.safeParse({ ...event, source: {} }).success).toBe(false);
+  });
+
+  test('assigns the personal brain to legacy-compatible event and memory input', () => {
+    const memory = MemoryItemSchema.parse({
+      id: ids.memory,
+      kind: 'fact',
+      canonicalText: 'Memlume stores shared memories locally.',
+      structuredData: {
+        subject: 'Memlume',
+        predicate: 'storage',
+        object: 'local',
+        confidence: 1,
+      },
+      scope: { level: 'global' },
+      status: 'active',
+      priority: 0,
+      confidence: 1,
+      explicitness: 1,
+      createdAt: '2026-07-12T15:00:00.000Z',
+      updatedAt: '2026-07-12T15:00:00.000Z',
+    });
+
+    expect(memory.brainId).toBe(DEFAULT_PERSONAL_BRAIN_ID);
   });
 
   test('requires a traceable context pack with complete directives', () => {
@@ -228,16 +304,24 @@ describe('shared memory contracts', () => {
       directives: [
         {
           memoryId: ids.memory,
+          brainId: DEFAULT_PERSONAL_BRAIN_ID,
           text: 'Use codex_img_gen_skill.',
           actionTarget: 'codex_img_gen_skill',
           priority: 1000,
           mandatory: true,
         },
       ],
-      procedures: [],
-      preferences: [{ memoryId: ids.preference, text: 'Prefer legible symbols.' }],
-      knowledge: [{ memoryId: ids.fact, title: 'Image size', summary: 'Use 1024px source art.' }],
-      decisions: [{ memoryId: ids.decision, text: 'Use SQLite for v0.1.' }],
+      procedures: [
+        {
+          memoryId: ids.memory,
+          brainId: DEFAULT_PERSONAL_BRAIN_ID,
+          name: 'Image workflow',
+          steps: ['Prepare the image.'],
+        },
+      ],
+      preferences: [{ memoryId: ids.preference, brainId: DEFAULT_PERSONAL_BRAIN_ID, text: 'Prefer legible symbols.' }],
+      knowledge: [{ memoryId: ids.fact, brainId: DEFAULT_PERSONAL_BRAIN_ID, title: 'Image size', summary: 'Use 1024px source art.' }],
+      decisions: [{ memoryId: ids.decision, brainId: DEFAULT_PERSONAL_BRAIN_ID, text: 'Use SQLite for v0.1.' }],
       explanation: {
         toolSelection: 'The global policy routes image generation.',
         sourceMemoryIds: [ids.memory, ids.preference, ids.fact, ids.decision],
@@ -257,22 +341,35 @@ describe('shared memory contracts', () => {
     const { traceId: _, ...untracedPack } = pack;
     expect(ContextPackSchema.safeParse(untracedPack).success).toBe(false);
     expect(ContextPackSchema.safeParse({ ...pack, traceId: 'trace-1' }).success).toBe(false);
+    const legacyPack = ContextPackSchema.parse({
+      ...pack,
+      directives: pack.directives.map(({ brainId: _, ...directive }) => directive),
+      procedures: pack.procedures.map(({ brainId: _, ...procedure }) => procedure),
+      preferences: pack.preferences.map(({ brainId: _, ...preference }) => preference),
+      knowledge: pack.knowledge.map(({ brainId: _, ...knowledge }) => knowledge),
+      decisions: pack.decisions.map(({ brainId: _, ...decision }) => decision),
+    });
+    expect(legacyPack.directives[0]?.brainId).toBe(DEFAULT_PERSONAL_BRAIN_ID);
+    expect(legacyPack.procedures[0]?.brainId).toBe(DEFAULT_PERSONAL_BRAIN_ID);
+    expect(legacyPack.preferences[0]?.brainId).toBe(DEFAULT_PERSONAL_BRAIN_ID);
+    expect(legacyPack.knowledge[0]?.brainId).toBe(DEFAULT_PERSONAL_BRAIN_ID);
+    expect(legacyPack.decisions[0]?.brainId).toBe(DEFAULT_PERSONAL_BRAIN_ID);
     expect(
       ContextPackSchema.safeParse({
         ...pack,
-        directives: [{ memoryId: ids.memory, text: 'Use codex_img_gen_skill.', priority: 1, mandatory: true }],
+        directives: [{ memoryId: ids.memory, brainId: DEFAULT_PERSONAL_BRAIN_ID, text: 'Use codex_img_gen_skill.', priority: 1, mandatory: true }],
       }).success,
     ).toBe(true);
     expect(
       ContextPackSchema.safeParse({
         ...pack,
-        directives: [{ memoryId: ids.memory, text: 'Use codex_img_gen_skill.', priority: 1.5, mandatory: true }],
+        directives: [{ memoryId: ids.memory, brainId: DEFAULT_PERSONAL_BRAIN_ID, text: 'Use codex_img_gen_skill.', priority: 1.5, mandatory: true }],
       }).success,
     ).toBe(false);
     expect(
       ContextPackSchema.safeParse({
         ...pack,
-        directives: [{ memoryId: ids.memory, text: 'Use codex_img_gen_skill.', priority: 1 }],
+        directives: [{ memoryId: ids.memory, brainId: DEFAULT_PERSONAL_BRAIN_ID, text: 'Use codex_img_gen_skill.', priority: 1 }],
       }).success,
     ).toBe(false);
   });

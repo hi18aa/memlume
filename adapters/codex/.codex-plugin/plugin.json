@@ -1,0 +1,24 @@
+{
+  "name": "memlume-codex",
+  "version": "0.2.0",
+  "description": "將 Codex 回合連接至本機 Memlume Shared Brain。",
+  "author": {
+    "name": "hi18aa",
+    "url": "https://github.com/hi18aa"
+  },
+  "homepage": "https://github.com/hi18aa/memlume",
+  "repository": "https://github.com/hi18aa/memlume.git",
+  "license": "MIT",
+  "keywords": ["memlume", "shared-memory", "codex", "mcp"],
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Memlume Codex",
+    "shortDescription": "在 Codex 使用本機共享記憶腦袋。",
+    "longDescription": "透過 MCP 與生命週期 hooks，讓 Codex 安全讀寫同一台電腦上的 Memlume Shared Brain。",
+    "developerName": "hi18aa",
+    "category": "Productivity",
+    "capabilities": ["MCP", "Hooks"],
+    "websiteURL": "https://github.com/hi18aa/memlume"
+  }
+}

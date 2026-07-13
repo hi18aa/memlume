@@ -1,6 +1,6 @@
 {
   "name": "@memlume/database",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "exports": {
@@ -13,6 +13,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "pnpm run build && node --test",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
