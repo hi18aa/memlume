@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ from uuid import uuid4
 
 
 BridgeRunner = Callable[[dict[str, Any], float], Any]
+COMPLETED_SESSION_LIMIT = 256
 
 
 class MemlumePlugin:
@@ -26,7 +28,8 @@ class MemlumePlugin:
         self._runner = runner or _SubprocessBridge(self._environment)
         self._timeout_seconds = timeout_seconds
         self._turns: dict[str, str] = {}
-        self._finished_sessions: set[str] = set()
+        self._finished_sessions: OrderedDict[str, None] = OrderedDict()
+        self._last_envelope: dict[str, str] | None = None
         self._lock = threading.Lock()
 
     def pre_llm_call(self, *, session_id: str, user_message: str, **_kwargs: Any) -> dict[str, str] | None:
@@ -37,7 +40,8 @@ class MemlumePlugin:
         message_id = f"hermes-{uuid4()}"
         with self._lock:
             self._turns[session_id] = message_id
-            self._finished_sessions.discard(session_id)
+            self._finished_sessions.pop(session_id, None)
+            self._last_envelope = envelope
 
         scope = {"level": "project", "projectId": envelope["projectId"]}
         self._background({
@@ -66,16 +70,28 @@ class MemlumePlugin:
         })
         return None
 
-    def on_session_end(self, *, session_id: str, **_kwargs: Any) -> None:
+    def on_session_end(self, *, session_id: str | None, **_kwargs: Any) -> None:
         envelope = self._envelope(session_id)
         if envelope is None:
             return None
+        return self._finish_session(envelope)
+
+    def on_session_finalize(self, *, session_id: str | None, **kwargs: Any) -> None:
+        if isinstance(session_id, str) and session_id.strip() != "":
+            return self.on_session_end(session_id=session_id, **kwargs)
+        with self._lock:
+            envelope = self._last_envelope
+        return None if envelope is None else self._finish_session(envelope)
+
+    def _finish_session(self, envelope: dict[str, str]) -> None:
+        session_id = envelope["sessionId"]
         with self._lock:
             if session_id in self._finished_sessions:
                 return None
-            self._finished_sessions.add(session_id)
+            self._finished_sessions[session_id] = None
+            while len(self._finished_sessions) > COMPLETED_SESSION_LIMIT:
+                self._finished_sessions.popitem(last=False)
             self._turns.pop(session_id, None)
-
         scope = {"level": "project", "projectId": envelope["projectId"]}
         self._background({
             "operation": "onSessionEnd",
@@ -84,10 +100,7 @@ class MemlumePlugin:
         })
         return None
 
-    def on_session_finalize(self, *, session_id: str, **kwargs: Any) -> None:
-        return self.on_session_end(session_id=session_id, **kwargs)
-
-    def _envelope(self, session_id: str) -> dict[str, str] | None:
+    def _envelope(self, session_id: str | None) -> dict[str, str] | None:
         required = ("MEMLUME_INSTALLATION_ID", "MEMLUME_PROFILE_ID", "MEMLUME_PROJECT_ID", "MEMLUME_BRAIN_ID")
         if not isinstance(session_id, str) or session_id.strip() == "" or any(self._environment.get(key, "").strip() == "" for key in required):
             return None

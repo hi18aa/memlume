@@ -80,6 +80,32 @@ class HermesPluginTests(unittest.TestCase):
         self.assertEqual(audit["message"]["content"], "已記住。")
         self.assertEqual(len([call for call in calls if call["operation"] == "onSessionEnd"]), 1)
 
+    def test_finalization_without_session_flushes_last_envelope_once_and_bounds_completed_sessions(self):
+        plugin_module = importlib.import_module("memlume_plugin.plugin")
+        calls = []
+        flushed = threading.Event()
+
+        def runner(payload, _timeout):
+            calls.append(payload)
+            if payload["operation"] == "onSessionEnd":
+                flushed.set()
+            return {}
+
+        plugin = plugin_module.MemlumePlugin(environment=self.environment, runner=runner)
+        plugin.pre_llm_call(session_id="finalize-session", user_message="記住專案使用 pnpm")
+        plugin.on_session_finalize(session_id=None)
+
+        self.assertTrue(flushed.wait(0.3))
+        session_end = [call for call in calls if call["operation"] == "onSessionEnd"]
+        self.assertEqual(len(session_end), 1)
+        self.assertEqual(session_end[0]["input"]["envelope"]["sessionId"], "finalize-session")
+        plugin.on_session_end(session_id="finalize-session")
+        self.assertEqual(len([call for call in calls if call["operation"] == "onSessionEnd"]), 1)
+
+        for index in range(257):
+            plugin.on_session_end(session_id=f"finished-{index}")
+        self.assertLessEqual(len(plugin._finished_sessions), 256)
+
     def test_registers_general_plugin_hooks_without_touching_memory_provider(self):
         plugin_module = importlib.import_module("memlume_plugin.plugin")
         existing_provider = object()

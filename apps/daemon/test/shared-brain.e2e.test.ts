@@ -1,6 +1,8 @@
+import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { AdapterClient } from '../../../packages/adapter-sdk/src/index.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -12,6 +14,7 @@ import { createMcpServer } from '../../mcp-server/src/index.js';
 import { startDaemon, type RunningDaemon } from '../src/index.js';
 
 const SETUP_TOKEN = 'setup-token-for-shared-brain-e2e';
+const HERMES_BRIDGE = fileURLToPath(new URL('../../../adapters/hermes/bridge.mjs', import.meta.url));
 const directories: string[] = [];
 const daemons: RunningDaemon[] = [];
 
@@ -83,6 +86,32 @@ async function mount(daemon: RunningDaemon, agentInstallationId: string, brainId
 
 function envelope(clientType: string, installationId: string) {
   return { clientType, installationId, profileId: 'default', sessionId: 'shared-session', projectId: 'memlume' };
+}
+
+function invokeHermesBridge(daemon: RunningDaemon, token: string, payload: unknown): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [HERMES_BRIDGE], {
+      env: { ...process.env, MEMLUME_DAEMON_URL: daemonUrl(daemon), MEMLUME_TOKEN: token },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let output = '';
+    let errors = '';
+    child.stdout!.setEncoding('utf8').on('data', (chunk) => { output += chunk; });
+    child.stderr!.setEncoding('utf8').on('data', (chunk) => { errors += chunk; });
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(errors || `Hermes bridge exited with ${code}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(output) as unknown);
+      } catch (error) {
+        reject(error);
+      }
+    });
+    child.stdin!.end(`${JSON.stringify(payload)}\n`);
+  });
 }
 
 async function rememberThroughMcp(daemon: RunningDaemon, token: string, brainId: string): Promise<unknown> {
@@ -200,6 +229,44 @@ describe('shared brain adapter end-to-end flow', () => {
     } finally {
       database.close();
     }
+  });
+
+  test('accepts a mounted Hermes bridge capture and rejects the same bridge without write access', async () => {
+    const { daemon } = await start();
+    const brainId = await createBrain(daemon);
+    const hermes = await registerAdapter(daemon, 'hermes', 'hermes-plugin');
+    const reader = await registerAdapter(daemon, 'codex', 'hermes-reader');
+    const readOnlyHermes = await registerAdapter(daemon, 'hermes', 'hermes-read-only');
+    await mount(daemon, hermes.id, brainId, 'read_write');
+    await mount(daemon, reader.id, brainId, 'read');
+    await mount(daemon, readOnlyHermes.id, brainId, 'read');
+
+    const message = {
+      brainId,
+      messageId: 'hermes-pnpm',
+      content: '記住專案使用 pnpm',
+      scope: { level: 'project' as const, projectId: 'memlume' },
+    };
+    await expect(invokeHermesBridge(daemon, hermes.token, {
+      operation: 'onUserMessage',
+      envelope: envelope('hermes', 'hermes-plugin'),
+      message,
+    })).resolves.toEqual({ ok: true, result: { status: 'saved', memoryStatus: 'active' } });
+
+    const readerClient = new AdapterClient({ daemonUrl: daemonUrl(daemon), token: reader.token, outboxDirectory: temporaryDirectory() });
+    await expect(readerClient.beforeTask({
+      envelope: envelope('codex', 'hermes-reader'),
+      intent: 'implementation',
+      scope: message.scope,
+      task: 'pnpm',
+      contextBudget: 100,
+    })).resolves.toMatchObject({ knowledge: [{ brainId, summary: '專案使用 pnpm' }] });
+
+    await expect(invokeHermesBridge(daemon, readOnlyHermes.token, {
+      operation: 'onUserMessage',
+      envelope: envelope('hermes', 'hermes-read-only'),
+      message: { ...message, messageId: 'hermes-denied' },
+    })).resolves.toEqual({ ok: true, result: { status: 'rejected' } });
   });
 
   test('continues without shared context then resends a queued capture after daemon restart', async () => {
