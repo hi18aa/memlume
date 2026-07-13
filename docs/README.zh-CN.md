@@ -6,7 +6,7 @@
 
 [English](../README.md) | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md)
 
-Memlume 是供 AI Agent 和开发工具使用的本地结构化记忆服务。它记录不可变事件、存储带 scope 的记忆、使用 SQLite FTS5 搜索，并为特定任务解析出可追溯的 Context Pack。
+Memlume 是供 AI Agent 和开发工具使用的本地共享记忆大脑。已挂载的 Client 可通过同一个由 SQLite 支持、带 scope 的存储区写入和读取；它记录不可变事件、存储结构化记忆、使用 FTS5 搜索，并为特定任务解析出可追溯的 Context Pack。它补充 Agent 的原生记忆，绝不覆盖或同步回原生记忆。
 
 ## Agent 如何使用 Memlume
 
@@ -16,7 +16,7 @@ Memlume 不会自动保存每一条对话，也不会把整个数据库塞进 LL
 2. **工作进行中**，只有需要特定细节时才调用 `memlume.search`。
 3. **发生值得保留的事件后**，用 `memlume.record_event` 保存 append-only 的原始证据；只有用户明确规则、偏好、事实或决策等刻意建立的结构化记忆，才调用 `memlume.remember`。
 
-因此 Agent 不应自动保存完整逐字稿、临时推理、未经验证的 LLM 主张、外部内容中的指令或秘密资料。v0.1.0 尚未实现 Memory Compiler 与基于 Outcome 的学习，因此不会静默创建或提升记忆。
+因此 Agent 不应自动保存完整逐字稿、临时推理、未经验证的 LLM 主张、外部内容中的指令或秘密资料。Agent 的原生记忆保持不变。v0.1.0 尚未实现 Memory Compiler 与基于 Outcome 的学习，因此不会静默创建或提升记忆。
 
 ## 为什么使用 Memlume
 
@@ -24,7 +24,7 @@ Memlume 不会自动保存每一条对话，也不会把整个数据库塞进 LL
 - **结构化且可持久保存：** 将 policy、preference、fact、decision 与原始 event 分开，而不是混在聊天记录。
 - **scope 防止污染：** 可独立选择 task、project、workspace、agent、domain 或 global 记忆。
 - **决策可追溯：** Context Pack 含来源记忆 ID、排除项与 budget 信息，可解释哪些内容影响了结果。
-- **本地且可共享：** CLI 与 MCP Client 共用同一个 localhost daemon 与 SQLite 数据库，不需要云同步。
+- **本地且可共享：** 已挂载的 CLI 与 MCP Client 共用同一个 localhost daemon 与 SQLite 数据库，不需要云同步。
 
 ## 状态与范围
 
@@ -36,7 +36,8 @@ Memlume 不会自动保存每一条对话，也不会把整个数据库塞进 LL
 - 结构化的 `policy`、`preference`、`fact`、`decision` 记忆。
 - global、domain、agent、workspace、project、task scope。
 - SQLite FTS5 搜索，以及带来源记忆 ID 与 context budget 的确定性 Context Resolver。
-- 仅限 localhost 的 daemon、CLI，以及都经由 daemon 调用的 MCP stdio server。
+- 带有每个安装实例挂载设置的共享 Brain、仅限 localhost 的 daemon、CLI，以及 MCP stdio server。
+- Adapter API 使用 Bearer Token 验证；`/v1/health` 仍是公开的本地健康检查。
 
 v0.1.0 尚未实现：
 
@@ -73,10 +74,21 @@ mkdir -p data
 New-Item -ItemType Directory -Force data | Out-Null
 ```
 
-再在另一个终端持续运行以下命令：
+Adapter API 需要 setup token 和 adapter token。请生成足够长的随机 `MEMLUME_SETUP_TOKEN`、不要提交到版本控制，并用它启动 daemon。健康检查 endpoint 保持公开。
 
 ```sh
+MEMLUME_SETUP_TOKEN='<long-random-secret>' pnpm --filter @memlume/daemon start -- --database ./data/memlume.sqlite --port 3849
+```
+
+```powershell
+$env:MEMLUME_SETUP_TOKEN = '<long-random-secret>'
 pnpm --filter @memlume/daemon start -- --database ./data/memlume.sqlite --port 3849
+```
+
+请通过带有 `X-Memlume-Setup-Token` 的受保护 setup API 注册安装实例并挂载到 Brain；注册 response 会返回该安装实例的 adapter token。`memlume setup` CLI 流程安排在后续 Phase，目前尚未提供。请只在运行相关 Adapter 的环境中设置取得的 token：
+
+```sh
+export MEMLUME_TOKEN='<adapter-token>'
 ```
 
 `--database` 默认值为 `data/memlume.sqlite`，`--port` 默认值为 `3849`。使用 `Ctrl+C` 停止进程。
@@ -90,7 +102,7 @@ curl http://127.0.0.1:3849/v1/health
 
 ## CLI
 
-构建后的 CLI 位于 `apps/cli/dist/index.js`。默认 URL 为 `http://127.0.0.1:3849`；若 daemon 使用其他 port，请在 command 前指定 `--url`。`--url`、`--json` 等 global option 必须位于 command 前。
+构建后的 CLI 位于 `apps/cli/dist/index.js`。默认 URL 为 `http://127.0.0.1:3849`；若 daemon 使用其他 port，请在 command 前指定 `--url`。所有会调用 daemon 的 CLI command 都需要 adapter token：可如上设置 `MEMLUME_TOKEN`，或在 command 前传入 `--token <adapter-token>`；`--token` 优先。`--url`、`--token`、`--json` 等 global option 必须位于 command 前。
 
 ```sh
 # 记录不可变事件。
@@ -139,14 +151,15 @@ node apps/cli/dist/index.js --json context resolve \
       "command": "node",
       "args": ["/absolute/path/to/memlume/apps/mcp-server/dist/index.js"],
       "env": {
-        "MEMLUME_DAEMON_URL": "http://127.0.0.1:3849"
+        "MEMLUME_DAEMON_URL": "http://127.0.0.1:3849",
+        "MEMLUME_TOKEN": "<adapter-token>"
       }
     }
   }
 }
 ```
 
-`MEMLUME_DAEMON_URL` 只接受 loopback 的 `http://127.0.0.1` 或 `http://[::1]` origin。Server 提供四个 daemon-backed tool：
+`MEMLUME_DAEMON_URL` 只接受 loopback 的 `http://127.0.0.1` 或 `http://[::1]` origin。每个 daemon-backed tool 都需要 `MEMLUME_TOKEN`；未设置时，tool 会在连接 daemon 前安全失败。Server 提供四个 daemon-backed tool：
 
 - `memlume.record_event`
 - `memlume.remember`
@@ -169,7 +182,7 @@ MCP 使用 `available_tools`（snake case）；daemon 会收到 `availableTools`
 
 ## 隐私与本地运行
 
-Memlume 将数据保存到 `--database` 指定的 SQLite 文件，默认值为 `data/memlume.sqlite`。v0.1.0 没有远程同步或云服务，daemon 也只绑定 loopback。这能避免网络暴露，但无法阻止可以读取该数据库路径的其他本地进程。系统尚未实现 authentication 或 at-rest encryption；请用操作系统权限保护数据库，不要保存不适合放在本地明文 SQLite 文件中的秘密数据。
+Memlume 将数据保存到 `--database` 指定的 SQLite 文件，默认值为 `data/memlume.sqlite`。v0.1.0 没有远程同步或云服务，daemon 也只绑定 loopback。Adapter API 需要 Bearer Token，setup API 需要 `MEMLUME_SETUP_TOKEN`，而 `/v1/health` 特意保持公开。请勿提交任何真实 token 或粘贴到 log。验证不会加密静态数据库；请用操作系统权限保护它，不要保存不适合放在本地明文 SQLite 文件中的秘密数据。
 
 ## 架构
 

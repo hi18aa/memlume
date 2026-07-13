@@ -9,6 +9,7 @@ interface RecordedRequest {
   readonly method: string;
   readonly url: string;
   readonly body: unknown;
+  readonly authorization: string | undefined;
 }
 
 let server: Server;
@@ -33,6 +34,7 @@ beforeEach(async () => {
       method: request.method ?? '',
       url: request.url ?? '',
       body: text === '' ? undefined : JSON.parse(text),
+      authorization: request.headers.authorization,
     });
     if (hangResponse) {
       return;
@@ -49,7 +51,10 @@ afterEach(async () => {
   await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 });
 
-async function run(args: string[]): Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }> {
+async function run(
+  args: string[],
+  environment: NodeJS.ProcessEnv = {},
+): Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }> {
   let stdout = '';
   let stderr = '';
   const code = await main(args, {
@@ -59,7 +64,7 @@ async function run(args: string[]): Promise<{ readonly code: number; readonly st
     stderr: (text) => {
       stderr += text;
     },
-  });
+  }, environment);
   return { code, stdout, stderr };
 }
 
@@ -70,6 +75,8 @@ describe('memlume CLI', () => {
     const result = await run([
       '--url',
       url,
+      '--token',
+      'cli-adapter-token',
       'event',
       'add',
       'Use SQLite.',
@@ -86,6 +93,7 @@ describe('memlume CLI', () => {
       {
         method: 'POST',
         url: '/v1/events',
+        authorization: 'Bearer cli-adapter-token',
         body: {
           rawContent: 'Use SQLite.',
           eventType: 'decision',
@@ -98,10 +106,12 @@ describe('memlume CLI', () => {
   test('search sends the query and prints the raw daemon JSON with --json', async () => {
     response = { status: 200, body: { memories: [{ id: 'memory-1', kind: 'fact', canonicalText: 'SQLite FTS5' }] } };
 
-    const result = await run(['--url', url, '--json', 'search', 'SQLite FTS5']);
+    const result = await run(['--url', url, '--token', 'cli-adapter-token', '--json', 'search', 'SQLite FTS5']);
 
     expect(result).toEqual({ code: 0, stdout: `${JSON.stringify(response.body)}\n`, stderr: '' });
-    expect(requests).toEqual([{ method: 'GET', url: '/v1/memories/search?q=SQLite+FTS5', body: undefined }]);
+    expect(requests).toEqual([
+      { method: 'GET', url: '/v1/memories/search?q=SQLite+FTS5', body: undefined, authorization: 'Bearer cli-adapter-token' },
+    ]);
   });
 
   test('remember policy posts its required structured data through the daemon', async () => {
@@ -110,6 +120,8 @@ describe('memlume CLI', () => {
     const result = await run([
       '--url',
       url,
+      '--token',
+      'cli-adapter-token',
       'remember',
       'Use the local image route.',
       '--kind',
@@ -128,6 +140,7 @@ describe('memlume CLI', () => {
       {
         method: 'POST',
         url: '/v1/memories',
+        authorization: 'Bearer cli-adapter-token',
         body: {
           kind: 'policy',
           canonicalText: 'Use the local image route.',
@@ -148,6 +161,8 @@ describe('memlume CLI', () => {
     const result = await run([
       '--url',
       url,
+      '--token',
+      'cli-adapter-token',
       'context',
       'resolve',
       '--intent',
@@ -168,6 +183,7 @@ describe('memlume CLI', () => {
       {
         method: 'POST',
         url: '/v1/context/resolve',
+        authorization: 'Bearer cli-adapter-token',
         body: {
           intent: 'image_generation',
           scope: { level: 'global' },
@@ -183,7 +199,7 @@ describe('memlume CLI', () => {
   test('returns a nonzero exit and safe daemon error text', async () => {
     response = { status: 400, body: { error: 'invalid_request' } };
 
-    const result = await run(['--url', url, 'search', 'SQLite']);
+    const result = await run(['--url', url, '--token', 'cli-adapter-token', 'search', 'SQLite']);
 
     expect(result).toEqual({ code: 1, stdout: '', stderr: 'Error: daemon returned 400: invalid_request.\n' });
   });
@@ -191,7 +207,7 @@ describe('memlume CLI', () => {
   test('returns a nonzero timeout error when the daemon does not respond', async () => {
     hangResponse = true;
 
-    const result = await run(['--url', url, 'search', 'SQLite']);
+    const result = await run(['--url', url, '--token', 'cli-adapter-token', 'search', 'SQLite']);
 
     expect(result).toEqual({ code: 1, stdout: '', stderr: 'Error: daemon request timed out.\n' });
   }, 15_000);
@@ -199,7 +215,7 @@ describe('memlume CLI', () => {
   test('rejects a successful daemon response with an invalid JSON body', async () => {
     rawResponse = 'not JSON';
 
-    const result = await run(['--url', url, '--json', 'search', 'SQLite']);
+    const result = await run(['--url', url, '--token', 'cli-adapter-token', '--json', 'search', 'SQLite']);
 
     expect(result).toEqual({ code: 1, stdout: '', stderr: 'Error: daemon returned an invalid response.\n' });
   });
@@ -214,7 +230,7 @@ describe('memlume CLI', () => {
       `${url}/#fragment`,
       'not a URL',
     ]) {
-      const result = await run(['--url', unsafeUrl, 'search', 'SQLite']);
+      const result = await run(['--url', unsafeUrl, '--token', 'cli-adapter-token', 'search', 'SQLite']);
 
       expect(result).toEqual({
         code: 1,
@@ -227,7 +243,7 @@ describe('memlume CLI', () => {
   });
 
   test('rejects a blank integer option before making a daemon request', async () => {
-    const result = await run(['--url', url, 'context', 'resolve', '--intent', 'image_generation', '--budget', '']);
+    const result = await run(['--url', url, '--token', 'cli-adapter-token', 'context', 'resolve', '--intent', 'image_generation', '--budget', '']);
 
     expect(result).toEqual({ code: 1, stdout: '', stderr: 'Error: --budget must be an integer.\n' });
     expect(requests).toEqual([]);
@@ -237,6 +253,8 @@ describe('memlume CLI', () => {
     const result = await run([
       '--url',
       url,
+      '--token',
+      'cli-adapter-token',
       'remember',
       'SQLite is local.',
       '--kind',
@@ -253,5 +271,51 @@ describe('memlume CLI', () => {
 
     expect(result).toEqual({ code: 1, stdout: '', stderr: 'Error: --confidence must be a number from 0 to 1.\n' });
     expect(requests).toEqual([]);
+  });
+
+  test('uses MEMLUME_TOKEN when --token is not provided', async () => {
+    const result = await run(['--url', url, 'search', 'SQLite'], { MEMLUME_TOKEN: 'environment-adapter-token' });
+
+    expect(result).toEqual({ code: 0, stdout: 'No memories found.\n', stderr: '' });
+    expect(requests).toEqual([
+      { method: 'GET', url: '/v1/memories/search?q=SQLite', body: undefined, authorization: 'Bearer environment-adapter-token' },
+    ]);
+  });
+
+  test('uses --token ahead of MEMLUME_TOKEN', async () => {
+    const result = await run(
+      ['--url', url, '--token', 'explicit-adapter-token', 'search', 'SQLite'],
+      { MEMLUME_TOKEN: 'environment-adapter-token' },
+    );
+
+    expect(result).toEqual({ code: 0, stdout: 'No memories found.\n', stderr: '' });
+    expect(requests).toEqual([
+      { method: 'GET', url: '/v1/memories/search?q=SQLite', body: undefined, authorization: 'Bearer explicit-adapter-token' },
+    ]);
+  });
+
+  test('does not contact the daemon when no adapter token is configured', async () => {
+    const result = await run(['--url', url, 'search', 'SQLite']);
+
+    expect(result).toEqual({
+      code: 1,
+      stdout: '',
+      stderr: 'Error: adapter token is required. Create one through the protected setup API, then set MEMLUME_TOKEN or pass --token.\n',
+    });
+    expect(requests).toEqual([]);
+  });
+
+  test('does not echo the adapter token when the daemon rejects it', async () => {
+    response = { status: 401, body: { error: 'unauthorized' } };
+    const secret = 'cli-secret-that-must-not-appear';
+
+    const result = await run(['--url', url, '--token', secret, 'search', 'SQLite']);
+
+    expect(result).toEqual({
+      code: 1,
+      stdout: '',
+      stderr: 'Error: adapter authentication failed. Create a new token through the protected setup API and update MEMLUME_TOKEN.\n',
+    });
+    expect(result.stderr).not.toContain(secret);
   });
 });

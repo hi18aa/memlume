@@ -14,6 +14,7 @@ interface Io {
 interface GlobalOptions {
   readonly url: string;
   readonly json: boolean;
+  readonly token?: string;
 }
 
 interface ScopeOptions {
@@ -40,8 +41,8 @@ class DaemonConnectionError extends Error {
   }
 }
 
-export async function main(args: readonly string[], io: Io = defaultIo): Promise<number> {
-  const program = createProgram(io);
+export async function main(args: readonly string[], io: Io = defaultIo, environment: NodeJS.ProcessEnv = process.env): Promise<number> {
+  const program = createProgram(io, environment);
 
   try {
     await program.parseAsync(args, { from: 'user' });
@@ -56,12 +57,13 @@ export async function main(args: readonly string[], io: Io = defaultIo): Promise
   }
 }
 
-function createProgram(io: Io): Command {
+function createProgram(io: Io, environment: NodeJS.ProcessEnv): Command {
   const program = new Command();
   program
     .name('memlume')
     .description('Use a local Memlume daemon.')
     .option('--url <url>', 'daemon URL', 'http://127.0.0.1:3849')
+    .option('--token <token>', 'adapter token (defaults to MEMLUME_TOKEN)')
     .option('--json', 'print raw daemon JSON')
     .configureOutput({ writeOut: io.stdout, writeErr: io.stderr })
     .exitOverride();
@@ -76,7 +78,7 @@ function createProgram(io: Io): Command {
     .action(async (content: string, options: { readonly type: string; readonly agent?: string; readonly reference?: string }, command: Command) => {
       const global = command.optsWithGlobals<GlobalOptions>();
       const source = compact({ type: 'cli', agent: options.agent, reference: options.reference });
-      const result = await request(global.url, '/v1/events', 'POST', {
+      const result = await request(global.url, adapterToken(global.token, environment), '/v1/events', 'POST', {
         rawContent: content,
         eventType: options.type,
         source,
@@ -121,7 +123,7 @@ function createProgram(io: Io): Command {
     .action(async (content: string, options: RememberOptions, command: Command) => {
       const global = command.optsWithGlobals<GlobalOptions>();
       const body = memoryRequest(content, options);
-      const result = await request(global.url, '/v1/memories', 'POST', body);
+      const result = await request(global.url, adapterToken(global.token, environment), '/v1/memories', 'POST', body);
       printResult(result, global.json, io.stdout, (response) => `Saved ${options.kind} memory ${nestedId(response, 'memory') ?? 'memory'}.`);
     });
 
@@ -130,7 +132,7 @@ function createProgram(io: Io): Command {
     .description('Search memories.')
     .action(async (query: string, _options: unknown, command: Command) => {
       const global = command.optsWithGlobals<GlobalOptions>();
-      const result = await request(global.url, `/v1/memories/search?${new URLSearchParams({ q: query })}`, 'GET');
+      const result = await request(global.url, adapterToken(global.token, environment), `/v1/memories/search?${new URLSearchParams({ q: query })}`, 'GET');
       printResult(result, global.json, io.stdout, searchSummary);
     });
 
@@ -154,7 +156,7 @@ function createProgram(io: Io): Command {
       availableTools: options.tool,
       entities: options.entity,
     });
-    const result = await request(global.url, '/v1/context/resolve', 'POST', body);
+    const result = await request(global.url, adapterToken(global.token, environment), '/v1/context/resolve', 'POST', body);
     printResult(result, global.json, io.stdout, contextSummary);
   });
 
@@ -358,13 +360,22 @@ function unitNumber(value: string | undefined, option: string): number {
   return parsed;
 }
 
-async function request(url: string, path: string, method: 'GET' | 'POST', body?: unknown): Promise<unknown> {
+function adapterToken(option: string | undefined, environment: NodeJS.ProcessEnv): string {
+  const token = option ?? environment.MEMLUME_TOKEN;
+  if (token === undefined || token.trim() === '') {
+    throw new Error('adapter token is required. Create one through the protected setup API, then set MEMLUME_TOKEN or pass --token.');
+  }
+  return token;
+}
+
+async function request(url: string, token: string, path: string, method: 'GET' | 'POST', body?: unknown): Promise<unknown> {
   const endpoint = daemonEndpoint(url, path);
   let response: Response;
   try {
     response = await fetch(endpoint, {
       method,
-      ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+      headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
@@ -387,6 +398,9 @@ async function request(url: string, path: string, method: 'GET' | 'POST', body?:
     result = await response.json();
   } catch {
     result = undefined;
+  }
+  if (response.status === 401) {
+    throw new Error('adapter authentication failed. Create a new token through the protected setup API and update MEMLUME_TOKEN.');
   }
   throw new DaemonResponseError(response.status, daemonErrorCode(result));
 }

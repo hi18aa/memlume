@@ -3,7 +3,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { createMcpServer } from '../src/index.js';
 
@@ -11,6 +11,7 @@ interface RecordedRequest {
   readonly method: string;
   readonly url: string;
   readonly body: unknown;
+  readonly authorization: string | undefined;
 }
 
 let daemon: Server;
@@ -31,7 +32,12 @@ beforeEach(async () => {
       chunks.push(Buffer.from(chunk));
     }
     const text = Buffer.concat(chunks).toString();
-    requests.push({ method: request.method ?? '', url: request.url ?? '', body: text === '' ? undefined : JSON.parse(text) });
+    requests.push({
+      method: request.method ?? '',
+      url: request.url ?? '',
+      body: text === '' ? undefined : JSON.parse(text),
+      authorization: request.headers.authorization,
+    });
     reply.writeHead(response.status, { 'content-type': 'application/json', ...responseHeaders });
     reply.end(rawResponse ?? JSON.stringify(response.body));
   });
@@ -40,14 +46,15 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   daemon.closeAllConnections();
   await new Promise<void>((resolve, reject) => daemon.close((error) => (error === undefined ? resolve() : reject(error))));
 });
 
-async function connect() {
+async function connect(options: { readonly token?: string } = { token: 'mcp-adapter-token' }) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'memlume-test', version: '0.1.0' });
-  const server = createMcpServer({ daemonUrl });
+  const server = createMcpServer({ daemonUrl, ...options });
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
   return { client, server };
 }
@@ -120,6 +127,7 @@ describe('Memlume MCP server', () => {
       {
         method: 'POST',
         url: '/v1/context/resolve',
+        authorization: 'Bearer mcp-adapter-token',
         body: {
           intent: 'image_generation',
           scope: { level: 'global' },
@@ -148,6 +156,7 @@ describe('Memlume MCP server', () => {
       {
         method: 'POST',
         url: '/v1/events',
+        authorization: 'Bearer mcp-adapter-token',
         body: { rawContent: 'Use SQLite.', eventType: 'decision', source: { type: 'mcp', agent: 'test' } },
       },
     ]);
@@ -172,6 +181,99 @@ describe('Memlume MCP server', () => {
     await server.close();
   });
 
+  test('returns remember success only after a successful daemon response', async () => {
+    const { client, server } = await connect();
+    const body = { memory: { id: 'memory-1', kind: 'fact' } };
+    response = { status: 201, body };
+
+    await expect(
+      client.callTool({
+        name: 'memlume.remember',
+        arguments: {
+          kind: 'fact',
+          canonicalText: 'Memlume uses SQLite.',
+          scope: { level: 'global' },
+          structuredData: { subject: 'Memlume', predicate: 'uses', object: 'SQLite', confidence: 1 },
+        },
+      }),
+    ).resolves.toMatchObject({
+      structuredContent: body,
+      content: [{ type: 'text', text: JSON.stringify(body) }],
+    });
+    expect(requests).toEqual([
+      {
+        method: 'POST',
+        url: '/v1/memories',
+        authorization: 'Bearer mcp-adapter-token',
+        body: {
+          kind: 'fact',
+          canonicalText: 'Memlume uses SQLite.',
+          scope: { level: 'global' },
+          structuredData: { subject: 'Memlume', predicate: 'uses', object: 'SQLite', confidence: 1 },
+        },
+      },
+    ]);
+    await server.close();
+  });
+
+  test('uses MEMLUME_TOKEN when no token option is supplied', async () => {
+    vi.stubEnv('MEMLUME_TOKEN', 'environment-adapter-token');
+    const { client, server } = await connect({});
+
+    await expect(client.callTool({ name: 'memlume.search', arguments: { query: 'SQLite' } })).resolves.toMatchObject({ structuredContent: response.body });
+    expect(requests).toEqual([
+      { method: 'GET', url: '/v1/memories/search?q=SQLite', body: undefined, authorization: 'Bearer environment-adapter-token' },
+    ]);
+    await server.close();
+  });
+
+  test('uses an explicit token ahead of MEMLUME_TOKEN', async () => {
+    vi.stubEnv('MEMLUME_TOKEN', 'environment-adapter-token');
+    const { client, server } = await connect({ token: 'explicit-adapter-token' });
+
+    await expect(client.callTool({ name: 'memlume.search', arguments: { query: 'SQLite' } })).resolves.toMatchObject({ structuredContent: response.body });
+    expect(requests).toEqual([
+      { method: 'GET', url: '/v1/memories/search?q=SQLite', body: undefined, authorization: 'Bearer explicit-adapter-token' },
+    ]);
+    await server.close();
+  });
+
+  test('does not contact the daemon when no adapter token is configured', async () => {
+    vi.stubEnv('MEMLUME_TOKEN', '');
+    const { client, server } = await connect({});
+
+    await expect(client.callTool({ name: 'memlume.search', arguments: { query: 'SQLite' } })).resolves.toMatchObject({
+      isError: true,
+      content: [{ type: 'text', text: 'Memlume adapter token is required. Create one through the protected setup API, then set MEMLUME_TOKEN.' }],
+    });
+    expect(requests).toEqual([]);
+    await server.close();
+  });
+
+  test('does not echo a rejected adapter token or claim that remember was saved', async () => {
+    const secret = 'mcp-secret-that-must-not-appear';
+    response = { status: 401, body: { error: 'unauthorized' } };
+    const { client, server } = await connect({ token: secret });
+
+    const result = await client.callTool({
+      name: 'memlume.remember',
+      arguments: {
+        kind: 'fact',
+        canonicalText: 'Memlume uses SQLite.',
+        scope: { level: 'global' },
+        structuredData: { subject: 'Memlume', predicate: 'uses', object: 'SQLite', confidence: 1 },
+      },
+    });
+
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: 'text', text: 'Memlume adapter authentication failed. Create a new token through the protected setup API and update MEMLUME_TOKEN.' }],
+    });
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(JSON.stringify(result).toLowerCase()).not.toContain('saved');
+    await server.close();
+  });
+
   test.each([
     [400, 'invalid_request'],
     [500, 'internal_error'],
@@ -183,6 +285,9 @@ describe('Memlume MCP server', () => {
       isError: true,
       content: [{ type: 'text', text: `Daemon request failed (${status}: ${error}).` }],
     });
+    expect(requests).toEqual([
+      { method: 'GET', url: '/v1/memories/search?q=SQLite', body: undefined, authorization: 'Bearer mcp-adapter-token' },
+    ]);
     await server.close();
   });
 

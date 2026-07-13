@@ -76,9 +76,10 @@ const SearchSchema = z
 
 export interface McpServerOptions {
   readonly daemonUrl?: string;
+  readonly token?: string;
 }
 
-export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL }: McpServerOptions = {}): McpServer {
+export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL, token = process.env.MEMLUME_TOKEN }: McpServerOptions = {}): McpServer {
   const safeDaemonUrl = daemonOrigin(daemonUrl);
   const server = new McpServer({ name: 'memlume', version: '0.1.0' });
 
@@ -89,7 +90,7 @@ export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL }: McpServerOpt
       description: 'Resolve scoped Memlume context for an agent task.',
       inputSchema: ResolveContextSchema,
     },
-    async ({ available_tools, ...input }) => daemonTool(safeDaemonUrl, '/v1/context/resolve', 'POST', {
+    async ({ available_tools, ...input }) => daemonTool(safeDaemonUrl, token, '/v1/context/resolve', 'POST', {
       ...input,
       availableTools: available_tools,
     }),
@@ -102,7 +103,7 @@ export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL }: McpServerOpt
       description: 'Append an immutable event through the local Memlume daemon.',
       inputSchema: RecordEventSchema,
     },
-    async (input) => daemonTool(safeDaemonUrl, '/v1/events', 'POST', input),
+    async (input) => daemonTool(safeDaemonUrl, token, '/v1/events', 'POST', input),
   );
 
   server.registerTool(
@@ -117,7 +118,7 @@ export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL }: McpServerOpt
       if (!parsed.success) {
         return { content: [{ type: 'text', text: 'Invalid remember request.' }], isError: true };
       }
-      return daemonTool(safeDaemonUrl, '/v1/memories', 'POST', parsed.data);
+      return daemonTool(safeDaemonUrl, token, '/v1/memories', 'POST', parsed.data);
     },
   );
 
@@ -128,7 +129,7 @@ export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL }: McpServerOpt
       description: 'Search memories through the local Memlume daemon.',
       inputSchema: SearchSchema,
     },
-    async ({ query }) => daemonTool(safeDaemonUrl, `/v1/memories/search?${new URLSearchParams({ q: query })}`, 'GET'),
+    async ({ query }) => daemonTool(safeDaemonUrl, token, `/v1/memories/search?${new URLSearchParams({ q: query })}`, 'GET'),
   );
 
   return server;
@@ -136,12 +137,13 @@ export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL }: McpServerOpt
 
 async function daemonTool(
   daemonUrl: string,
+  token: string | undefined,
   path: string,
   method: 'GET' | 'POST',
   body?: unknown,
 ): Promise<CallToolResult> {
   try {
-    const result = await requestDaemon(daemonUrl, path, method, body);
+    const result = await requestDaemon(daemonUrl, token, path, method, body);
     return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result };
   } catch (error) {
     const message = error instanceof DaemonRequestError ? error.message : 'Daemon request failed.';
@@ -151,16 +153,19 @@ async function daemonTool(
 
 async function requestDaemon(
   daemonUrl: string,
+  token: string | undefined,
   path: string,
   method: 'GET' | 'POST',
   body?: unknown,
 ): Promise<Record<string, unknown>> {
+  const adapterToken = requiredAdapterToken(token);
   let response: Response;
   try {
     response = await fetch(new URL(path, daemonUrl), {
       method,
       redirect: 'error',
-      ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+      headers: { authorization: `Bearer ${adapterToken}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
@@ -168,6 +173,9 @@ async function requestDaemon(
   }
 
   if (!response.ok) {
+    if (response.status === 401) {
+      throw new DaemonRequestError('Memlume adapter authentication failed. Create a new token through the protected setup API and update MEMLUME_TOKEN.');
+    }
     throw new DaemonRequestError(`Daemon request failed (${response.status}: ${daemonErrorCode(await responseJson(response))}).`);
   }
 
@@ -176,6 +184,13 @@ async function requestDaemon(
     throw new DaemonRequestError('Daemon returned an invalid response.');
   }
   return result;
+}
+
+function requiredAdapterToken(token: string | undefined): string {
+  if (token === undefined || token.trim() === '') {
+    throw new DaemonRequestError('Memlume adapter token is required. Create one through the protected setup API, then set MEMLUME_TOKEN.');
+  }
+  return token;
 }
 
 function daemonOrigin(value: string): string {

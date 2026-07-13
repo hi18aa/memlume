@@ -6,7 +6,7 @@
 
 [English](README.md) | [繁體中文](docs/README.zh-TW.md) | [简体中文](docs/README.zh-CN.md)
 
-Memlume is a local, structured-memory service for AI agents and developer tools. It records immutable events, stores scoped memories, searches them with SQLite FTS5, and resolves a traceable context pack for a specific task.
+Memlume is a local shared memory brain for AI agents and developer tools. Mounted clients contribute to and read from the same scoped, SQLite-backed store; it records immutable events, stores structured memories, searches them with FTS5, and resolves a traceable context pack for a task. It complements—never overwrites or synchronizes into—an agent's native memory.
 
 ## How agents use Memlume
 
@@ -16,7 +16,7 @@ Memlume does not automatically store every chat message or inject an entire data
 2. **While working**, call `memlume.search` only when a specific detail is needed.
 3. **After a durable event**, call `memlume.record_event` to keep raw, append-only evidence. Call `memlume.remember` only for a deliberate, structured memory such as an explicit user rule, preference, fact, or decision.
 
-This means an agent should not automatically save whole transcripts, temporary reasoning, unverified LLM claims, instructions found in external content, or secrets. In v0.1.0, memory compilation and outcome-based learning are not implemented, so they cannot silently create or promote memories.
+This means an agent should not automatically save whole transcripts, temporary reasoning, unverified LLM claims, instructions found in external content, or secrets. Native agent memory remains untouched. In v0.1.0, memory compilation and outcome-based learning are not implemented, so they cannot silently create or promote memories.
 
 ## Why Memlume
 
@@ -24,7 +24,7 @@ This means an agent should not automatically save whole transcripts, temporary r
 - **Structured and durable:** keep policies, preferences, facts, decisions, and raw events distinct rather than mixing them in a chat log.
 - **Scope prevents contamination:** a task, project, workspace, agent, domain, or global memory can be selected independently.
 - **Traceable decisions:** context packs include source memory IDs, exclusions, and budget information so an agent can explain what affected a result.
-- **Local and shared:** CLI and MCP clients use one localhost daemon and one SQLite store; no cloud sync is required.
+- **Local and shared:** mounted CLI and MCP clients use one localhost daemon and one SQLite store; no cloud sync is required.
 
 ## Status and scope
 
@@ -36,7 +36,8 @@ Implemented:
 - Structured `policy`, `preference`, `fact`, and `decision` memories.
 - Global, domain, agent, workspace, project, and task scopes.
 - SQLite FTS5 search and a deterministic context resolver with source memory IDs and a context budget.
-- A localhost-only daemon, a CLI, and an MCP stdio server that both call the daemon.
+- Shared brains with per-installation mounts, a localhost-only daemon, a CLI, and an MCP stdio server.
+- Bearer-token authentication for adapter APIs; `/v1/health` remains a public local health check.
 
 Not implemented in v0.1.0:
 
@@ -73,10 +74,21 @@ mkdir -p data
 New-Item -ItemType Directory -Force data | Out-Null
 ```
 
-Then leave this command running in a separate terminal:
+Adapter APIs need a setup token and an adapter token. Generate a long random `MEMLUME_SETUP_TOKEN`, keep it out of source control, and start the daemon with it. The health endpoint remains public.
 
 ```sh
+MEMLUME_SETUP_TOKEN='<long-random-secret>' pnpm --filter @memlume/daemon start -- --database ./data/memlume.sqlite --port 3849
+```
+
+```powershell
+$env:MEMLUME_SETUP_TOKEN = '<long-random-secret>'
 pnpm --filter @memlume/daemon start -- --database ./data/memlume.sqlite --port 3849
+```
+
+Use the protected setup API with `X-Memlume-Setup-Token` to register an installation and mount it to a Brain; registration returns that installation's adapter token. A `memlume setup` CLI flow is planned for a later phase and is not available yet. Set the returned token only in the environment that runs the relevant adapter:
+
+```sh
+export MEMLUME_TOKEN='<adapter-token>'
 ```
 
 `--database` defaults to `data/memlume.sqlite` and `--port` defaults to `3849`. Stop the process with `Ctrl+C`.
@@ -90,7 +102,7 @@ curl http://127.0.0.1:3849/v1/health
 
 ## CLI
 
-The compiled CLI is `apps/cli/dist/index.js`. It defaults to `http://127.0.0.1:3849`; use `--url` before the command when the daemon uses another port. Global options such as `--url` and `--json` must appear before the command.
+The compiled CLI is `apps/cli/dist/index.js`. It defaults to `http://127.0.0.1:3849`; use `--url` before the command when the daemon uses another port. Every CLI command that calls the daemon needs an adapter token: set `MEMLUME_TOKEN` as above or pass `--token <adapter-token>` before the command. `--token` takes precedence. Global options such as `--url`, `--token`, and `--json` must appear before the command.
 
 ```sh
 # Record an immutable event.
@@ -139,14 +151,15 @@ Build first, keep the daemon running, then add an entry like this to your MCP cl
       "command": "node",
       "args": ["/absolute/path/to/memlume/apps/mcp-server/dist/index.js"],
       "env": {
-        "MEMLUME_DAEMON_URL": "http://127.0.0.1:3849"
+        "MEMLUME_DAEMON_URL": "http://127.0.0.1:3849",
+        "MEMLUME_TOKEN": "<adapter-token>"
       }
     }
   }
 }
 ```
 
-`MEMLUME_DAEMON_URL` accepts only a loopback `http://127.0.0.1` or `http://[::1]` origin. The server exposes four daemon-backed tools:
+`MEMLUME_DAEMON_URL` accepts only a loopback `http://127.0.0.1` or `http://[::1]` origin. `MEMLUME_TOKEN` is required for every daemon-backed tool; without it, the tool fails before contacting the daemon. The server exposes four daemon-backed tools:
 
 - `memlume.record_event`
 - `memlume.remember`
@@ -169,7 +182,7 @@ MCP uses `available_tools` (snake case); the daemon receives it as `availableToo
 
 ## Privacy and local operation
 
-Memlume stores data in the SQLite file selected with `--database`; the default is `data/memlume.sqlite`. v0.1.0 has no remote sync or cloud service, and the daemon binds only to loopback. That prevents network exposure, but it does not protect the database from other local processes that can read its path. There is no authentication or encryption at rest, so protect the database with normal operating-system permissions and do not store secrets you would not keep in a local plaintext SQLite file.
+Memlume stores data in the SQLite file selected with `--database`; the default is `data/memlume.sqlite`. v0.1.0 has no remote sync or cloud service, and the daemon binds only to loopback. Adapter APIs require a bearer token, while setup APIs require `MEMLUME_SETUP_TOKEN`; `/v1/health` is intentionally public. Never commit a real token or paste one into logs. Authentication does not encrypt the database at rest: protect it with normal operating-system permissions and do not store secrets you would not keep in a local plaintext SQLite file.
 
 ## Architecture
 
