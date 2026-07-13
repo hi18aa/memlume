@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { createMcpServer } from '../src/index.js';
 
+const PROJECT_BRAIN_ID = '00000000-0000-7000-8000-000000000002';
+
 interface RecordedRequest {
   readonly method: string;
   readonly url: string;
@@ -141,23 +143,23 @@ describe('Memlume MCP server', () => {
     await server.close();
   });
 
-  test('record_event forwards its arguments to the daemon', async () => {
+  test('record_event forwards an explicit brain selection and returns its source brain', async () => {
     const { client, server } = await connect();
-    const body = { event: { id: 'event-1', eventType: 'decision' } };
+    const body = { event: { id: 'event-1', eventType: 'decision', brainId: PROJECT_BRAIN_ID } };
     response = { status: 201, body };
 
     await expect(
       client.callTool({
         name: 'memlume.record_event',
-        arguments: { rawContent: 'Use SQLite.', eventType: 'decision', source: { type: 'mcp', agent: 'test' } },
+        arguments: { brainId: PROJECT_BRAIN_ID, rawContent: 'Use SQLite.', eventType: 'decision', source: { type: 'mcp', agent: 'test' } },
       }),
-    ).resolves.toMatchObject({ structuredContent: body });
+    ).resolves.toMatchObject({ structuredContent: { ...body, sourceBrainId: PROJECT_BRAIN_ID } });
     expect(requests).toEqual([
       {
         method: 'POST',
         url: '/v1/events',
         authorization: 'Bearer mcp-adapter-token',
-        body: { rawContent: 'Use SQLite.', eventType: 'decision', source: { type: 'mcp', agent: 'test' } },
+        body: { brainId: PROJECT_BRAIN_ID, rawContent: 'Use SQLite.', eventType: 'decision', source: { type: 'mcp', agent: 'test' } },
       },
     ]);
     await server.close();
@@ -181,15 +183,16 @@ describe('Memlume MCP server', () => {
     await server.close();
   });
 
-  test('returns remember success only after a successful daemon response', async () => {
+  test('returns saved status and source brain only after a successful remember response', async () => {
     const { client, server } = await connect();
-    const body = { memory: { id: 'memory-1', kind: 'fact' } };
+    const body = { memory: { id: 'memory-1', kind: 'fact', brainId: PROJECT_BRAIN_ID } };
     response = { status: 201, body };
 
     await expect(
       client.callTool({
         name: 'memlume.remember',
         arguments: {
+          brainId: PROJECT_BRAIN_ID,
           kind: 'fact',
           canonicalText: 'Memlume uses SQLite.',
           scope: { level: 'global' },
@@ -197,8 +200,8 @@ describe('Memlume MCP server', () => {
         },
       }),
     ).resolves.toMatchObject({
-      structuredContent: body,
-      content: [{ type: 'text', text: JSON.stringify(body) }],
+      structuredContent: { ...body, status: 'saved', sourceBrainId: PROJECT_BRAIN_ID },
+      content: [{ type: 'text', text: JSON.stringify({ ...body, status: 'saved', sourceBrainId: PROJECT_BRAIN_ID }) }],
     });
     expect(requests).toEqual([
       {
@@ -206,6 +209,7 @@ describe('Memlume MCP server', () => {
         url: '/v1/memories',
         authorization: 'Bearer mcp-adapter-token',
         body: {
+          brainId: PROJECT_BRAIN_ID,
           kind: 'fact',
           canonicalText: 'Memlume uses SQLite.',
           scope: { level: 'global' },
@@ -213,6 +217,70 @@ describe('Memlume MCP server', () => {
         },
       },
     ]);
+    await server.close();
+  });
+
+  test('does not let remember use a tool argument to impersonate another installation or bypass a rejected mount', async () => {
+    const { client, server } = await connect();
+    response = { status: 403, body: { error: 'forbidden' } };
+
+    await expect(
+      client.callTool({
+        name: 'memlume.remember',
+        arguments: {
+          brainId: PROJECT_BRAIN_ID,
+          agentInstallationId: '00000000-0000-7000-8000-000000000003',
+          kind: 'fact',
+          canonicalText: 'A caller must not choose another installation.',
+          scope: { level: 'global' },
+          structuredData: { subject: 'access', predicate: 'is', object: 'token-bound', confidence: 1 },
+        },
+      }),
+    ).resolves.toMatchObject({
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: expect.stringContaining('Unrecognized key: \\"agentInstallationId\\"'),
+        },
+      ],
+    });
+    expect(requests).toEqual([]);
+    await server.close();
+  });
+
+  test('reports a mounted-brain rejection instead of claiming remember was saved or queued', async () => {
+    const { client, server } = await connect();
+    response = { status: 403, body: { error: 'forbidden' } };
+
+    const result = await client.callTool({
+      name: 'memlume.remember',
+      arguments: {
+        brainId: PROJECT_BRAIN_ID,
+        kind: 'fact',
+        canonicalText: 'A token only writes to mounted brains.',
+        scope: { level: 'global' },
+        structuredData: { subject: 'access', predicate: 'is', object: 'mounted', confidence: 1 },
+      },
+    });
+
+    expect(result).toMatchObject({ isError: true, structuredContent: { status: 'rejected' } });
+    expect(requests).toEqual([
+      {
+        method: 'POST',
+        url: '/v1/memories',
+        authorization: 'Bearer mcp-adapter-token',
+        body: {
+          brainId: PROJECT_BRAIN_ID,
+          kind: 'fact',
+          canonicalText: 'A token only writes to mounted brains.',
+          scope: { level: 'global' },
+          structuredData: { subject: 'access', predicate: 'is', object: 'mounted', confidence: 1 },
+        },
+      },
+    ]);
+    expect(JSON.stringify(result).toLowerCase()).not.toContain('saved');
+    expect(JSON.stringify(result).toLowerCase()).not.toContain('queued');
     await server.close();
   });
 

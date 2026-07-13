@@ -166,6 +166,8 @@ Build first, keep the daemon running, then add an entry like this to your MCP cl
 - `memlume.search`
 - `memlume.resolve_context`
 
+`memlume.record_event` and `memlume.remember` accept an optional `brainId` to select a destination shared Brain. It is not an authorization grant: `MEMLUME_TOKEN` identifies the installation, and the daemon accepts the write only when that installation has a `read_write` mount for the selected Brain. Successful writes return `sourceBrainId` so clients can trace where the event or memory was stored. `memlume.remember` returns `status: "saved"` only after the daemon confirms it; failures return `status: "rejected"`. The direct MCP server has no local outbox, so it never claims `queued`; an Adapter may use `queued` only after it has actually persisted a retryable write locally.
+
 For example, an MCP client can call `memlume.resolve_context` with:
 
 ```json

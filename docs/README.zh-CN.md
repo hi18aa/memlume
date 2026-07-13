@@ -166,6 +166,8 @@ node apps/cli/dist/index.js --json context resolve \
 - `memlume.search`
 - `memlume.resolve_context`
 
+`memlume.record_event` 和 `memlume.remember` 可选填写 `brainId`，以选择目标共享 Brain；它不是授权凭证。`MEMLUME_TOKEN` 才用于识别安装实例，daemon 只有在该实例对目标 Brain 具有 `read_write` mount 时才接受写入。成功写入会返回 `sourceBrainId`，让 Client 能追溯 event 或 memory 写入的位置。`memlume.remember` 只有在 daemon 确认后才返回 `status: "saved"`；失败时返回 `status: "rejected"`。直接 MCP Server 没有本地 outbox，因此绝不会声称 `queued`；只有 Adapter 已实际把可重试写入持久化到本地时，才可返回 `queued`。
+
 例如 MCP Client 可以使用以下参数调用 `memlume.resolve_context`：
 
 ```json

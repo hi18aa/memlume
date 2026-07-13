@@ -34,6 +34,7 @@ const ResolveContextSchema = z
 
 const RecordEventSchema = z
   .object({
+    brainId: UuidV7Schema.optional().describe('Optional mounted shared Brain UUIDv7.'),
     rawContent: z.string().refine((value) => value.trim().length > 0, 'Expected non-empty text.').describe('Immutable event content.'),
     eventType: NonEmptyTextSchema.describe('Event type.'),
     source: EventSourceSchema.describe('At least one source identifier.'),
@@ -43,6 +44,7 @@ const RecordEventSchema = z
   .strict();
 
 const MemoryRequestBaseSchema = z.object({
+  brainId: UuidV7Schema.optional().describe('Optional mounted shared Brain UUIDv7.'),
   canonicalText: NonEmptyTextSchema.describe('Canonical memory text.'),
   title: NonEmptyTextSchema.optional().describe('Optional memory title.'),
   scope: MemoryScopeSchema.describe('Memory scope.'),
@@ -103,7 +105,7 @@ export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL, token = proces
       description: 'Append an immutable event through the local Memlume daemon.',
       inputSchema: RecordEventSchema,
     },
-    async (input) => daemonTool(safeDaemonUrl, token, '/v1/events', 'POST', input),
+    async (input) => daemonWriteTool(safeDaemonUrl, token, '/v1/events', input, 'event'),
   );
 
   server.registerTool(
@@ -116,9 +118,9 @@ export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL, token = proces
     async (input) => {
       const parsed = RememberSchema.safeParse(input);
       if (!parsed.success) {
-        return { content: [{ type: 'text', text: 'Invalid remember request.' }], isError: true };
+        return rejectedRemember('Invalid remember request.');
       }
-      return daemonTool(safeDaemonUrl, token, '/v1/memories', 'POST', parsed.data);
+      return rememberTool(safeDaemonUrl, token, parsed.data);
     },
   );
 
@@ -184,6 +186,62 @@ async function requestDaemon(
     throw new DaemonRequestError('Daemon returned an invalid response.');
   }
   return result;
+}
+
+async function daemonWriteTool(
+  daemonUrl: string,
+  token: string | undefined,
+  path: '/v1/events' | '/v1/memories',
+  body: unknown,
+  resource: 'event' | 'memory',
+): Promise<CallToolResult> {
+  try {
+    const result = await requestDaemon(daemonUrl, token, path, 'POST', body);
+    const sourceBrainId = responseBrainId(result, resource);
+    if (sourceBrainId === undefined) {
+      throw new DaemonRequestError('Daemon returned an invalid response.');
+    }
+    return successfulTool({ ...result, sourceBrainId });
+  } catch (error) {
+    return failedTool(error);
+  }
+}
+
+async function rememberTool(daemonUrl: string, token: string | undefined, body: unknown): Promise<CallToolResult> {
+  try {
+    const result = await requestDaemon(daemonUrl, token, '/v1/memories', 'POST', body);
+    const sourceBrainId = responseBrainId(result, 'memory');
+    if (sourceBrainId === undefined) {
+      throw new DaemonRequestError('Daemon returned an invalid response.');
+    }
+    return successfulTool({ ...result, status: 'saved', sourceBrainId });
+  } catch (error) {
+    return rejectedRemember(errorMessage(error));
+  }
+}
+
+function successfulTool(result: Record<string, unknown>): CallToolResult {
+  return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result };
+}
+
+function failedTool(error: unknown): CallToolResult {
+  return { content: [{ type: 'text', text: errorMessage(error) }], isError: true };
+}
+
+function rejectedRemember(message: string): CallToolResult {
+  return { content: [{ type: 'text', text: message }], isError: true, structuredContent: { status: 'rejected' } };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof DaemonRequestError ? error.message : 'Daemon request failed.';
+}
+
+function responseBrainId(result: Record<string, unknown>, resource: 'event' | 'memory'): string | undefined {
+  const item = result[resource];
+  if (!isRecord(item)) {
+    return undefined;
+  }
+  return UuidV7Schema.safeParse(item.brainId).data;
 }
 
 function requiredAdapterToken(token: string | undefined): string {
