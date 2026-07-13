@@ -24,7 +24,8 @@ export type BackupMappings = {
 
 export type BackupManifest = {
   readonly format: 'memlume';
-  readonly formatVersion: 1;
+  readonly formatVersion: 2;
+  readonly scope: 'full' | 'brain';
   readonly createdAt: string;
   readonly brainIds: readonly string[];
   readonly schema: { readonly migrations: readonly string[] };
@@ -40,6 +41,13 @@ export type CreateBackupOptions = {
   readonly password?: string;
 };
 
+export class FullBackupAuthenticationRequiredError extends Error {
+  constructor() {
+    super('Full backups require a password for authenticated restore.');
+    this.name = 'FullBackupAuthenticationRequiredError';
+  }
+}
+
 type EncryptionHeader = {
   readonly algorithm: 'aes-256-gcm';
   readonly kdf: 'scrypt';
@@ -49,6 +57,9 @@ type EncryptionHeader = {
 };
 
 export async function createBackup(options: CreateBackupOptions): Promise<BackupManifest> {
+  if (options.brainId === undefined && options.password === undefined) {
+    throw new FullBackupAuthenticationRequiredError();
+  }
   const directory = mkdtempSync(join(tmpdir(), 'memlume-backup-snapshot-'));
   const snapshotPath = join(directory, 'snapshot.sqlite');
 
@@ -58,7 +69,7 @@ export async function createBackup(options: CreateBackupOptions): Promise<Backup
     try {
       sanitizeSnapshot(snapshotDatabase, options.brainId);
       const snapshot = snapshotDatabase.serialize();
-      const manifest = createManifest(snapshotDatabase, snapshot, options.brainId, Boolean(options.password));
+      const manifest = createManifest(snapshotDatabase, snapshot, options.brainId, options.password !== undefined);
       const bundle = zipSync({
         'manifest.json': strToU8(JSON.stringify(manifest)),
         'snapshot.sqlite': new Uint8Array(snapshot),
@@ -94,9 +105,9 @@ function sanitizeSnapshot(database: Database.Database, brainId: string | undefin
         database.prepare('DELETE FROM memory_items WHERE id NOT IN (SELECT memory_id FROM memory_brains)').run();
         database.prepare('DELETE FROM event_brains WHERE brain_id <> ?').run(brainId);
         database.prepare('DELETE FROM events WHERE id NOT IN (SELECT event_id FROM event_brains) AND id NOT IN (SELECT source_event_id FROM memory_items WHERE source_event_id IS NOT NULL)').run();
-        database.prepare('DELETE FROM brain_mounts WHERE brain_id <> ?').run(brainId);
+        database.exec('DELETE FROM brain_mounts;');
         database.prepare('DELETE FROM adapter_tokens').run();
-        database.prepare('DELETE FROM agent_installations WHERE id NOT IN (SELECT agent_installation_id FROM brain_mounts)').run();
+        database.exec('DELETE FROM agent_installations;');
         database.prepare('DELETE FROM brains WHERE id <> ?').run(brainId);
         database.exec('DELETE FROM outcomes; DELETE FROM conflicts; DELETE FROM tool_registry;');
       })();
@@ -120,7 +131,8 @@ function createManifest(database: Database.Database, snapshot: Uint8Array, selec
   const migrations = database.prepare('SELECT id FROM schema_migrations ORDER BY id').pluck().all() as string[];
   return {
     format: 'memlume',
-    formatVersion: 1,
+    formatVersion: 2,
+    scope: selectedBrainId === undefined ? 'full' : 'brain',
     createdAt: new Date().toISOString(),
     brainIds,
     schema: { migrations },

@@ -16,6 +16,7 @@ const defaultBrainId = '00000000-0000-7000-8000-000000000001';
 const projectBrainId = '00000000-0000-7000-8000-000000000011';
 const personalBrainId = '00000000-0000-7000-8000-000000000012';
 const pauseWrites = () => {};
+const fullBackupPassword = 'backup-password-for-full-restore';
 
 afterEach(() => {
   while (directories.length > 0) {
@@ -71,7 +72,38 @@ function seedDatabase(filename) {
   return database;
 }
 
+function seedImportTarget(filename) {
+  const database = openDatabase(filename);
+  const brainId = '00000000-0000-7000-8000-000000000111';
+  const eventId = '00000000-0000-7000-8000-000000000121';
+  const memoryId = '00000000-0000-7000-8000-000000000101';
+  database.prepare('INSERT INTO brains (id, kind, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(brainId, 'project', 'Existing target', createdAt, createdAt);
+  database.prepare('INSERT INTO events (id, event_type, raw_content, source_type, source_data, occurred_at, ingested_at, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+    eventId, 'user_message', 'Existing target fact.', 'test', '{}', createdAt, createdAt, 'target-event-hash',
+  );
+  database.prepare('INSERT INTO event_brains (event_id, brain_id, created_at) VALUES (?, ?, ?)').run(eventId, brainId, createdAt);
+  database.prepare('INSERT INTO memory_items (id, kind, title, canonical_text, structured_data, scope_data, status, source_event_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+    memoryId, 'fact', 'Existing target fact.', 'Existing target fact.', '{}', '{"level":"project"}', 'active', eventId, createdAt, createdAt,
+  );
+  database.prepare('INSERT INTO memory_brains (memory_id, brain_id, created_at) VALUES (?, ?, ?)').run(memoryId, brainId, createdAt);
+  database.prepare('INSERT INTO memory_search (memory_id, title, canonical_text, summary, keywords, entities, content) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+    memoryId, 'Existing target fact.', 'Existing target fact.', 'Existing target fact.', '', '', 'Existing target fact.',
+  );
+  return database;
+}
+
 describe('Memlume backup bundle', () => {
+  test('requires a password when creating a full backup', async () => {
+    const directory = temporaryDirectory();
+    const source = seedDatabase(join(directory, 'source.sqlite'));
+
+    await assert.rejects(
+      backup.createBackup({ database: source, outputPath: join(directory, 'full.memlume') }),
+      /full backups.*password/i,
+    );
+    source.close();
+  });
+
   test('round-trips a full snapshot with mappings and without adapter tokens', async () => {
     assert.equal(typeof backup.createBackup, 'function');
     const directory = temporaryDirectory();
@@ -80,10 +112,12 @@ describe('Memlume backup bundle', () => {
     const bundlePath = join(directory, 'full.memlume');
     const source = seedDatabase(sourcePath);
 
-    const manifest = await backup.createBackup({ database: source, outputPath: bundlePath });
+    const manifest = await backup.createBackup({ database: source, outputPath: bundlePath, password: fullBackupPassword });
     source.close();
-    assert.deepEqual((await backup.verifyBackup({ backupPath: bundlePath })).brainIds, [defaultBrainId, projectBrainId, personalBrainId]);
-    const restored = await backup.restoreBackup({ backupPath: bundlePath, databasePath: targetPath, pauseWrites });
+    assert.equal(manifest.formatVersion, 2);
+    assert.equal(manifest.scope, 'full');
+    assert.deepEqual((await backup.verifyBackup({ backupPath: bundlePath, password: fullBackupPassword })).brainIds, [defaultBrainId, projectBrainId, personalBrainId]);
+    const restored = await backup.restoreBackup({ backupPath: bundlePath, databasePath: targetPath, password: fullBackupPassword, pauseWrites });
     const target = openDatabase(targetPath);
 
     assert.deepEqual(manifest.mappings.mounts, [{ brainId: projectBrainId, agentInstallationId: '00000000-0000-7000-8000-000000000021', access: 'read_write' }, { brainId: personalBrainId, agentInstallationId: '00000000-0000-7000-8000-000000000022', access: 'read' }]);
@@ -96,7 +130,7 @@ describe('Memlume backup bundle', () => {
     target.close();
   });
 
-  test('exports and restores only one brain with its related mappings and version history', async () => {
+  test('imports one exported brain as a new unmounted brain without changing existing data', async () => {
     assert.equal(typeof backup.createBackup, 'function');
     const directory = temporaryDirectory();
     const sourcePath = join(directory, 'source.sqlite');
@@ -106,20 +140,48 @@ describe('Memlume backup bundle', () => {
 
     const manifest = await backup.createBackup({ database: source, outputPath: bundlePath, brainId: projectBrainId });
     source.close();
-    await backup.restoreBackup({ backupPath: bundlePath, databasePath: targetPath, pauseWrites });
-    const target = openDatabase(targetPath);
+    assert.equal(manifest.scope, 'brain');
+    assert.deepEqual(manifest.mappings.installations, []);
+    assert.deepEqual(manifest.mappings.mounts, []);
+    await assert.rejects(backup.restoreBackup({ backupPath: bundlePath, databasePath: targetPath, pauseWrites }), /brain import/i);
+
+    const target = seedImportTarget(targetPath);
+    const imported = await backup.importBrain({ backupPath: bundlePath, database: target });
 
     assert.deepEqual(manifest.brainIds, [projectBrainId]);
-    assert.equal(target.prepare('SELECT COUNT(*) AS count FROM brains WHERE id = ?').get(projectBrainId).count, 1);
-    assert.equal(target.prepare('SELECT COUNT(*) AS count FROM brains WHERE id = ?').get(personalBrainId).count, 0);
-    assert.equal(target.prepare('SELECT canonical_text FROM memory_items').pluck().get(), 'This project uses pnpm.');
-    assert.equal(target.prepare('SELECT COUNT(*) AS count FROM memory_versions').get().count, 1);
-    assert.equal(target.prepare('SELECT COUNT(*) AS count FROM brain_mounts').get().count, 1);
-    assert.equal(target.prepare('SELECT client_type FROM agent_installations').pluck().get(), 'codex');
+    assert.notEqual(imported.brain.id, projectBrainId);
+    assert.deepEqual(imported.source, { brainId: projectBrainId, name: 'Memlume' });
+    assert.equal(target.prepare('SELECT COUNT(*) AS count FROM brains').get().count, 3);
+    assert.equal(target.prepare('SELECT canonical_text FROM memory_items WHERE id IN (SELECT memory_id FROM memory_brains WHERE brain_id = ?)').pluck().get(imported.brain.id), 'This project uses pnpm.');
+    assert.equal(target.prepare('SELECT keywords FROM memory_search WHERE memory_id IN (SELECT memory_id FROM memory_brains WHERE brain_id = ?)').pluck().get(imported.brain.id), 'pnpm');
+    assert.equal(target.prepare('SELECT COUNT(*) AS count FROM brain_mounts WHERE brain_id = ?').get(imported.brain.id).count, 0);
+    assert.equal(target.prepare('SELECT canonical_text FROM memory_items WHERE id IN (SELECT memory_id FROM memory_brains WHERE brain_id = ?)').pluck().get('00000000-0000-7000-8000-000000000111'), 'Existing target fact.');
     assert.throws(
-      () => target.prepare('UPDATE events SET raw_content = ? WHERE id = ?').run('tampered', '00000000-0000-7000-8000-000000000041'),
+      () => target.prepare('UPDATE events SET raw_content = ? WHERE id IN (SELECT event_id FROM event_brains WHERE brain_id = ?)').run('tampered', imported.brain.id),
       /append-only/,
     );
+    target.close();
+  });
+
+  test('rejects an imported brain event conflict without changing the target database', async () => {
+    const directory = temporaryDirectory();
+    const source = seedDatabase(join(directory, 'source.sqlite'));
+    source.prepare('INSERT INTO events (id, event_type, raw_content, source_type, source_reference, source_data, occurred_at, ingested_at, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      '00000000-0000-7000-8000-000000000141', 'user_message', 'Exported duplicate source.', 'test', 'shared-source', '{}', createdAt, createdAt, 'shared-event-hash',
+    );
+    source.prepare('INSERT INTO event_brains (event_id, brain_id, created_at) VALUES (?, ?, ?)').run('00000000-0000-7000-8000-000000000141', projectBrainId, createdAt);
+    const bundlePath = join(directory, 'project.memlume');
+    await backup.createBackup({ database: source, outputPath: bundlePath, brainId: projectBrainId });
+    source.close();
+    const target = seedImportTarget(join(directory, 'target.sqlite'));
+    target.prepare('INSERT INTO events (id, event_type, raw_content, source_type, source_reference, source_data, occurred_at, ingested_at, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      '00000000-0000-7000-8000-000000000131', 'user_message', 'Existing duplicate source.', 'test', 'shared-source', '{}', createdAt, createdAt, 'shared-event-hash',
+    );
+    target.prepare('INSERT INTO event_brains (event_id, brain_id, created_at) VALUES (?, ?, ?)').run('00000000-0000-7000-8000-000000000131', '00000000-0000-7000-8000-000000000111', createdAt);
+
+    await assert.rejects(backup.importBrain({ backupPath: bundlePath, database: target }), { name: 'BrainImportConflictError' });
+    assert.equal(target.prepare('SELECT COUNT(*) AS count FROM brains').get().count, 2);
+    assert.equal(target.prepare('SELECT COUNT(*) AS count FROM memory_items').get().count, 1);
     target.close();
   });
 
@@ -168,7 +230,7 @@ describe('Memlume backup bundle', () => {
     const directory = temporaryDirectory();
     const source = seedDatabase(join(directory, 'source.sqlite'));
     const bundlePath = join(directory, 'tampered.memlume');
-    await backup.createBackup({ database: source, outputPath: bundlePath });
+    await backup.createBackup({ database: source, outputPath: bundlePath, brainId: projectBrainId });
     source.close();
     const files = unzipSync(readFileSync(bundlePath));
     files['snapshot.sqlite'][0] ^= 0xff;
@@ -177,11 +239,46 @@ describe('Memlume backup bundle', () => {
     await assert.rejects(backup.verifyBackup({ backupPath: bundlePath }), /checksum/i);
   });
 
+  test('rejects a selected Brain snapshot whose manifest scope is forged as full', async () => {
+    const directory = temporaryDirectory();
+    const source = seedDatabase(join(directory, 'source.sqlite'));
+    const bundlePath = join(directory, 'project.memlume');
+    await backup.createBackup({ database: source, outputPath: bundlePath, brainId: projectBrainId });
+    source.close();
+    const files = unzipSync(readFileSync(bundlePath));
+    const manifest = JSON.parse(strFromU8(files['manifest.json']));
+    manifest.scope = 'full';
+    files['manifest.json'] = strToU8(JSON.stringify(manifest));
+    writeFileSync(bundlePath, zipSync(files));
+
+    await assert.rejects(backup.verifyBackup({ backupPath: bundlePath }), /scope|authenticated/i);
+  });
+
+  test('rejects a forged full scope for an unencrypted default Personal Brain export before restore', async () => {
+    const directory = temporaryDirectory();
+    const source = seedDatabase(join(directory, 'source.sqlite'));
+    const bundlePath = join(directory, 'default-brain.memlume');
+    const targetPath = join(directory, 'target.sqlite');
+    await backup.createBackup({ database: source, outputPath: bundlePath, brainId: defaultBrainId });
+    source.close();
+    const files = unzipSync(readFileSync(bundlePath));
+    const manifest = JSON.parse(strFromU8(files['manifest.json']));
+    manifest.scope = 'full';
+    files['manifest.json'] = strToU8(JSON.stringify(manifest));
+    writeFileSync(bundlePath, zipSync(files));
+
+    await assert.rejects(
+      backup.restoreBackup({ backupPath: bundlePath, databasePath: targetPath, pauseWrites }),
+      /authenticated|encrypted/i,
+    );
+    assert.equal(existsSync(targetPath), false);
+  });
+
   test('verifies manifest schema against the SQLite snapshot', async () => {
     const directory = temporaryDirectory();
     const source = seedDatabase(join(directory, 'source.sqlite'));
     const bundlePath = join(directory, 'schema-tampered.memlume');
-    await backup.createBackup({ database: source, outputPath: bundlePath });
+    await backup.createBackup({ database: source, outputPath: bundlePath, brainId: projectBrainId });
     source.close();
     const files = unzipSync(readFileSync(bundlePath));
     const manifest = JSON.parse(strFromU8(files['manifest.json']));
@@ -196,7 +293,7 @@ describe('Memlume backup bundle', () => {
     const directory = temporaryDirectory();
     const source = seedDatabase(join(directory, 'source.sqlite'));
     const bundlePath = join(directory, 'schema-object-tampered.memlume');
-    await backup.createBackup({ database: source, outputPath: bundlePath });
+    await backup.createBackup({ database: source, outputPath: bundlePath, brainId: projectBrainId });
     source.close();
     const files = unzipSync(readFileSync(bundlePath));
     const snapshotPath = join(directory, 'tampered.sqlite');
@@ -218,11 +315,11 @@ describe('Memlume backup bundle', () => {
     const directory = temporaryDirectory();
     const source = seedDatabase(join(directory, 'source.sqlite'));
     const bundlePath = join(directory, 'brain-ids-tampered.memlume');
-    await backup.createBackup({ database: source, outputPath: bundlePath });
+    await backup.createBackup({ database: source, outputPath: bundlePath, brainId: projectBrainId });
     source.close();
     const files = unzipSync(readFileSync(bundlePath));
     const manifest = JSON.parse(strFromU8(files['manifest.json']));
-    manifest.brainIds = [projectBrainId];
+    manifest.brainIds = [defaultBrainId];
     files['manifest.json'] = strToU8(JSON.stringify(manifest));
     writeFileSync(bundlePath, zipSync(files));
 
@@ -233,7 +330,7 @@ describe('Memlume backup bundle', () => {
     const directory = temporaryDirectory();
     const source = seedDatabase(join(directory, 'source.sqlite'));
     const bundlePath = join(directory, 'foreign-key-tampered.memlume');
-    await backup.createBackup({ database: source, outputPath: bundlePath });
+    await backup.createBackup({ database: source, outputPath: bundlePath, brainId: projectBrainId });
     source.close();
     const files = unzipSync(readFileSync(bundlePath));
     const snapshotPath = join(directory, 'tampered.sqlite');
@@ -255,14 +352,14 @@ describe('Memlume backup bundle', () => {
     const directory = temporaryDirectory();
     const source = seedDatabase(join(directory, 'source.sqlite'));
     const bundlePath = join(directory, 'source.memlume');
-    await backup.createBackup({ database: source, outputPath: bundlePath, brainId: projectBrainId });
+    await backup.createBackup({ database: source, outputPath: bundlePath, password: fullBackupPassword });
     source.close();
     const targetPath = join(directory, 'target.sqlite');
     const current = seedDatabase(targetPath);
     current.prepare('UPDATE memory_items SET canonical_text = ? WHERE id = ?').run('Old database content.', '00000000-0000-7000-8000-000000000051');
     current.close();
 
-    const restored = await backup.restoreBackup({ backupPath: bundlePath, databasePath: targetPath, pauseWrites });
+    const restored = await backup.restoreBackup({ backupPath: bundlePath, databasePath: targetPath, password: fullBackupPassword, pauseWrites });
     const target = openDatabase(targetPath);
     const rollback = openDatabase(restored.rollbackPath);
     assert.equal(target.prepare('SELECT canonical_text FROM memory_items').pluck().get(), 'This project uses pnpm.');
@@ -275,7 +372,7 @@ describe('Memlume backup bundle', () => {
     const directory = temporaryDirectory();
     const source = seedDatabase(join(directory, 'source.sqlite'));
     const bundlePath = join(directory, 'source.memlume');
-    await backup.createBackup({ database: source, outputPath: bundlePath, brainId: projectBrainId });
+    await backup.createBackup({ database: source, outputPath: bundlePath, password: fullBackupPassword });
     source.close();
     const targetPath = join(directory, 'target.sqlite');
     const current = seedDatabase(targetPath);
@@ -287,6 +384,7 @@ describe('Memlume backup bundle', () => {
       backup.restoreBackup({
         backupPath: bundlePath,
         databasePath: targetPath,
+        password: fullBackupPassword,
         pauseWrites: () => () => {
           resumes += 1;
           if (resumes === 1) throw new Error('runtime reopen failed');
@@ -305,7 +403,7 @@ describe('Memlume backup bundle', () => {
     const directory = temporaryDirectory();
     const source = seedDatabase(join(directory, 'source.sqlite'));
     const bundlePath = join(directory, 'source.memlume');
-    await backup.createBackup({ database: source, outputPath: bundlePath, brainId: projectBrainId });
+    await backup.createBackup({ database: source, outputPath: bundlePath, password: fullBackupPassword });
     source.close();
     const targetPath = join(directory, 'target.sqlite');
     seedDatabase(targetPath).close();
@@ -315,6 +413,7 @@ describe('Memlume backup bundle', () => {
       backup.restoreBackup({
         backupPath: bundlePath,
         databasePath: targetPath,
+        password: fullBackupPassword,
         pauseWrites: () => () => {
           resumes += 1;
           if (resumes === 1) {
@@ -335,7 +434,7 @@ describe('Memlume backup bundle', () => {
     const directory = temporaryDirectory();
     const source = seedDatabase(join(directory, 'source.sqlite'));
     const bundlePath = join(directory, 'source.memlume');
-    await backup.createBackup({ database: source, outputPath: bundlePath, brainId: projectBrainId });
+    await backup.createBackup({ database: source, outputPath: bundlePath, password: fullBackupPassword });
     source.close();
     const targetPath = join(directory, 'target.sqlite');
     const current = seedDatabase(targetPath);
@@ -343,7 +442,7 @@ describe('Memlume backup bundle', () => {
     current.close();
     mkdirSync(`${targetPath}-wal`);
 
-    await assert.rejects(backup.restoreBackup({ backupPath: bundlePath, databasePath: targetPath, pauseWrites }), /unable to open|EISDIR|directory/i);
+    await assert.rejects(backup.restoreBackup({ backupPath: bundlePath, databasePath: targetPath, password: fullBackupPassword, pauseWrites }), /unable to open|EISDIR|directory/i);
     rmSync(`${targetPath}-wal`, { force: true, recursive: true });
 
     const intact = openDatabase(targetPath);
@@ -371,14 +470,14 @@ describe('Memlume backup bundle', () => {
     const directory = temporaryDirectory();
     const source = seedDatabase(join(directory, 'source.sqlite'));
     const bundlePath = join(directory, 'source.memlume');
-    await backup.createBackup({ database: source, outputPath: bundlePath });
+    await backup.createBackup({ database: source, outputPath: bundlePath, password: fullBackupPassword });
     source.close();
     const targetPath = join(directory, 'target.sqlite');
     const target = seedDatabase(targetPath);
     target.prepare('UPDATE memory_items SET canonical_text = ? WHERE id = ?').run('Current database content.', '00000000-0000-7000-8000-000000000051');
     target.close();
 
-    await assert.rejects(backup.restoreBackup({ backupPath: bundlePath, databasePath: targetPath }), /pause writes|exclusive/i);
+    await assert.rejects(backup.restoreBackup({ backupPath: bundlePath, databasePath: targetPath, password: fullBackupPassword }), /pause writes|exclusive/i);
 
     const intact = openDatabase(targetPath);
     assert.equal(intact.prepare('SELECT canonical_text FROM memory_items WHERE id = ?').pluck().get('00000000-0000-7000-8000-000000000051'), 'Current database content.');

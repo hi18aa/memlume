@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 import { Command, CommanderError } from 'commander';
+import { createInterface } from 'node:readline/promises';
+import { mkdir, readFile, readdir, rmdir, unlink, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+
+import { verifyBackup, type BackupManifest } from '@memlume/backup';
 
 type Writer = (text: string) => void;
 
@@ -15,6 +21,8 @@ interface GlobalOptions {
   readonly url: string;
   readonly json: boolean;
   readonly token?: string;
+  readonly setupToken?: string;
+  readonly config?: string;
 }
 
 interface ScopeOptions {
@@ -41,8 +49,28 @@ class DaemonConnectionError extends Error {
   }
 }
 
-export async function main(args: readonly string[], io: Io = defaultIo, environment: NodeJS.ProcessEnv = process.env): Promise<number> {
-  const program = createProgram(io, environment);
+export interface CliRuntime {
+  configPath(): string;
+  cwd(): string;
+  isInteractive(): boolean;
+  confirm(question: string): Promise<boolean>;
+  readFile(path: string): Promise<Uint8Array | undefined>;
+  writeFile(path: string, value: string | Uint8Array): Promise<void>;
+  mkdir(path: string): Promise<boolean>;
+  removeFile(path: string): Promise<void>;
+  removeEmptyDirectory(path: string): Promise<void>;
+  readdir(path: string): Promise<readonly string[]>;
+  verifyBackup(path: string, password: string | undefined): Promise<BackupManifest>;
+  fetch: typeof fetch;
+}
+
+export async function main(
+  args: readonly string[],
+  io: Io = defaultIo,
+  environment: NodeJS.ProcessEnv = process.env,
+  runtime: CliRuntime = defaultRuntime,
+): Promise<number> {
+  const program = createProgram(io, environment, runtime);
 
   try {
     await program.parseAsync(args, { from: 'user' });
@@ -57,13 +85,15 @@ export async function main(args: readonly string[], io: Io = defaultIo, environm
   }
 }
 
-function createProgram(io: Io, environment: NodeJS.ProcessEnv): Command {
+function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRuntime): Command {
   const program = new Command();
   program
     .name('memlume')
     .description('Use a local Memlume daemon.')
     .option('--url <url>', 'daemon URL', 'http://127.0.0.1:3849')
     .option('--token <token>', 'adapter token (defaults to MEMLUME_TOKEN)')
+    .option('--setup-token <token>', 'setup token (defaults to MEMLUME_SETUP_TOKEN)')
+    .option('--config <path>', 'CLI configuration path')
     .option('--json', 'print raw daemon JSON')
     .configureOutput({ writeOut: io.stdout, writeErr: io.stderr })
     .exitOverride();
@@ -82,7 +112,7 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv): Command {
         rawContent: content,
         eventType: options.type,
         source,
-      });
+      }, runtime);
       printResult(result, global.json, io.stdout, (body) => `Recorded event ${nestedId(body, 'event') ?? 'event'}.`);
     });
 
@@ -123,7 +153,7 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv): Command {
     .action(async (content: string, options: RememberOptions, command: Command) => {
       const global = command.optsWithGlobals<GlobalOptions>();
       const body = memoryRequest(content, options);
-      const result = await request(global.url, adapterToken(global.token, environment), '/v1/memories', 'POST', body);
+      const result = await request(global.url, adapterToken(global.token, environment), '/v1/memories', 'POST', body, runtime);
       printResult(result, global.json, io.stdout, (response) => `Saved ${options.kind} memory ${nestedId(response, 'memory') ?? 'memory'}.`);
     });
 
@@ -132,7 +162,7 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv): Command {
     .description('Search memories.')
     .action(async (query: string, _options: unknown, command: Command) => {
       const global = command.optsWithGlobals<GlobalOptions>();
-      const result = await request(global.url, adapterToken(global.token, environment), `/v1/memories/search?${new URLSearchParams({ q: query })}`, 'GET');
+      const result = await request(global.url, adapterToken(global.token, environment), `/v1/memories/search?${new URLSearchParams({ q: query })}`, 'GET', undefined, runtime);
       printResult(result, global.json, io.stdout, searchSummary);
     });
 
@@ -156,9 +186,178 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv): Command {
       availableTools: options.tool,
       entities: options.entity,
     });
-    const result = await request(global.url, adapterToken(global.token, environment), '/v1/context/resolve', 'POST', body);
+    const result = await request(global.url, adapterToken(global.token, environment), '/v1/context/resolve', 'POST', body, runtime);
     printResult(result, global.json, io.stdout, contextSummary);
   });
+
+  program
+    .command('setup')
+    .description('設定本機備份目錄並檢查 daemon。')
+    .option('--backup-dir <path>', '本機備份目錄')
+    .action(async (options: { readonly backupDir?: string }, command: Command) => {
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const path = configPath(global, runtime);
+      const existing = await readConfig(path, runtime);
+      const desired: CliConfig = { version: 1, backupDirectory: options.backupDir ?? existing.config.backupDirectory };
+      const existingBackup = await runtime.readFile(`${path}.backup`);
+      io.stdout(configDiff(existing.config, desired));
+      await runtime.mkdir(dirname(path));
+      const backupDirectoryCreated = await runtime.mkdir(desired.backupDirectory);
+      if (existing.raw !== undefined) {
+        await runtime.writeFile(existingBackup === undefined ? `${path}.backup` : await configSnapshotPath(path, runtime), existing.raw);
+      }
+      await runtime.writeFile(path, JSON.stringify(desired));
+      try {
+        await requestSetupJson(global.url, setupToken(global.setupToken, environment), '/v1/setup/diagnostics', 'GET', undefined, runtime);
+      } catch {
+        if (existing.raw === undefined) {
+          await runtime.removeFile(path);
+        } else {
+          await runtime.writeFile(path, existing.raw);
+        }
+        if (backupDirectoryCreated) {
+          try {
+            await runtime.removeEmptyDirectory(desired.backupDirectory);
+          } catch {
+            // 空目錄清理失敗不得掩蓋設定已回復的結果。
+          }
+        }
+        throw new Error('設定已還原，診斷檢查失敗。');
+      }
+      io.stdout('設定已套用並通過診斷檢查。\n');
+    });
+
+  program
+    .command('doctor')
+    .description('檢查 daemon 與可選的受保護診斷資訊。')
+    .action(async (_options: unknown, command: Command) => {
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const health = await requestPublicJson(global.url, '/v1/health', runtime);
+      const diagnostics = global.setupToken === undefined && environment.MEMLUME_SETUP_TOKEN === undefined
+        ? undefined
+        : await requestSetupJson(global.url, setupToken(global.setupToken, environment), '/v1/setup/diagnostics', 'GET', undefined, runtime);
+      if (global.json) {
+        io.stdout(`${JSON.stringify(compact({ health, diagnostics }))}\n`);
+        return;
+      }
+      io.stdout(doctorSummary(health, diagnostics));
+    });
+
+  const brain = program.command('brain').description('管理 Shared Brain 匯出與匯入。');
+  brain
+    .command('list')
+    .description('列出 Shared Brain。')
+    .action(async (_options: unknown, command: Command) => {
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const result = await requestSetupJson(global.url, setupToken(global.setupToken, environment), '/v1/setup/brains', 'GET', undefined, runtime);
+      printResult(result, global.json, io.stdout, brainsSummary);
+    });
+  brain
+    .command('export <brainId>')
+    .description('匯出單一 Brain。')
+    .requiredOption('--output <path>', '輸出 .memlume 檔案')
+    .option('--password-env <name>', '讀取備份密碼的環境變數')
+    .action(async (brainId: string, options: PasswordOptions & { readonly output: string }, command: Command) => {
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const password = backupPassword(options, environment);
+      const bundle = await requestSetupBinary(
+        global.url,
+        setupToken(global.setupToken, environment),
+        '/v1/setup/backups',
+        JSON.stringify(compact({ brainId, password })),
+        runtime,
+      );
+      await runtime.writeFile(options.output, bundle);
+      io.stdout(`已匯出 Brain ${brainId} 至 ${options.output}。\n`);
+    });
+  brain
+    .command('import <path>')
+    .description('匯入單一 Brain bundle。')
+    .option('--name <name>', '匯入後的 Brain 名稱')
+    .option('--password-env <name>', '讀取備份密碼的環境變數')
+    .action(async (path: string, options: PasswordOptions & { readonly name?: string }, command: Command) => {
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const password = backupPassword(options, environment);
+      const query = options.name === undefined ? '' : `?${new URLSearchParams({ name: options.name })}`;
+      const result = await requestSetupRaw(
+        global.url,
+        setupToken(global.setupToken, environment),
+        `/v1/setup/brains/import${query}`,
+        await requiredFile(path, runtime),
+        password,
+        runtime,
+      );
+      const brainId = nestedId(result, 'brain');
+      io.stdout(`已匯入 Brain ${brainId ?? 'brain'}。\n`);
+    });
+
+  const backup = program.command('backup').description('管理本機 .memlume 備份。');
+  backup
+    .command('create')
+    .description('建立完整備份。')
+    .requiredOption('--output <path>', '輸出 .memlume 檔案')
+    .option('--password-env <name>', '讀取備份密碼的環境變數')
+    .action(async (options: PasswordOptions & { readonly output: string }, command: Command) => {
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const password = requiredFullBackupPassword(options, environment);
+      const bundle = await requestSetupBinary(
+        global.url,
+        setupToken(global.setupToken, environment),
+        '/v1/setup/backups',
+        JSON.stringify(compact({ password })),
+        runtime,
+      );
+      await runtime.writeFile(options.output, bundle);
+      io.stdout(`已建立完整備份 ${options.output}。\n`);
+    });
+  backup
+    .command('list')
+    .description('只列出本機 .memlume 檔案。')
+    .option('--directory <path>', '備份目錄')
+    .action(async (options: { readonly directory?: string }, command: Command) => {
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const directory = options.directory ?? (await readConfig(configPath(global, runtime), runtime)).config.backupDirectory;
+      const files = (await runtime.readdir(directory)).filter((file) => file.endsWith('.memlume')).sort();
+      io.stdout(files.length === 0 ? '找不到本機備份。\n' : `${files.join('\n')}\n`);
+    });
+  backup
+    .command('verify <path>')
+    .description('離線驗證本機備份。')
+    .option('--password-env <name>', '讀取備份密碼的環境變數')
+    .action(async (path: string, options: PasswordOptions) => {
+      const manifest = await runtime.verifyBackup(path, backupPassword(options, environment));
+      io.stdout(`備份驗證成功：${manifest.scope === 'full' ? '完整備份' : '單一 Brain'}，${manifest.brainIds.length} 個 Brain。\n`);
+    });
+  backup
+    .command('restore <path>')
+    .description('還原完整備份。')
+    .option('--yes', '確認還原，供非互動環境使用')
+    .option('--password-env <name>', '讀取備份密碼的環境變數')
+    .action(async (path: string, options: PasswordOptions & { readonly yes?: boolean }, command: Command) => {
+      if (!options.yes) {
+        if (!runtime.isInteractive()) {
+          throw new Error('非互動環境還原備份必須明確傳入 --yes。');
+        }
+        if (!await runtime.confirm('此操作會取代目前資料庫，是否繼續？')) {
+          throw new Error('已取消還原備份。');
+        }
+      }
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const password = backupPassword(options, environment);
+      const manifest = await runtime.verifyBackup(path, password);
+      if (manifest.scope !== 'full') {
+        throw new Error('單一 Brain 匯出不能還原，請改用 brain import。');
+      }
+      await requestSetupRaw(
+        global.url,
+        setupToken(global.setupToken, environment),
+        '/v1/setup/backups/restore',
+        await requiredFile(path, runtime),
+        password,
+        runtime,
+      );
+      io.stdout('已還原備份。\n');
+    });
 
   return program;
 }
@@ -207,6 +406,15 @@ interface ResolveOptions extends ScopeOptions {
   readonly budget: string;
   readonly tool?: string[];
   readonly entity?: string[];
+}
+
+interface PasswordOptions {
+  readonly passwordEnv?: string;
+}
+
+interface CliConfig {
+  readonly version: 1;
+  readonly backupDirectory: string;
 }
 
 function memoryRequest(content: string, options: RememberOptions): Record<string, unknown> {
@@ -368,14 +576,135 @@ function adapterToken(option: string | undefined, environment: NodeJS.ProcessEnv
   return token;
 }
 
-async function request(url: string, token: string, path: string, method: 'GET' | 'POST', body?: unknown): Promise<unknown> {
+function setupToken(option: string | undefined, environment: NodeJS.ProcessEnv): string {
+  const token = option ?? environment.MEMLUME_SETUP_TOKEN;
+  if (token === undefined || token.trim() === '') {
+    throw new Error('setup token is required. Set MEMLUME_SETUP_TOKEN or pass --setup-token.');
+  }
+  return token;
+}
+
+function backupPassword(options: PasswordOptions, environment: NodeJS.ProcessEnv): string | undefined {
+  const variable = options.passwordEnv ?? 'MEMLUME_BACKUP_PASSWORD';
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable)) {
+    throw new Error('--password-env must be an environment variable name.');
+  }
+  const password = environment[variable];
+  if (password === '') {
+    throw new Error('backup password environment variable must not be empty.');
+  }
+  return password;
+}
+
+function requiredFullBackupPassword(options: PasswordOptions, environment: NodeJS.ProcessEnv): string {
+  const password = backupPassword(options, environment);
+  if (password === undefined) {
+    throw new Error('完整備份必須提供 --password-env 或 MEMLUME_BACKUP_PASSWORD。');
+  }
+  return password;
+}
+
+async function request(url: string, token: string, path: string, method: 'GET' | 'POST', body: unknown, runtime: CliRuntime): Promise<unknown> {
+  const response = await sendRequest(url, path, method, { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }) }, body === undefined ? undefined : JSON.stringify(body), runtime);
+  if (response.ok) {
+    return responseJson(response);
+  }
+  const result = await responseJsonOrUndefined(response);
+  if (response.status === 401) {
+    throw new Error('adapter authentication failed. Create a new token through the protected setup API and update MEMLUME_TOKEN.');
+  }
+  throw new DaemonResponseError(response.status, daemonErrorCode(result));
+}
+
+async function requestPublicJson(url: string, path: string, runtime: CliRuntime): Promise<unknown> {
+  const response = await sendRequest(url, path, 'GET', {}, undefined, runtime);
+  if (response.ok) {
+    return responseJson(response);
+  }
+  throw new DaemonResponseError(response.status, daemonErrorCode(await responseJsonOrUndefined(response)));
+}
+
+async function requestSetupJson(
+  url: string,
+  token: string,
+  path: string,
+  method: 'GET' | 'POST',
+  body: unknown,
+  runtime: CliRuntime,
+): Promise<unknown> {
+  const response = await sendRequest(
+    url,
+    path,
+    method,
+    { 'x-memlume-setup-token': token, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+    body === undefined ? undefined : JSON.stringify(body),
+    runtime,
+  );
+  if (response.ok) {
+    return responseJson(response);
+  }
+  throwSetupResponse(response.status, await responseJsonOrUndefined(response));
+}
+
+async function requestSetupBinary(url: string, token: string, path: string, body: string, runtime: CliRuntime): Promise<Uint8Array> {
+  const response = await sendRequest(url, path, 'POST', { 'x-memlume-setup-token': token, 'content-type': 'application/json' }, body, runtime);
+  if (response.ok) {
+    return new Uint8Array(await response.arrayBuffer());
+  }
+  throwSetupResponse(response.status, await responseJsonOrUndefined(response));
+}
+
+async function requestSetupRaw(
+  url: string,
+  token: string,
+  path: string,
+  bundle: Uint8Array,
+  password: string | undefined,
+  runtime: CliRuntime,
+): Promise<unknown> {
+  const response = await sendRequest(
+    url,
+    path,
+    'POST',
+    compact({ 'x-memlume-setup-token': token, 'x-memlume-backup-password': password, 'content-type': 'application/vnd.memlume' }),
+    bundle,
+    runtime,
+  );
+  if (response.ok) {
+    return responseJson(response);
+  }
+  throwSetupResponse(response.status, await responseJsonOrUndefined(response));
+}
+
+function throwSetupResponse(status: number, result: unknown): never {
+  if (status === 401) {
+    throw new Error('setup authentication failed. Set MEMLUME_SETUP_TOKEN or pass --setup-token.');
+  }
+  throw new DaemonResponseError(status, daemonErrorCode(result));
+}
+
+async function sendRequest(
+  url: string,
+  path: string,
+  method: 'GET' | 'POST',
+  headers: Record<string, string | undefined>,
+  body: string | Uint8Array | undefined,
+  runtime: CliRuntime,
+): Promise<Response> {
   const endpoint = daemonEndpoint(url, path);
+  const requestHeaders = new Headers();
+  for (const [name, value] of Object.entries(headers)) {
+    if (value !== undefined) {
+      requestHeaders.set(name, value);
+    }
+  }
+  const requestBody = typeof body === 'string' || body === undefined ? body : Uint8Array.from(body).buffer;
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    response = await runtime.fetch(endpoint, {
       method,
-      headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      headers: requestHeaders,
+      ...(requestBody === undefined ? {} : { body: requestBody }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
@@ -385,24 +714,114 @@ async function request(url: string, token: string, path: string, method: 'GET' |
     throw new DaemonConnectionError();
   }
 
-  if (response.ok) {
-    try {
-      return await response.json();
-    } catch {
-      throw new Error('daemon returned an invalid response.');
+  return response;
+}
+
+async function responseJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    throw new Error('daemon returned an invalid response.');
+  }
+}
+
+async function responseJsonOrUndefined(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    return undefined;
+  }
+}
+
+function configPath(global: GlobalOptions, runtime: CliRuntime): string {
+  return global.config ?? runtime.configPath();
+}
+
+async function configSnapshotPath(path: string, runtime: CliRuntime): Promise<string> {
+  for (let number = 1; ; number += 1) {
+    const snapshot = `${path}.backup.snapshot-${number}`;
+    if (await runtime.readFile(snapshot) === undefined) {
+      return snapshot;
     }
   }
+}
 
-  let result: unknown;
+async function readConfig(path: string, runtime: CliRuntime): Promise<{ readonly config: CliConfig; readonly raw?: Uint8Array }> {
+  const raw = await runtime.readFile(path);
+  if (raw === undefined) {
+    return { config: { version: 1, backupDirectory: join(runtime.cwd(), 'memlume-backups') } };
+  }
+  let parsed: unknown;
   try {
-    result = await response.json();
+    parsed = JSON.parse(new TextDecoder().decode(raw));
   } catch {
-    result = undefined;
+    throw new Error('CLI configuration is invalid.');
   }
-  if (response.status === 401) {
-    throw new Error('adapter authentication failed. Create a new token through the protected setup API and update MEMLUME_TOKEN.');
+  if (
+    typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)
+    || (parsed as { version?: unknown }).version !== 1
+    || typeof (parsed as { backupDirectory?: unknown }).backupDirectory !== 'string'
+    || (parsed as { backupDirectory: string }).backupDirectory.trim() === ''
+  ) {
+    throw new Error('CLI configuration is invalid.');
   }
-  throw new DaemonResponseError(response.status, daemonErrorCode(result));
+  return { config: { version: 1, backupDirectory: (parsed as { backupDirectory: string }).backupDirectory }, raw };
+}
+
+function configDiff(current: CliConfig, desired: CliConfig): string {
+  if (current.backupDirectory === desired.backupDirectory) {
+    return '設定未變更。\n';
+  }
+  return `設定變更：\nbackupDirectory: ${current.backupDirectory} -> ${desired.backupDirectory}\n`;
+}
+
+async function requiredFile(path: string, runtime: CliRuntime): Promise<Uint8Array> {
+  const file = await runtime.readFile(path);
+  if (file === undefined) {
+    throw new Error(`找不到檔案：${path}。`);
+  }
+  return file;
+}
+
+function doctorSummary(health: unknown, diagnostics: unknown): string {
+  const healthStatus = objectString(health, 'status') ?? objectString(health, 'health') ?? 'unknown';
+  if (diagnostics === undefined) {
+    return `Daemon: ${healthStatus}.\n未提供 setup token，略過受保護診斷。\n`;
+  }
+  const schema = objectValue(diagnostics, 'schema');
+  return [
+    `Daemon: ${healthStatus}.`,
+    `Integrity: ${objectString(diagnostics, 'integrity') ?? 'unknown'}.`,
+    `Migrations: ${arrayValue(schema, 'migrations').length}.`,
+    `Brains: ${arrayValue(diagnostics, 'brains').length}.`,
+    `Mounts: ${arrayValue(diagnostics, 'mounts').length}.`,
+  ].join('\n').concat('\n');
+}
+
+function brainsSummary(result: unknown): string {
+  const brains = arrayValue(result, 'brains');
+  if (brains.length === 0) {
+    return 'No Brains found.';
+  }
+  return brains.map((brain) => {
+    const id = objectString(brain, 'id') ?? 'brain';
+    const name = objectString(brain, 'name');
+    return name === undefined ? id : `${id}: ${name}`;
+  }).join('\n');
+}
+
+function objectValue(value: unknown, key: string): unknown {
+  return typeof value === 'object' && value !== null && key in value ? (value as Record<string, unknown>)[key] : undefined;
+}
+
+function objectString(value: unknown, key: string): string | undefined {
+  const candidate = objectValue(value, key);
+  return typeof candidate === 'string' ? candidate : undefined;
+}
+
+function arrayValue(value: unknown, key: string): readonly unknown[] {
+  const candidate = objectValue(value, key);
+  return Array.isArray(candidate) ? candidate : [];
 }
 
 function daemonEndpoint(value: string, path: string): URL {
@@ -490,6 +909,56 @@ function errorMessage(error: unknown): string {
     return error.message;
   }
   return 'command failed.';
+}
+
+const defaultRuntime: CliRuntime = {
+  configPath: () => join(homedir(), '.config', 'memlume', 'config.json'),
+  cwd: () => process.cwd(),
+  isInteractive: () => Boolean(process.stdin.isTTY && process.stderr.isTTY),
+  async confirm(question: string): Promise<boolean> {
+    const prompt = createInterface({ input: process.stdin, output: process.stderr });
+    try {
+      return (await prompt.question(`${question} [y/N] `)).trim().toLowerCase() === 'y';
+    } finally {
+      prompt.close();
+    }
+  },
+  async readFile(path: string): Promise<Uint8Array | undefined> {
+    try {
+      return await readFile(path);
+    } catch (error) {
+      if (isMissingFile(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+  },
+  writeFile: async (path, value) => writeFile(path, value, { mode: 0o600 }),
+  async mkdir(path: string): Promise<boolean> {
+    return (await mkdir(path, { recursive: true })) !== undefined;
+  },
+  async removeFile(path: string): Promise<void> {
+    await unlink(path);
+  },
+  async removeEmptyDirectory(path: string): Promise<void> {
+    await rmdir(path);
+  },
+  async readdir(path: string): Promise<readonly string[]> {
+    try {
+      return await readdir(path);
+    } catch (error) {
+      if (isMissingFile(error)) {
+        return [];
+      }
+      throw error;
+    }
+  },
+  verifyBackup: (path, password) => verifyBackup({ backupPath: path, ...(password === undefined ? {} : { password }) }),
+  fetch,
+};
+
+function isMissingFile(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
 }
 
 const defaultIo: Io = {

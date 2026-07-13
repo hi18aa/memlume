@@ -1,4 +1,4 @@
-import { createBackup, restoreBackup, RestoreRecoveryError } from '@memlume/backup';
+import { createBackup, importBrain, restoreBackup, RestoreRecoveryError } from '@memlume/backup';
 import { openDatabase, type SqliteDatabase } from '@memlume/database/internal';
 import { ContextResolver } from '@memlume/context-resolver';
 import { EventJournal } from '@memlume/event-journal';
@@ -55,6 +55,17 @@ export function createDaemon({ databasePath, setupToken }: DaemonOptions): Daemo
           ...(password === undefined ? {} : { password }),
         });
         return readFileSync(outputPath);
+      } finally {
+        rmSync(directory, { force: true, recursive: true });
+      }
+    },
+    async import({ bundle, password, name }) {
+      const current = requireRuntime(runtime);
+      const directory = mkdtempSync(join(tmpdir(), 'memlume-daemon-import-'));
+      const backupPath = join(directory, 'import.memlume');
+      try {
+        writeFileSync(backupPath, bundle, { mode: 0o600 });
+        return await importBrain({ backupPath, database: current.database, ...(password === undefined ? {} : { password }), ...(name === undefined ? {} : { name }) });
       } finally {
         rmSync(directory, { force: true, recursive: true });
       }

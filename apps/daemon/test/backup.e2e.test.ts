@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { startDaemon, type RunningDaemon } from '../src/index.js';
 
 const SETUP_TOKEN = 'setup-token-for-backup-daemon-e2e';
+const FULL_BACKUP_PASSWORD = 'backup-password-for-daemon-e2e';
 const directories: string[] = [];
 const daemons: RunningDaemon[] = [];
 
@@ -67,6 +68,18 @@ afterEach(async () => {
 });
 
 describe('daemon backup maintenance lifecycle', () => {
+  test('requires a password before creating a full backup', async () => {
+    const daemon = await startDaemon({ databasePath: databasePath(), port: 0, setupToken: SETUP_TOKEN });
+    daemons.push(daemon);
+
+    const rejected = await requestJson(daemon, '/v1/setup/backups', {
+      method: 'POST', headers: setupHeaders(), body: JSON.stringify({}),
+    });
+
+    expect(rejected.response.status).toBe(400);
+    expect(rejected.body).toEqual({ error: 'full_backup_password_required' });
+  });
+
   test('exports and restores a live daemon, then reopens it for safe reads and writes', async () => {
     const daemon = await startDaemon({ databasePath: databasePath(), port: 0, setupToken: SETUP_TOKEN });
     daemons.push(daemon);
@@ -74,7 +87,7 @@ describe('daemon backup maintenance lifecycle', () => {
     expect((await saveFact(daemon, writer.token, writer.brainId, 'Snapshot fact.')).status).toBe(201);
 
     const exported = await fetch(`${daemonUrl(daemon)}/v1/setup/backups`, {
-      method: 'POST', headers: setupHeaders(), body: JSON.stringify({ brainId: writer.brainId }),
+      method: 'POST', headers: setupHeaders(), body: JSON.stringify({ password: FULL_BACKUP_PASSWORD }),
     });
     expect(exported.status).toBe(200);
     expect(exported.headers.get('content-type')).toContain('application/vnd.memlume');
@@ -84,7 +97,7 @@ describe('daemon backup maintenance lifecycle', () => {
     expect((await saveFact(daemon, writer.token, writer.brainId, 'Transient fact.')).status).toBe(201);
     const restored = await requestJson(daemon, '/v1/setup/backups/restore', {
       method: 'POST',
-      headers: { 'content-type': 'application/vnd.memlume', 'x-memlume-setup-token': SETUP_TOKEN },
+      headers: { 'content-type': 'application/vnd.memlume', 'x-memlume-setup-token': SETUP_TOKEN, 'x-memlume-backup-password': FULL_BACKUP_PASSWORD },
       body: bundle,
     });
     expect(restored.response.status).toBe(200);
@@ -92,7 +105,7 @@ describe('daemon backup maintenance lifecycle', () => {
 
     const diagnostics = await requestJson(daemon, '/v1/setup/diagnostics', { headers: setupHeaders() });
     expect(diagnostics.response.status).toBe(200);
-    expect(diagnostics.body).toMatchObject({ health: 'ok', integrity: 'ok', brains: [expect.objectContaining({ id: writer.brainId })] });
+    expect(diagnostics.body).toMatchObject({ health: 'ok', integrity: 'ok', brains: expect.arrayContaining([expect.objectContaining({ id: writer.brainId })]) });
     expect(JSON.stringify(diagnostics.body)).not.toContain(writer.token);
 
     const oldToken = await fetch(`${daemonUrl(daemon)}/v1/memories/search?q=Snapshot`, { headers: { authorization: `Bearer ${writer.token}` } });
@@ -105,6 +118,82 @@ describe('daemon backup maintenance lifecycle', () => {
     const transient = await requestJson(daemon, '/v1/memories/search?q=Transient', { headers: { authorization: `Bearer ${reopened.token}` } });
     expect(transient.body).toEqual({ memories: [] });
     expect((await saveFact(daemon, reopened.token, writer.brainId, 'Fact after restore.')).status).toBe(201);
+  });
+
+  test('imports one Brain without replacing existing Brains or granting it to existing agents', async () => {
+    const source = await startDaemon({ databasePath: databasePath(), port: 0, setupToken: SETUP_TOKEN });
+    const target = await startDaemon({ databasePath: databasePath(), port: 0, setupToken: SETUP_TOKEN });
+    daemons.push(source, target);
+    const sourceWriter = await setupWriter(source);
+    const targetWriter = await setupWriter(target);
+    expect((await saveFact(source, sourceWriter.token, sourceWriter.brainId, 'Imported Brain fact.')).status).toBe(201);
+    expect((await saveFact(target, targetWriter.token, targetWriter.brainId, 'Existing target fact.')).status).toBe(201);
+    const exported = await fetch(`${daemonUrl(source)}/v1/setup/backups`, {
+      method: 'POST', headers: setupHeaders(), body: JSON.stringify({ brainId: sourceWriter.brainId }),
+    });
+    const bundle = new Uint8Array(await exported.arrayBuffer());
+
+    const imported = await requestJson(target, '/v1/setup/brains/import', {
+      method: 'POST',
+      headers: { 'content-type': 'application/vnd.memlume', 'x-memlume-setup-token': SETUP_TOKEN },
+      body: bundle,
+    });
+
+    expect(imported.response.status).toBe(201);
+    const importedBrainId = (imported.body.brain as { readonly id: string }).id;
+    expect(importedBrainId).not.toBe(sourceWriter.brainId);
+    expect(imported.body).toMatchObject({ mountsImported: false, source: { brainId: sourceWriter.brainId } });
+    const inaccessible = await requestJson(target, '/v1/memories/search?q=Imported', { headers: { authorization: `Bearer ${targetWriter.token}` } });
+    expect(inaccessible.body).toEqual({ memories: [] });
+    const existing = await requestJson(target, '/v1/memories/search?q=Existing', { headers: { authorization: `Bearer ${targetWriter.token}` } });
+    expect(existing.body).toMatchObject({ memories: [expect.objectContaining({ canonicalText: 'Existing target fact.' })] });
+
+    const importedWriter = await setupWriterForExistingBrain(target, importedBrainId, 'imported-brain');
+    const restored = await requestJson(target, '/v1/memories/search?q=Imported', { headers: { authorization: `Bearer ${importedWriter.token}` } });
+    expect(restored.body).toMatchObject({ memories: [expect.objectContaining({ canonicalText: 'Imported Brain fact.' })] });
+  });
+
+  test('rejects a complete backup on Brain import with a machine-readable restore instruction', async () => {
+    const source = await startDaemon({ databasePath: databasePath(), port: 0, setupToken: SETUP_TOKEN });
+    const target = await startDaemon({ databasePath: databasePath(), port: 0, setupToken: SETUP_TOKEN });
+    daemons.push(source, target);
+    const exported = await fetch(`${daemonUrl(source)}/v1/setup/backups`, {
+      method: 'POST', headers: setupHeaders(), body: JSON.stringify({ password: FULL_BACKUP_PASSWORD }),
+    });
+    const bundle = new Uint8Array(await exported.arrayBuffer());
+
+    const rejected = await requestJson(target, '/v1/setup/brains/import', {
+      method: 'POST',
+      headers: { 'content-type': 'application/vnd.memlume', 'x-memlume-setup-token': SETUP_TOKEN, 'x-memlume-backup-password': FULL_BACKUP_PASSWORD },
+      body: bundle,
+    });
+
+    expect(rejected.response.status).toBe(409);
+    expect(rejected.body).toEqual({ error: 'full_restore_required' });
+  });
+
+  test('rejects a selected Brain export from full database restore without changing the live daemon', async () => {
+    const source = await startDaemon({ databasePath: databasePath(), port: 0, setupToken: SETUP_TOKEN });
+    const target = await startDaemon({ databasePath: databasePath(), port: 0, setupToken: SETUP_TOKEN });
+    daemons.push(source, target);
+    const sourceWriter = await setupWriter(source);
+    const targetWriter = await setupWriter(target);
+    expect((await saveFact(target, targetWriter.token, targetWriter.brainId, 'Target stays intact.')).status).toBe(201);
+    const exported = await fetch(`${daemonUrl(source)}/v1/setup/backups`, {
+      method: 'POST', headers: setupHeaders(), body: JSON.stringify({ brainId: sourceWriter.brainId }),
+    });
+    const bundle = new Uint8Array(await exported.arrayBuffer());
+
+    const rejected = await requestJson(target, '/v1/setup/backups/restore', {
+      method: 'POST',
+      headers: { 'content-type': 'application/vnd.memlume', 'x-memlume-setup-token': SETUP_TOKEN },
+      body: bundle,
+    });
+
+    expect(rejected.response.status).toBe(409);
+    expect(rejected.body).toEqual({ error: 'brain_import_required' });
+    const intact = await requestJson(target, '/v1/memories/search?q=Target', { headers: { authorization: `Bearer ${targetWriter.token}` } });
+    expect(intact.body).toMatchObject({ memories: [expect.objectContaining({ canonicalText: 'Target stays intact.' })] });
   });
 
   test('keeps the active daemon database usable when a restore bundle is invalid', async () => {
@@ -130,7 +219,7 @@ describe('daemon backup maintenance lifecycle', () => {
     daemons.push(daemon);
     const writer = await setupWriter(daemon);
     const exported = await fetch(`${daemonUrl(daemon)}/v1/setup/backups`, {
-      method: 'POST', headers: setupHeaders(), body: JSON.stringify({ brainId: writer.brainId }),
+      method: 'POST', headers: setupHeaders(), body: JSON.stringify({ password: FULL_BACKUP_PASSWORD }),
     });
     const bundle = new Uint8Array(await exported.arrayBuffer());
     let release: (() => void) | undefined;
@@ -145,7 +234,7 @@ describe('daemon backup maintenance lifecycle', () => {
     });
     const restoring = fetch(`${daemonUrl(daemon)}/v1/setup/backups/restore`, {
       method: 'POST',
-      headers: { 'content-type': 'application/vnd.memlume', 'x-memlume-setup-token': SETUP_TOKEN },
+      headers: { 'content-type': 'application/vnd.memlume', 'x-memlume-setup-token': SETUP_TOKEN, 'x-memlume-backup-password': FULL_BACKUP_PASSWORD },
       body,
       duplex: 'half',
     } as RequestInit);
@@ -166,7 +255,7 @@ describe('daemon backup maintenance lifecycle', () => {
     daemons.push(daemon);
     const writer = await setupWriter(daemon);
     const exported = await fetch(`${daemonUrl(daemon)}/v1/setup/backups`, {
-      method: 'POST', headers: setupHeaders(), body: JSON.stringify({ brainId: writer.brainId }),
+      method: 'POST', headers: setupHeaders(), body: JSON.stringify({ password: FULL_BACKUP_PASSWORD }),
     });
     const bundle = new Uint8Array(await exported.arrayBuffer());
     const eventBody = JSON.stringify({
@@ -193,7 +282,7 @@ describe('daemon backup maintenance lifecycle', () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
     const restoring = fetch(`${daemonUrl(daemon)}/v1/setup/backups/restore`, {
       method: 'POST',
-      headers: { 'content-type': 'application/vnd.memlume', 'x-memlume-setup-token': SETUP_TOKEN },
+      headers: { 'content-type': 'application/vnd.memlume', 'x-memlume-setup-token': SETUP_TOKEN, 'x-memlume-backup-password': FULL_BACKUP_PASSWORD },
       body: bundle,
     });
 

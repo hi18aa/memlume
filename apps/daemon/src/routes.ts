@@ -24,7 +24,7 @@ import { EventBrainConflictError, EventJournal } from '@memlume/event-journal';
 import { assessMemoryConflict, compileMemory, type MemoryProposal } from '@memlume/memory-compiler';
 import { MemoryStore, SourceEventBrainMismatchError } from '@memlume/retrieval';
 import { BrainStore } from '@memlume/shared-brains';
-import { RestoreRecoveryError } from '@memlume/backup';
+import { BrainImportConflictError, BrainImportRequiredError, FullBackupAuthenticationRequiredError, FullRestoreRequiredError, RestoreRecoveryError } from '@memlume/backup';
 import { timingSafeEqual } from 'node:crypto';
 import express, { type ErrorRequestHandler, type Express, type Request, type RequestHandler, type Response } from 'express';
 import { z, ZodError } from 'zod';
@@ -110,6 +110,9 @@ const CreateBackupRequestSchema = z.object({
   brainId: UuidV7Schema.optional(),
   password: z.string().min(1).max(1024).optional(),
 }).strict();
+const ImportBrainQuerySchema = z.object({
+  name: z.string().trim().min(1).max(256).optional(),
+}).strict();
 
 export interface DaemonServices {
   readonly journal: EventJournal;
@@ -122,6 +125,7 @@ export interface DaemonServices {
 
 export interface BackupLifecycle {
   create(input: { readonly brainId?: string; readonly password?: string }): Promise<Buffer>;
+  import(input: { readonly bundle: Uint8Array; readonly password?: string; readonly name?: string }): Promise<unknown>;
   beginRestore(): boolean;
   cancelRestore(): void;
   restore(input: { readonly bundle: Uint8Array; readonly password?: string }): Promise<void>;
@@ -164,13 +168,56 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
   });
   app.post('/v1/setup/backups', requireSetup, async (request, response) => {
     const input = CreateBackupRequestSchema.parse(request.body);
-    const bundle = await services.backup.create(input);
-    response
-      .status(200)
-      .type('application/vnd.memlume')
-      .set('content-disposition', 'attachment; filename="memlume-backup.memlume"')
-      .send(bundle);
+    try {
+      const bundle = await services.backup.create(input);
+      response
+        .status(200)
+        .type('application/vnd.memlume')
+        .set('content-disposition', 'attachment; filename="memlume-backup.memlume"')
+        .send(bundle);
+    } catch (error) {
+      if (error instanceof FullBackupAuthenticationRequiredError) {
+        response.status(400).json({ error: 'full_backup_password_required' });
+        return;
+      }
+      throw error;
+    }
   });
+  app.post(
+    '/v1/setup/brains/import',
+    requireSetup,
+    express.raw({ type: ['application/vnd.memlume', 'application/octet-stream'], limit: '64mb' }),
+    async (request: Request, response: Response) => {
+      if (!Buffer.isBuffer(request.body) || request.body.byteLength === 0) {
+        response.status(400).json({ error: 'invalid_backup' });
+        return;
+      }
+      const { name } = ImportBrainQuerySchema.parse(request.query);
+      const password = request.get('x-memlume-backup-password');
+      if (password !== undefined && (password.length === 0 || password.length > 1024)) {
+        response.status(400).json({ error: 'invalid_backup' });
+        return;
+      }
+      try {
+        const imported = await services.backup.import({ bundle: request.body, ...(password === undefined ? {} : { password }), ...(name === undefined ? {} : { name }) });
+        response.status(201).json(imported);
+      } catch (error) {
+        if (error instanceof BrainImportConflictError) {
+          response.status(409).json({ error: 'import_conflict' });
+          return;
+        }
+        if (error instanceof FullBackupAuthenticationRequiredError) {
+          response.status(409).json({ error: 'full_restore_required' });
+          return;
+        }
+        if (error instanceof FullRestoreRequiredError) {
+          response.status(409).json({ error: 'full_restore_required' });
+          return;
+        }
+        response.status(400).json({ error: 'invalid_backup' });
+      }
+    },
+  );
   app.post(
     '/v1/setup/backups/restore',
     requireSetup,
@@ -193,6 +240,10 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
         await services.backup.restore({ bundle: request.body, ...(password === undefined ? {} : { password }) });
         response.json({ status: 'restored' });
       } catch (error) {
+        if (error instanceof BrainImportRequiredError) {
+          response.status(409).json({ error: 'brain_import_required' });
+          return;
+        }
         if (error instanceof RestoreRecoveryError) {
           response.status(503).json({ error: 'restore_recovery_required' });
           return;

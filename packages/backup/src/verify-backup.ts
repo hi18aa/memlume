@@ -7,8 +7,9 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { strFromU8, unzipSync } from 'fflate';
 
+import { DEFAULT_PERSONAL_BRAIN_ID } from '@memlume/contracts';
 import { migrations, openDatabase } from '@memlume/database/internal';
-import { encryptedPrefix, readMappings, sha256, type BackupManifest, type BackupMappings, type EncryptionHeader } from './create-backup.js';
+import { encryptedPrefix, FullBackupAuthenticationRequiredError, readMappings, sha256, type BackupManifest, type BackupMappings, type EncryptionHeader } from './create-backup.js';
 
 const MAX_BACKUP_BYTES = 64 * 1024 * 1024;
 const backupEntryNames = new Set(['manifest.json', 'snapshot.sqlite']);
@@ -22,6 +23,7 @@ export type VerifyBackupOptions = {
 export type VerifiedBackup = {
   readonly manifest: BackupManifest;
   readonly snapshot: Uint8Array;
+  readonly authenticated: boolean;
 };
 
 export async function verifyBackup(options: VerifyBackupOptions): Promise<BackupManifest> {
@@ -36,7 +38,7 @@ export async function readVerifiedBackup(options: VerifyBackupOptions): Promise<
   const bundle = await readFile(options.backupPath);
   const decrypted = decryptBundle(bundle, options.password);
   let uncompressedBytes = 0;
-  const files = unzipSync(decrypted, {
+  const files = unzipSync(decrypted.bundle, {
     filter(file) {
       if (!backupEntryNames.has(file.name)) {
         throw new Error('Unexpected backup entry.');
@@ -53,26 +55,29 @@ export async function readVerifiedBackup(options: VerifyBackupOptions): Promise<
   }
 
   const manifest = parseManifest(strFromU8(files['manifest.json']));
+  if ((manifest.encryption !== undefined) !== decrypted.authenticated) {
+    throw new Error('Backup encryption metadata verification failed.');
+  }
   const snapshot = files['snapshot.sqlite'];
   if (manifest.checksums['snapshot.sqlite'] !== sha256(snapshot)) {
     throw new Error('Backup checksum verification failed.');
   }
-  inspectSnapshot(snapshot, manifest);
-  return { manifest, snapshot };
+  inspectSnapshot(snapshot, manifest, decrypted.authenticated);
+  return { manifest, snapshot, authenticated: decrypted.authenticated };
 }
 
-export function inspectSnapshot(snapshot: Uint8Array, manifest: BackupManifest): void {
+export function inspectSnapshot(snapshot: Uint8Array, manifest: BackupManifest, authenticated = manifest.encryption !== undefined): void {
   const directory = mkdtempSync(join(tmpdir(), 'memlume-backup-verify-'));
   const snapshotPath = join(directory, 'snapshot.sqlite');
   try {
     writeFileSync(snapshotPath, snapshot);
-    inspectSnapshotPath(snapshotPath, manifest);
+    inspectSnapshotPath(snapshotPath, manifest, authenticated);
   } finally {
     rmSync(directory, { force: true, recursive: true });
   }
 }
 
-export function inspectSnapshotPath(snapshotPath: string, manifest: BackupManifest): void {
+export function inspectSnapshotPath(snapshotPath: string, manifest: BackupManifest, authenticated = manifest.encryption !== undefined): void {
   const database = new Database(snapshotPath, { readonly: true, fileMustExist: true });
   try {
     const migrationsInSnapshot = database.prepare('SELECT id FROM schema_migrations ORDER BY id').pluck().all() as string[];
@@ -100,8 +105,24 @@ export function inspectSnapshotPath(snapshotPath: string, manifest: BackupManife
     if (JSON.stringify(mappings.brains.map(({ id }) => id)) !== JSON.stringify(manifest.brainIds)) {
       throw new Error('Backup brain mapping verification failed.');
     }
+    verifyScope(manifest, mappings, authenticated);
   } finally {
     database.close();
+  }
+}
+
+function verifyScope(manifest: BackupManifest, mappings: BackupMappings, authenticated: boolean): void {
+  if (manifest.scope === 'brain') {
+    if (mappings.brains.length !== 1 || mappings.installations.length !== 0 || mappings.mounts.length !== 0) {
+      throw new Error('Backup scope verification failed.');
+    }
+    return;
+  }
+  if (!authenticated) {
+    throw new FullBackupAuthenticationRequiredError();
+  }
+  if (!mappings.brains.some(({ id }) => id === DEFAULT_PERSONAL_BRAIN_ID)) {
+    throw new Error('Backup scope verification failed.');
   }
 }
 
@@ -127,11 +148,11 @@ function readSchema(database: Database.Database): readonly SchemaObject[] {
     .map((row) => row as SchemaObject);
 }
 
-function decryptBundle(bundle: Uint8Array, password: string | undefined): Uint8Array {
+function decryptBundle(bundle: Uint8Array, password: string | undefined): { readonly bundle: Uint8Array; readonly authenticated: boolean } {
   const prefix = encryptedPrefix();
   const value = Buffer.from(bundle);
   if (!value.subarray(0, prefix.length).equals(prefix)) {
-    return value;
+    return { bundle: value, authenticated: false };
   }
   if (password === undefined || password.length === 0) {
     throw new Error('Backup password is required.');
@@ -152,7 +173,7 @@ function decryptBundle(bundle: Uint8Array, password: string | undefined): Uint8A
   try {
     const decipher = createDecipheriv('aes-256-gcm', scryptSync(password, Buffer.from(header.salt, 'base64url'), 32), Buffer.from(header.iv, 'base64url'));
     decipher.setAuthTag(Buffer.from(header.tag, 'base64url'));
-    return Buffer.concat([decipher.update(value.subarray(separator + 1)), decipher.final()]);
+    return { bundle: Buffer.concat([decipher.update(value.subarray(separator + 1)), decipher.final()]), authenticated: true };
   } catch {
     throw new Error('Backup password could not decrypt this bundle.');
   }
@@ -175,7 +196,8 @@ function isManifest(value: unknown): value is BackupManifest {
   if (value === null || typeof value !== 'object') return false;
   const manifest = value as Partial<BackupManifest>;
   return manifest.format === 'memlume'
-    && manifest.formatVersion === 1
+    && manifest.formatVersion === 2
+    && (manifest.scope === 'full' || manifest.scope === 'brain')
     && typeof manifest.createdAt === 'string'
     && Array.isArray(manifest.brainIds)
     && manifest.brainIds.every((id) => typeof id === 'string')

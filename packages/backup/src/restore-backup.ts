@@ -24,8 +24,18 @@ export class RestoreRecoveryError extends Error {
   }
 }
 
+export class BrainImportRequiredError extends Error {
+  constructor() {
+    super('A single Brain backup must use the brain import command instead of restore.');
+    this.name = 'BrainImportRequiredError';
+  }
+}
+
 export async function restoreBackup(options: RestoreBackupOptions): Promise<RestoreResult> {
   const verified = await readVerifiedBackup(options);
+  if (verified.manifest.scope !== 'full') {
+    throw new BrainImportRequiredError();
+  }
   if (typeof options.pauseWrites !== 'function') {
     throw new Error('Restore requires exclusive database access through pauseWrites.');
   }
