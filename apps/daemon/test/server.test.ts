@@ -2,13 +2,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createUuidV7 } from '@memlume/contracts';
+import { DEFAULT_PERSONAL_BRAIN_ID, createUuidV7 } from '@memlume/contracts';
 import { afterEach, describe, expect, test } from 'vitest';
 
 import { startDaemon, type RunningDaemon } from '../src/index.js';
 
 const directories: string[] = [];
 const daemons: RunningDaemon[] = [];
+const SETUP_TOKEN = 'setup-token-for-server-tests';
 
 function createDatabasePath(): string {
   const directory = mkdtempSync(join(tmpdir(), 'memlume-daemon-'));
@@ -23,6 +24,25 @@ async function requestJson(
 ): Promise<{ readonly response: Response; readonly body: unknown }> {
   const response = await fetch(`http://127.0.0.1:${daemon.address.port}${path}`, init);
   return { response, body: await response.json() };
+}
+
+async function startAdapterDaemon(): Promise<{ readonly daemon: RunningDaemon; readonly headers: HeadersInit }> {
+  const daemon = await startDaemon({ databasePath: createDatabasePath(), port: 0, setupToken: SETUP_TOKEN });
+  daemons.push(daemon);
+  const registration = await requestJson(daemon, '/v1/setup/installations', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-memlume-setup-token': SETUP_TOKEN },
+    body: JSON.stringify({ clientType: 'test', installationId: 'daemon', profileId: 'default' }),
+  });
+  expect(registration.response.status).toBe(201);
+  const installationId = (registration.body as { readonly installation: { readonly id: string } }).installation.id;
+  const mount = await requestJson(daemon, '/v1/setup/mounts', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-memlume-setup-token': SETUP_TOKEN },
+    body: JSON.stringify({ brainId: DEFAULT_PERSONAL_BRAIN_ID, agentInstallationId: installationId, access: 'read_write' }),
+  });
+  expect(mount.response.status).toBe(201);
+  return { daemon, headers: { authorization: `Bearer ${(registration.body as { readonly token: string }).token}` } };
 }
 
 afterEach(async () => {
@@ -47,12 +67,11 @@ describe('localhost daemon API', () => {
   });
 
   test('records events and saves searchable facts through the same daemon store', async () => {
-    const daemon = await startDaemon({ databasePath: createDatabasePath(), port: 0 });
-    daemons.push(daemon);
+    const { daemon, headers } = await startAdapterDaemon();
 
     const event = await requestJson(daemon, '/v1/events', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
         rawContent: 'Use local SQLite for the first release.',
         eventType: 'decision',
@@ -64,7 +83,7 @@ describe('localhost daemon API', () => {
 
     const fact = await requestJson(daemon, '/v1/memories', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
         kind: 'fact',
         title: 'Memlume storage',
@@ -81,7 +100,7 @@ describe('localhost daemon API', () => {
     expect(fact.response.status).toBe(201);
     expect(fact.body).toMatchObject({ memory: { kind: 'fact', title: 'Memlume storage' } });
 
-    const search = await requestJson(daemon, '/v1/memories/search?q=SQLite');
+    const search = await requestJson(daemon, '/v1/memories/search?q=SQLite', { headers });
     expect(search.response.status).toBe(200);
     expect(search.body).toMatchObject({
       memories: [expect.objectContaining({ kind: 'fact', canonicalText: expect.stringContaining('SQLite FTS5') })],
@@ -89,12 +108,11 @@ describe('localhost daemon API', () => {
   });
 
   test('resolves a stored policy as a directive', async () => {
-    const daemon = await startDaemon({ databasePath: createDatabasePath(), port: 0 });
-    daemons.push(daemon);
+    const { daemon, headers } = await startAdapterDaemon();
 
     const policy = await requestJson(daemon, '/v1/memories', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
         kind: 'policy',
         canonicalText: 'Use the local image route.',
@@ -110,7 +128,7 @@ describe('localhost daemon API', () => {
 
     const context = await requestJson(daemon, '/v1/context/resolve', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
         intent: 'image_generation',
         scope: { level: 'global' },
@@ -127,12 +145,11 @@ describe('localhost daemon API', () => {
   });
 
   test('returns safe errors for invalid input and unknown routes', async () => {
-    const daemon = await startDaemon({ databasePath: createDatabasePath(), port: 0 });
-    daemons.push(daemon);
+    const { daemon, headers } = await startAdapterDaemon();
 
     const invalid = await requestJson(daemon, '/v1/events', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({ rawContent: 'Missing source.', eventType: 'test' }),
     });
     expect(invalid.response.status).toBe(400);
@@ -144,12 +161,11 @@ describe('localhost daemon API', () => {
   });
 
   test('returns a safe 400 for an unknown source event UUID', async () => {
-    const daemon = await startDaemon({ databasePath: createDatabasePath(), port: 0 });
-    daemons.push(daemon);
+    const { daemon, headers } = await startAdapterDaemon();
 
     const invalid = await requestJson(daemon, '/v1/memories', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
         kind: 'fact',
         canonicalText: 'This fact points to an event that does not exist.',

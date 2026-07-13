@@ -71,7 +71,7 @@ export function startFromArgs(args: readonly string[]): Promise<RunningDaemon> {
   if (parentDirectory !== '.') {
     mkdirSync(parentDirectory, { recursive: true });
   }
-  return startDaemon(options);
+  return startDaemon({ ...options, setupToken: process.env.MEMLUME_SETUP_TOKEN });
 }
 
 export async function main(args: readonly string[], io: Io = defaultIo): Promise<number> {

@@ -2,6 +2,7 @@ import { openDatabase } from '@memlume/database/internal';
 import { ContextResolver } from '@memlume/context-resolver';
 import { EventJournal } from '@memlume/event-journal';
 import { MemoryStore } from '@memlume/retrieval';
+import { BrainStore } from '@memlume/shared-brains';
 import express, { type Express } from 'express';
 import { type AddressInfo, type Server } from 'node:net';
 
@@ -9,6 +10,7 @@ import { registerRoutes } from './routes.js';
 
 export interface DaemonOptions {
   readonly databasePath: string;
+  readonly setupToken?: string;
 }
 
 export interface Daemon {
@@ -26,7 +28,7 @@ export interface RunningDaemon extends Daemon {
   stop(): Promise<void>;
 }
 
-export function createDaemon({ databasePath }: DaemonOptions): Daemon {
+export function createDaemon({ databasePath, setupToken }: DaemonOptions): Daemon {
   const database = openDatabase(databasePath);
   let closed = false;
 
@@ -34,10 +36,11 @@ export function createDaemon({ databasePath }: DaemonOptions): Daemon {
     const journal = new EventJournal(database);
     const store = new MemoryStore(database);
     const resolver = new ContextResolver(store);
+    const brains = new BrainStore(database);
     const app = express();
     app.disable('x-powered-by');
     app.use(express.json({ limit: '1mb' }));
-    registerRoutes(app, { journal, store, resolver });
+    registerRoutes(app, { journal, store, resolver, brains, setupToken });
 
     return {
       app,
@@ -54,12 +57,12 @@ export function createDaemon({ databasePath }: DaemonOptions): Daemon {
   }
 }
 
-export async function startDaemon({ databasePath, port = 0 }: StartDaemonOptions): Promise<RunningDaemon> {
+export async function startDaemon({ databasePath, port = 0, setupToken }: StartDaemonOptions): Promise<RunningDaemon> {
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error('Port must be an integer from 0 to 65535.');
   }
 
-  const daemon = createDaemon({ databasePath });
+  const daemon = createDaemon({ databasePath, setupToken });
   try {
     const server = await listen(daemon.app, port);
     const address = server.address();

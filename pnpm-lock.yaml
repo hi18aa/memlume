@@ -42,6 +42,9 @@ importers:
       '@memlume/retrieval':
         specifier: workspace:*
         version: link:../../packages/retrieval
+      '@memlume/shared-brains':
+        specifier: workspace:*
+        version: link:../../packages/shared-brains
       express:
         specifier: ^5.2.1
         version: 5.2.1
