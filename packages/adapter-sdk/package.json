@@ -1,0 +1,22 @@
+{
+  "name": "@memlume/adapter-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "pnpm --filter @memlume/contracts build && tsc -p tsconfig.json",
+    "test": "pnpm run build && node --test",
+    "typecheck": "pnpm --filter @memlume/contracts build && tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@memlume/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1"
+  }
+}
