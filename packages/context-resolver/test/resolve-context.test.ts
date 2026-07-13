@@ -32,8 +32,17 @@ type MemoryDraft = {
 type MemoryStore = {
   save(input: MemoryDraft): MemoryItem;
 };
+type OutcomeStore = {
+  recordUsage(input: {
+    readonly memoryId: string;
+    readonly taskId: string;
+    readonly agentId: string;
+    readonly wasIncluded: boolean;
+    readonly outcome?: 'adopted' | 'ignored' | 'corrected' | null;
+  }, brainIds: readonly string[]): unknown;
+};
 type MemoryStoreConstructor = new (database: SqliteDatabase) => MemoryStore;
-type ContextResolverConstructor = new (store: MemoryStore) => {
+type ContextResolverConstructor = new (store: MemoryStore, outcomes?: OutcomeStore) => {
   resolve(input: {
     readonly intent: string;
     readonly scope: MemoryScope;
@@ -54,7 +63,7 @@ const { ContextResolver, ESTIMATED_TEXT_UNIT_CHARS } = resolverModule as {
 const databases: SqliteDatabase[] = [];
 const directories: string[] = [];
 
-function createResolver(): { database: SqliteDatabase; store: MemoryStore; resolver: InstanceType<ContextResolverConstructor> } {
+function createResolver(): { database: SqliteDatabase; store: MemoryStore; outcomes: OutcomeStore; resolver: InstanceType<ContextResolverConstructor> } {
   const directory = mkdtempSync(join(tmpdir(), 'memlume-context-resolver-'));
   directories.push(directory);
   const database = openDatabase(join(directory, 'memlume.sqlite'));
@@ -63,7 +72,8 @@ function createResolver(): { database: SqliteDatabase; store: MemoryStore; resol
   expect(MemoryStore).toBeTypeOf('function');
   expect(ContextResolver).toBeTypeOf('function');
   const store = new MemoryStore!(database);
-  return { database, store, resolver: new ContextResolver!(store) };
+  const outcomes = new (retrieval as { OutcomeStore: new (database: SqliteDatabase) => OutcomeStore }).OutcomeStore(database);
+  return { database, store, outcomes, resolver: new ContextResolver!(store, outcomes) };
 }
 
 function policy(target: string, constraints: { readonly exclusive?: boolean; readonly required?: boolean } = {}) {
@@ -145,6 +155,35 @@ afterEach(() => {
 });
 
 describe('ContextResolver', () => {
+  test('uses explainable outcome feedback as a tie-breaker without changing memory history', () => {
+    const { store, outcomes, resolver } = createResolver();
+    const lessUsed = store.save({
+      kind: 'policy',
+      canonicalText: 'Use the general image route.',
+      structuredData: policy('general-image-route'),
+      scope: { level: 'global' },
+      priority: 0,
+    });
+    const adopted = store.save({
+      kind: 'policy',
+      canonicalText: 'Use the tested image route.',
+      structuredData: policy('tested-image-route'),
+      scope: { level: 'global' },
+      priority: 0,
+    });
+    outcomes.recordUsage({ memoryId: adopted.id, taskId: 'task-feedback', agentId: 'hermes', wasIncluded: true, outcome: 'adopted' }, [DEFAULT_PERSONAL_BRAIN_ID]);
+
+    const pack = resolver.resolve({
+      intent: 'image_generation',
+      scope: { level: 'global' },
+      task: null,
+      contextBudget: 100,
+    });
+
+    expect(pack.directives.map(({ memoryId }) => memoryId)).toEqual([adopted.id, lessUsed.id]);
+    expect(store.get(adopted.id, [DEFAULT_PERSONAL_BRAIN_ID])?.canonicalText).toBe('Use the tested image route.');
+  });
+
   test('places a project policy before a global policy and returns traceable context', () => {
     const { store, resolver } = createResolver();
     const global = store.save({

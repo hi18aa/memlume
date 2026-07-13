@@ -9,6 +9,8 @@ import {
   IsoDateSchema,
   IsoUtcDateTimeSchema,
   JsonValueSchema,
+  MemoryUsageOutcomeSchema,
+  OutcomeResultSchema,
   MemoryScopeSchema,
   NonEmptyTextSchema,
   PolicyDataSchema,
@@ -22,10 +24,10 @@ import {
 import { ContextResolver } from '@memlume/context-resolver';
 import { EventBrainConflictError, EventJournal } from '@memlume/event-journal';
 import { assessMemoryConflict, compileMemory, type MemoryProposal } from '@memlume/memory-compiler';
-import { MemoryStore, SourceEventBrainMismatchError } from '@memlume/retrieval';
+import { MemoryStore, OutcomeMemoryAccessError, OutcomeReceiptError, OutcomeStore, SourceEventBrainMismatchError } from '@memlume/retrieval';
 import { BrainStore } from '@memlume/shared-brains';
 import { BrainImportConflictError, BrainImportRequiredError, FullBackupAuthenticationRequiredError, FullRestoreRequiredError, RestoreRecoveryError } from '@memlume/backup';
-import { timingSafeEqual } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import express, { type ErrorRequestHandler, type Express, type Request, type RequestHandler, type Response } from 'express';
 import { z, ZodError } from 'zod';
 
@@ -89,6 +91,35 @@ const ResolveContextRequestSchema = z
   })
   .strict();
 
+const RecordMemoryUsageRequestSchema = z
+  .object({
+    traceId: UuidV7Schema,
+    taskId: NonEmptyTextSchema,
+    retrievalRank: z.number().int().nonnegative().nullable().optional(),
+    wasIncluded: z.boolean(),
+    outcome: MemoryUsageOutcomeSchema.nullable().optional(),
+  })
+  .strict();
+
+const RecordOutcomeRequestSchema = z
+  .object({
+    traceId: UuidV7Schema,
+    taskId: NonEmptyTextSchema,
+    result: OutcomeResultSchema,
+    correctionType: NonEmptyTextSchema.nullable().optional(),
+    correctionData: JsonValueSchema.nullable().optional(),
+    usedMemoryIds: z.array(UuidV7Schema).min(1).max(256),
+    usedToolIds: z.array(NonEmptyTextSchema).max(256),
+  })
+  .strict();
+
+const RecordUsageOutcomeRequestSchema = z
+  .object({
+    traceId: UuidV7Schema,
+    outcome: MemoryUsageOutcomeSchema,
+  })
+  .strict();
+
 const CreateBrainRequestSchema = z
   .object({
     kind: BrainKindSchema,
@@ -119,6 +150,7 @@ export interface DaemonServices {
   readonly journal: EventJournal;
   readonly store: MemoryStore;
   readonly resolver: ContextResolver;
+  readonly outcomes: OutcomeStore;
   readonly brains: BrainStore;
   readonly setupToken?: string;
   readonly backup: BackupLifecycle;
@@ -143,6 +175,7 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
   });
 
   const requireSetup = requireSetupToken(services.setupToken);
+  const consumedUserConfirmations = new Set<string>();
   app.post('/v1/setup/brains', requireSetup, (request, response) => {
     response.status(201).json({ brain: services.brains.createBrain(CreateBrainRequestSchema.parse(request.body)) });
   });
@@ -333,7 +366,30 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
       structuredData: redactSensitiveJson(input.structuredData).redacted,
       scope: redactMemoryScope(input.scope),
     });
-    response.status(201).json({ memory: services.store.save({ ...sanitized, brainId }) });
+    const installation = authenticatedInstallation(response);
+    const requiresCandidate = installation !== undefined
+      && inferenceClientTypes.has(installation.clientType)
+      && !hasUserMemoryConfirmation(request, services.setupToken, input, consumedUserConfirmations);
+    const memory = requiresCandidate
+      ? services.store.saveCandidate({ ...sanitized, brainId })
+      : services.store.save({ ...sanitized, brainId });
+    response.status(201).json({ memory });
+  });
+
+  app.post('/v1/memories/candidate', requireAdapter, (request, response) => {
+    const input = SaveMemoryRequestSchema.parse(request.body);
+    const brainId = input.brainId ?? DEFAULT_PERSONAL_BRAIN_ID;
+    if (!hasWriteAccess(response, services.brains, brainId)) {
+      return;
+    }
+    const sanitized = SaveMemoryRequestSchema.parse({
+      ...input,
+      canonicalText: redactSensitiveText(input.canonicalText).redacted,
+      ...(input.title === undefined ? {} : { title: redactSensitiveText(input.title).redacted }),
+      structuredData: redactSensitiveJson(input.structuredData).redacted,
+      scope: redactMemoryScope(input.scope),
+    });
+    response.status(201).json({ memory: services.store.saveCandidate({ ...sanitized, brainId }) });
   });
 
   app.post('/v1/memories/capture', requireAdapter, (request, response) => {
@@ -409,10 +465,14 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
       return;
     }
     const brainIds = services.brains.listMountedBrains(installation.id).map(({ brain }) => brain.id);
+    if (brainIds.length === 0) {
+      response.status(403).json({ error: 'forbidden' });
+      return;
+    }
     response.json({ memories: services.store.list({ brainIds, status: 'candidate' }) });
   });
 
-  app.post('/v1/memories/:memoryId/approve', requireAdapter, (request, response) => {
+  app.post('/v1/memories/:memoryId/approve', requireSetup, requireAdapter, (request, response) => {
     const { memoryId } = MemoryParametersSchema.parse(request.params);
     const input = ReviewCandidateRequestSchema.parse(request.body);
     const installation = authenticatedInstallation(response);
@@ -450,7 +510,7 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     response.json({ memory: services.store.approveCandidate(memoryId, input, brainIds) });
   });
 
-  app.post('/v1/memories/:memoryId/reject', requireAdapter, (request, response) => {
+  app.post('/v1/memories/:memoryId/reject', requireSetup, requireAdapter, (request, response) => {
     const { memoryId } = MemoryParametersSchema.parse(request.params);
     const input = ReviewCandidateRequestSchema.omit({ supersedeMemoryId: true }).parse(request.body);
     const installation = authenticatedInstallation(response);
@@ -498,6 +558,10 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
       return;
     }
     const brainIds = services.brains.listMountedBrains(installation.id).map(({ brain }) => brain.id);
+    if (brainIds.length === 0) {
+      response.status(403).json({ error: 'forbidden' });
+      return;
+    }
     response.json({ memories: services.store.search(q, { brainIds }) });
   });
 
@@ -509,7 +573,92 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     }
     const input = ResolveContextRequestSchema.parse(request.body);
     const brainIds = contextBrainIds(services.brains, installation.id);
-    response.json({ context: services.resolver.resolve({ ...input, brainIds }) });
+    if (brainIds.length === 0) {
+      response.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const context = services.resolver.resolve({ ...input, brainIds });
+    services.outcomes.issueReceipt({ traceId: context.traceId, agentId: installation.id, brainIds });
+    response.json({ context });
+  });
+
+  app.post('/v1/memories/:memoryId/usage', requireAdapter, (request, response) => {
+    const { memoryId } = MemoryParametersSchema.parse(request.params);
+    const input = RecordMemoryUsageRequestSchema.parse(request.body);
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const brainIds = writableBrainIds(services.brains, installation.id);
+    try {
+      const usage = services.outcomes.recordUsageWithReceipt({
+        memoryId,
+        taskId: input.taskId,
+        agentId: installation.id,
+        retrievalRank: input.retrievalRank,
+        wasIncluded: input.wasIncluded,
+        outcome: input.outcome,
+      }, brainIds, input.traceId, installation.id);
+      response.status(201).json({ usage });
+    } catch (error) {
+      if (error instanceof OutcomeMemoryAccessError || error instanceof OutcomeReceiptError) {
+        response.status(403).json({ error: 'forbidden' });
+        return;
+      }
+      throw error;
+    }
+  });
+
+  app.post('/v1/memory-usage/:usageId/outcome', requireAdapter, (request, response) => {
+    const { usageId } = z.object({ usageId: UuidV7Schema }).strict().parse(request.params);
+    const { traceId, outcome } = RecordUsageOutcomeRequestSchema.parse(request.body);
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const brainIds = writableBrainIds(services.brains, installation.id);
+    try {
+      response.status(201).json({ usage: services.outcomes.setUsageOutcomeWithReceipt(usageId, outcome, brainIds, traceId, installation.id) });
+    } catch (error) {
+      if (error instanceof OutcomeMemoryAccessError || error instanceof OutcomeReceiptError) {
+        response.status(403).json({ error: 'forbidden' });
+        return;
+      }
+      throw error;
+    }
+  });
+
+  app.post('/v1/outcomes', requireAdapter, (request, response) => {
+    const input = RecordOutcomeRequestSchema.parse(request.body);
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const brainIds = writableBrainIds(services.brains, installation.id);
+    const correctionData = input.correctionData === undefined || input.correctionData === null
+      ? input.correctionData
+      : redactSensitiveJson(input.correctionData).redacted;
+    const correctionType = input.correctionType === undefined || input.correctionType === null
+      ? input.correctionType
+      : redactSensitiveText(input.correctionType).redacted;
+    try {
+      const outcome = services.outcomes.recordOutcomeWithReceipt({
+        ...input,
+        agentId: installation.id,
+        ...(correctionData === undefined ? {} : { correctionData }),
+        ...(correctionType === undefined ? {} : { correctionType }),
+      }, brainIds, input.traceId, installation.id);
+      response.status(201).json({ outcome });
+    } catch (error) {
+      if (error instanceof OutcomeMemoryAccessError || error instanceof OutcomeReceiptError) {
+        response.status(403).json({ error: 'forbidden' });
+        return;
+      }
+      throw error;
+    }
   });
 
   app.use((_request, response) => {
@@ -600,6 +749,13 @@ function contextBrainIds(brains: BrainStore, agentInstallationId: string): strin
     .map(({ brain }) => brain.id);
 }
 
+function writableBrainIds(brains: BrainStore, agentInstallationId: string): string[] {
+  return brains
+    .listMountedBrains(agentInstallationId)
+    .filter(({ access }) => access === 'read_write')
+    .map(({ brain }) => brain.id);
+}
+
 function redactEventSource(source: z.infer<typeof EventSourceSchema>): z.infer<typeof EventSourceSchema> {
   return EventSourceSchema.parse(
     Object.fromEntries(
@@ -613,6 +769,9 @@ function redactMemoryScope(scope: z.infer<typeof MemoryScopeSchema>): z.infer<ty
 }
 
 function capturedStructuredData(proposal: MemoryProposal): JsonValue {
+  if (proposal.kind === 'policy' && proposal.policyData !== undefined) {
+    return proposal.policyData;
+  }
   if (proposal.kind === 'preference') {
     return {
       domain: 'general',
@@ -642,6 +801,28 @@ function tokensMatch(expected: string, actual: string | undefined): boolean {
   return expectedBytes.byteLength === actualBytes.byteLength && timingSafeEqual(expectedBytes, actualBytes);
 }
 
+const inferenceClientTypes = new Set(['hermes', 'codex', 'openclaw', 'claude-code']);
+
+function hasUserMemoryConfirmation(request: Request, setupToken: string | undefined, body: unknown, consumed: Set<string>): boolean {
+  if (setupToken === undefined || setupToken.length === 0) return false;
+  const actual = request.get('x-memlume-user-confirmation');
+  const issuedAt = request.get('x-memlume-user-confirmation-at');
+  if (actual === undefined || !/^[0-9a-f]{64}$/u.test(actual) || issuedAt === undefined) return false;
+  const issuedAtMs = Date.parse(issuedAt);
+  if (!Number.isFinite(issuedAtMs) || Math.abs(Date.now() - issuedAtMs) > 5 * 60 * 1000) return false;
+  const expected = createHmac('sha256', setupToken).update(canonicalJson({ body, issuedAt })).digest('hex');
+  if (!tokensMatch(expected, actual) || consumed.has(actual)) return false;
+  consumed.add(actual);
+  return true;
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
+}
+
 function bearerToken(authorization: string | undefined): string | undefined {
   const match = /^Bearer ([^\s]+)$/.exec(authorization ?? '');
   return match?.[1];
@@ -655,6 +836,11 @@ const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => 
 
   if (error instanceof SourceEventBrainMismatchError) {
     response.status(400).json({ error: 'invalid_request' });
+    return;
+  }
+
+  if (error instanceof OutcomeMemoryAccessError) {
+    response.status(403).json({ error: 'forbidden' });
     return;
   }
 

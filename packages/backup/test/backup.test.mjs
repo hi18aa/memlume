@@ -69,6 +69,13 @@ function seedDatabase(filename) {
       memoryId, text, text, text, 'pnpm', '', text,
     );
   }
+  database.prepare('INSERT INTO memory_usage (id, memory_id, task_id, agent_id, retrieval_rank, was_included, outcome, used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+    '00000000-0000-0000-0000-000000000061', '00000000-0000-7000-8000-000000000051', 'backup-task', '00000000-0000-0000-0000-000000000021', 1, 1, 'adopted', createdAt,
+  );
+  database.prepare('INSERT INTO outcomes (id, task_id, agent_id, result, correction_type, correction_data, used_memory_ids, used_tool_ids, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+    '00000000-0000-0000-0000-000000000071', 'backup-task', '00000000-0000-0000-0000-000000000021', 'success', null, null,
+    JSON.stringify(['00000000-0000-7000-8000-000000000051']), JSON.stringify(['terminal']), createdAt,
+  );
   return database;
 }
 
@@ -123,6 +130,8 @@ describe('Memlume backup bundle', () => {
     assert.deepEqual(manifest.mappings.mounts, [{ brainId: projectBrainId, agentInstallationId: '00000000-0000-7000-8000-000000000021', access: 'read_write' }, { brainId: personalBrainId, agentInstallationId: '00000000-0000-7000-8000-000000000022', access: 'read' }]);
     assert.equal(target.prepare('SELECT COUNT(*) AS count FROM memory_items').get().count, 2);
     assert.equal(target.prepare('SELECT COUNT(*) AS count FROM memory_versions').get().count, 2);
+    assert.equal(target.prepare('SELECT COUNT(*) AS count FROM memory_usage').get().count, 1);
+    assert.equal(target.prepare('SELECT COUNT(*) AS count FROM outcomes').get().count, 1);
     assert.equal(target.prepare('SELECT COUNT(*) AS count FROM brain_mounts').get().count, 2);
     assert.equal(target.prepare('SELECT COUNT(*) AS count FROM adapter_tokens').get().count, 0);
     assert.equal(readFileSync(bundlePath).includes(Buffer.from('adapter-secret-not-in-backup')), false);

@@ -94,6 +94,8 @@ describe('SQLite migration', () => {
       { id: '001_initial' },
       { id: '002_event_reference_dedup' },
       { id: '003_shared_brains' },
+      { id: '004_memory_outcomes' },
+      { id: '005_feedback_receipts' },
     ]);
 
     upgraded.exec(`
@@ -110,6 +112,8 @@ describe('SQLite migration', () => {
       { id: '001_initial' },
       { id: '002_event_reference_dedup' },
       { id: '003_shared_brains' },
+      { id: '004_memory_outcomes' },
+      { id: '005_feedback_receipts' },
     ]);
     expect(
       legacyUpgrade

@@ -1,8 +1,10 @@
 import {
   EventSchema,
   MemoryScopeSchema,
+  PolicyDataSchema,
   type Event,
   type MemoryKind,
+  type PolicyData,
   type MemoryScope,
 } from '@memlume/contracts';
 
@@ -15,13 +17,14 @@ export interface CompileMemoryInput {
 
 export interface MemoryProposal {
   readonly status: 'candidate' | 'active';
-  readonly kind: Extract<MemoryKind, 'preference' | 'fact'>;
+  readonly kind: Extract<MemoryKind, 'policy' | 'preference' | 'fact'>;
   readonly brainId: string;
   readonly scope: MemoryScope;
   readonly sourceEventId: string;
   readonly canonicalText: string;
   readonly reason: 'explicit_user_memory_request' | 'inferred_from_user_statement' | 'agent_inference_requires_review';
   readonly confidence: number;
+  readonly policyData?: PolicyData;
 }
 
 export interface IgnoredMemory {
@@ -65,9 +68,10 @@ export function compileMemory(input: CompileMemoryInput): CompiledMemory {
     return { status: 'ignore', reason: 'empty_memory_request', confidence: 0 };
   }
 
+  const policyData = compilePolicy(canonicalText);
   return {
     status: explicit ? 'active' : 'candidate',
-    kind: preferenceWords.test(canonicalText) ? 'preference' : 'fact',
+    kind: policyData === undefined ? (preferenceWords.test(canonicalText) ? 'preference' : 'fact') : 'policy',
     brainId: event.brainId,
     scope,
     sourceEventId: event.id,
@@ -78,9 +82,29 @@ export function compileMemory(input: CompileMemoryInput): CompiledMemory {
         ? 'agent_inference_requires_review'
         : 'inferred_from_user_statement',
     confidence: explicit ? 1 : agentInference ? 0.25 : 0.5,
+    ...(policyData === undefined ? {} : { policyData }),
   };
 }
 
 function normalizeText(value: string): string {
   return value.trim().replace(/[。.!！]+$/u, '').trim();
+}
+
+/**
+ * Compile only an unambiguous, positive routing rule. Everything else stays
+ * a fact/preference candidate so an agent cannot invent a high-priority rule.
+ */
+function compilePolicy(value: string): PolicyData | undefined {
+  const english = /^(?:always\s+)?(?:use|prefer)\s+([^\s.]+)\s+for\s+([a-z][a-z0-9_-]*)$/iu.exec(value);
+  const chinese = /^(?:當|若)\s*([^，,。]+?)\s*時[，,]?\s*(?:請)?(?:使用|用)\s*([^，,。\s]+)$/u.exec(value);
+  const match = english === null ? chinese : english;
+  if (match === null) return undefined;
+  const target = normalizeText(english === null ? match[2] : match[1]);
+  const intent = normalizeText(english === null ? match[1] : match[2]).replace(/\s+/gu, '_');
+  if (target === '' || intent === '') return undefined;
+  return PolicyDataSchema.parse({
+    trigger: { intents: [intent] },
+    action: { type: 'prefer_strategy', target },
+    constraints: {},
+  });
 }

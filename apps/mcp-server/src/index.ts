@@ -7,7 +7,9 @@ import {
   IsoUtcDateTimeSchema,
   JsonValueSchema,
   MemoryScopeSchema,
+  MemoryUsageOutcomeSchema,
   NonEmptyTextSchema,
+  OutcomeResultSchema,
   PolicyDataSchema,
   PreferenceDataSchema,
   UuidV7Schema,
@@ -76,6 +78,25 @@ const SearchSchema = z
   })
   .strict();
 
+const RecordMemoryUsageSchema = z.object({
+  trace_id: UuidV7Schema.describe('Trace UUIDv7 returned by memlume.resolve_context.'),
+  memory_id: UuidV7Schema.describe('Memory UUIDv7 returned by context or search.'),
+  task_id: NonEmptyTextSchema.describe('Stable task identifier.'),
+  retrieval_rank: z.number().int().nonnegative().nullable().optional().describe('Rank at retrieval time, when known.'),
+  was_included: z.boolean().describe('Whether the memory was included in the agent context.'),
+  outcome: MemoryUsageOutcomeSchema.nullable().optional().describe('adopted, ignored, or corrected when already known.'),
+}).strict();
+
+const RecordOutcomeSchema = z.object({
+  trace_id: UuidV7Schema.describe('Trace UUIDv7 returned by memlume.resolve_context; each trace accepts one task outcome.'),
+  task_id: NonEmptyTextSchema.describe('Stable task identifier.'),
+  result: OutcomeResultSchema.describe('Overall task result.'),
+  correction_type: NonEmptyTextSchema.nullable().optional().describe('Optional correction category.'),
+  correction_data: JsonValueSchema.nullable().optional().describe('Optional redacted correction details.'),
+  used_memory_ids: z.array(UuidV7Schema).min(1).max(256).describe('Memory UUIDs used by the task.'),
+  used_tool_ids: z.array(NonEmptyTextSchema).max(256).describe('Tools used by the task.'),
+}).strict();
+
 export interface McpServerOptions {
   readonly daemonUrl?: string;
   readonly token?: string;
@@ -112,7 +133,7 @@ export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL, token = proces
     'memlume.remember',
     {
       title: 'Save Memlume memory',
-      description: 'Save a policy, preference, fact, or decision through the local Memlume daemon.',
+      description: 'Submit a policy, preference, fact, or decision as a reviewable candidate through the local Memlume daemon.',
       inputSchema: RememberInputSchema,
     },
     async (input) => {
@@ -122,6 +143,52 @@ export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL, token = proces
       }
       return rememberTool(safeDaemonUrl, token, parsed.data);
     },
+  );
+
+  server.registerTool(
+    'memlume.record_memory_usage',
+    {
+      title: 'Record memory usage',
+      description: 'Record whether a retrieved shared memory was included and adopted, ignored, or corrected.',
+      inputSchema: RecordMemoryUsageSchema,
+    },
+    async ({ trace_id, memory_id, task_id, retrieval_rank, was_included, outcome }) => daemonTool(
+      safeDaemonUrl,
+      token,
+      `/v1/memories/${encodeURIComponent(memory_id)}/usage`,
+      'POST',
+      {
+        traceId: trace_id,
+        taskId: task_id,
+        retrievalRank: retrieval_rank,
+        wasIncluded: was_included,
+        outcome,
+      },
+    ),
+  );
+
+  server.registerTool(
+    'memlume.record_outcome',
+    {
+      title: 'Record task outcome',
+      description: 'Record a task result and the memories/tools that contributed to it.',
+      inputSchema: RecordOutcomeSchema,
+    },
+    async ({ trace_id, task_id, result, correction_type, correction_data, used_memory_ids, used_tool_ids }) => daemonTool(
+      safeDaemonUrl,
+      token,
+      '/v1/outcomes',
+      'POST',
+      {
+        traceId: trace_id,
+        taskId: task_id,
+        result,
+        correctionType: correction_type,
+        correctionData: correction_data,
+        usedMemoryIds: used_memory_ids,
+        usedToolIds: used_tool_ids,
+      },
+    ),
   );
 
   server.registerTool(
@@ -209,12 +276,12 @@ async function daemonWriteTool(
 
 async function rememberTool(daemonUrl: string, token: string | undefined, body: unknown): Promise<CallToolResult> {
   try {
-    const result = await requestDaemon(daemonUrl, token, '/v1/memories', 'POST', body);
+    const result = await requestDaemon(daemonUrl, token, '/v1/memories/candidate', 'POST', body);
     const sourceBrainId = responseBrainId(result, 'memory');
     if (sourceBrainId === undefined) {
       throw new DaemonRequestError('Daemon returned an invalid response.');
     }
-    return successfulTool({ ...result, status: 'saved', sourceBrainId });
+    return successfulTool({ ...result, status: 'candidate', sourceBrainId });
   } catch (error) {
     return rejectedRemember(errorMessage(error));
   }

@@ -2,11 +2,16 @@ import { describe, expect, test } from 'vitest';
 
 import {
   ContextPackSchema,
+  ContextReceiptSchema,
   DEFAULT_PERSONAL_BRAIN_ID,
   EventSchema,
   MemoryItemSchema,
   MemoryKindSchema,
   MemoryScopeSchema,
+  MemoryOutcomeSchema,
+  MemoryUsageSchema,
+  MemoryUsageOutcomeSchema,
+  OutcomeResultSchema,
   PolicyDataSchema,
 } from '../src/index.js';
 
@@ -26,6 +31,51 @@ const policy = {
 };
 
 describe('shared memory contracts', () => {
+  test('validates explainable memory usage and task outcomes', () => {
+    expect(ContextReceiptSchema.safeParse({
+      traceId: ids.trace,
+      agentId: 'hermes-installation',
+      brainIds: [DEFAULT_PERSONAL_BRAIN_ID],
+      issuedAt: '2026-07-13T00:00:00.000Z',
+      expiresAt: '2026-07-13T00:15:00.000Z',
+      consumedAt: null,
+    }).success).toBe(true);
+    expect(MemoryUsageOutcomeSchema.parse('adopted')).toBe('adopted');
+    expect(OutcomeResultSchema.parse('corrected')).toBe('corrected');
+    expect(MemoryUsageSchema.safeParse({
+      id: ids.memory,
+      memoryId: ids.memory,
+      taskId: 'task-1',
+      agentId: 'hermes-installation',
+      retrievalRank: 1,
+      wasIncluded: true,
+      outcome: 'adopted',
+      usedAt: '2026-07-13T00:00:00.000Z',
+    }).success).toBe(true);
+    expect(MemoryOutcomeSchema.safeParse({
+      id: ids.memory,
+      taskId: 'task-1',
+      agentId: 'hermes-installation',
+      result: 'corrected',
+      correctionType: 'user_correction',
+      correctionData: { note: 'Use pnpm.' },
+      usedMemoryIds: [ids.memory],
+      usedToolIds: ['terminal'],
+      createdAt: '2026-07-13T00:00:00.000Z',
+    }).success).toBe(true);
+    expect(MemoryOutcomeSchema.safeParse({
+      id: ids.memory,
+      taskId: 'task-1',
+      agentId: 'hermes-installation',
+      result: 'success',
+      correctionType: null,
+      correctionData: null,
+      usedMemoryIds: [],
+      usedToolIds: [],
+      createdAt: '2026-07-13T00:00:00.000Z',
+    }).success).toBe(false);
+  });
+
   test('accepts every supported memory kind and scoped identifiers', () => {
     expect(MemoryKindSchema.options).toEqual([
       'policy',

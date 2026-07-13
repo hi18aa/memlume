@@ -195,7 +195,7 @@ describe('Claude Code plugin adapter', () => {
     });
     assert.deepEqual(Object.keys(hooks.hooks), ['UserPromptSubmit', 'Stop', 'SessionEnd']);
     for (const event of Object.values(hooks.hooks)) {
-      assert.deepEqual(event, [{ hooks: [{ type: 'command', command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/scripts/memlume.mjs'], timeout: 3 }] }]);
+      assert.deepEqual(event, [{ hooks: [{ type: 'command', command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/scripts/memlume.mjs'], timeout: 20 }] }]);
     }
     assert.deepEqual(mcp, {
       mcpServers: {

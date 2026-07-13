@@ -151,6 +151,16 @@ async function rememberThroughMcp(daemon: RunningDaemon, token: string, brainId:
   }
 }
 
+async function approveCandidate(daemon: RunningDaemon, memoryId: string): Promise<void> {
+  const result = await requestJson(daemon, `/v1/setup/inbox/${memoryId}/approve`, {
+    method: 'POST',
+    headers: setupHeaders(),
+    body: JSON.stringify({ reason: 'Approved for the shared-brain flow.' }),
+  });
+  expect(result.response.status).toBe(200);
+  expect(result.body).toMatchObject({ memory: { id: memoryId, status: 'active' } });
+}
+
 afterEach(async () => {
   while (daemons.length > 0) {
     await daemons.pop()!.stop();
@@ -170,9 +180,32 @@ describe('shared brain adapter end-to-end flow', () => {
     await mount(daemon, hermes.id, brainId, 'read_write');
     await mount(daemon, codex.id, brainId, 'read');
 
-    await expect(rememberThroughMcp(daemon, hermes.token, brainId)).resolves.toMatchObject({
-      structuredContent: { status: 'saved', sourceBrainId: brainId },
+    const remembered = await rememberThroughMcp(daemon, hermes.token, brainId);
+    expect(remembered).toMatchObject({ structuredContent: { status: 'candidate', sourceBrainId: brainId } });
+    const rememberedBody = (remembered as { readonly structuredContent: { readonly memory: { readonly id: string } } }).structuredContent;
+    await approveCandidate(daemon, rememberedBody.memory.id);
+
+    const hermesClient = new AdapterClient({ daemonUrl: daemonUrl(daemon), token: hermes.token, outboxDirectory: temporaryDirectory() });
+    const hermesContext = await hermesClient.beforeTask({
+      envelope: envelope('hermes', 'hermes-desktop'),
+      intent: 'implementation',
+      scope: { level: 'project', projectId: 'memlume' },
+      task: null,
+      contextBudget: 100,
     });
+
+    const usage = await requestJson(daemon, `/v1/memories/${rememberedBody.memory.id}/usage`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${hermes.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ traceId: hermesContext.traceId, taskId: 'shared-task', retrievalRank: 1, wasIncluded: true, outcome: 'adopted' }),
+    });
+    expect(usage.response.status).toBe(201);
+    const outcome = await requestJson(daemon, '/v1/outcomes', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${hermes.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ traceId: hermesContext.traceId, result: 'success', taskId: 'shared-task', usedMemoryIds: [rememberedBody.memory.id], usedToolIds: ['terminal'] }),
+    });
+    expect(outcome.response.status).toBe(201);
 
     const codexClient = new AdapterClient({ daemonUrl: daemonUrl(daemon), token: codex.token, outboxDirectory: temporaryDirectory() });
     const sharedContext = await codexClient.beforeTask({
@@ -185,6 +218,13 @@ describe('shared brain adapter end-to-end flow', () => {
     expect(sharedContext.directives.map(({ text }) => text)).toEqual(['Use pnpm for this shared project.']);
 
     const isolatedClient = new AdapterClient({ daemonUrl: daemonUrl(daemon), token: claude.token, outboxDirectory: temporaryDirectory() });
+    const isolatedDirectContext = await requestJson(daemon, '/v1/context/resolve', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${claude.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ intent: 'implementation', scope: { level: 'project', projectId: 'memlume' }, task: null, contextBudget: 100 }),
+    });
+    expect(isolatedDirectContext.response.status).toBe(403);
+    expect(isolatedDirectContext.body).toEqual({ error: 'forbidden' });
     const isolatedContext = await isolatedClient.beforeTask({
       envelope: envelope('claude-code', 'claude-code'),
       intent: 'implementation',

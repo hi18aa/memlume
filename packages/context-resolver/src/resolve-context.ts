@@ -19,7 +19,7 @@ import {
   type PolicyData,
   type PolicyTrigger,
 } from '@memlume/contracts';
-import { compareMemorySpecificity, isScopeApplicable, MemoryStore } from '@memlume/retrieval';
+import { compareMemorySpecificity, isScopeApplicable, MemoryStore, OutcomeStore } from '@memlume/retrieval';
 
 /** Each estimatedTextUnit represents up to this many source-text characters; it is not a tokenizer. */
 export const ESTIMATED_TEXT_UNIT_CHARS = 4;
@@ -57,7 +57,7 @@ type ApplicablePolicy = {
 };
 
 export class ContextResolver {
-  constructor(private readonly store: MemoryStore) {}
+  constructor(private readonly store: MemoryStore, private readonly outcomes?: OutcomeStore) {}
 
   resolve(input: ResolveContextInput): ContextPack {
     const intent = NonEmptyTextSchema.parse(input.intent);
@@ -78,17 +78,23 @@ export class ContextResolver {
     const today = new Date().toISOString().slice(0, 10);
 
     const compareContextMemory = compareByBrainThenSpecificity(brainIds);
+    const feedbackScores = this.outcomes?.feedbackScores(
+      this.store.list({ brainIds, status: 'active' }).map((memory) => memory.id),
+      brainIds,
+    ) ?? new Map<string, number>();
+    const compareWithFeedback = (left: MemoryItem, right: MemoryItem): number =>
+      (feedbackScores.get(right.id) ?? 0) - (feedbackScores.get(left.id) ?? 0) || compareContextMemory(left, right);
     const applicable = this.store
       .findApplicable(scope, { status: 'active', brainIds })
       .filter((memory) => isCurrentlyValid(memory, today))
-      .sort(compareContextMemory);
+      .sort(compareWithFeedback);
     const policies = applicable
       .filter((memory) => memory.kind === 'policy')
       .map((memory) => ({ memory, data: PolicyDataSchema.parse(memory.structuredData) }))
       .filter((policy) => matchesTrigger(policy.data.trigger, triggerContext));
     const routePolicies = policies
       .filter((policy) => policy.data.action.type === 'route_tool')
-      .sort((left, right) => compareContextMemory(left.memory, right.memory));
+      .sort((left, right) => compareWithFeedback(left.memory, right.memory));
     const routeWinner = routePolicies[0];
     const requiresSingleRoute = routePolicies.some((policy) => policy.data.constraints.exclusive === true);
     const exclusions = !requiresSingleRoute || routeWinner === undefined
@@ -111,7 +117,7 @@ export class ContextResolver {
         return data.success && (data.data.contexts === undefined || data.data.contexts.includes(intent));
       })
       .map(toPreference);
-    const facts = findFacts(this.store, input.task, scope, today, brainIds, compareContextMemory);
+    const facts = findFacts(this.store, input.task, scope, today, brainIds, compareWithFeedback);
     const decisions = applicable.filter((memory) => memory.kind === 'decision').map(toDecision);
 
     const pack = {

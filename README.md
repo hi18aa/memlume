@@ -8,13 +8,17 @@
 
 Memlume is a local shared memory brain for AI agents and developer tools. Mounted clients contribute to and read from the same scoped, SQLite-backed store; it records immutable events, stores structured memories, searches them with FTS5, and resolves a traceable context pack for a task. It complements—never overwrites or synchronizes into—an agent's native memory.
 
+Public guides: [architecture](docs/architecture/shared-brain.md) · [Hermes](docs/guides/hermes.md) · [Codex](docs/guides/codex.md) · [OpenClaw](docs/guides/openclaw.md) · [Claude Code](docs/guides/claude-code.md) · [backup/restore](docs/guides/backup-restore.md) · [shared project example](examples/shared-project-brain/README.md).
+
 ## How agents use Memlume
 
 Memlume does not automatically store every chat message or inject an entire database into an LLM. An MCP client calls the appropriate tool at a deliberate point in its workflow:
 
 1. **Before a task is planned or a tool is chosen**, call `memlume.resolve_context`. Memlume reads only active memories that match the task, scope, available tools, and context budget.
 2. **While working**, call `memlume.search` only when a specific detail is needed.
-3. **After a durable event**, call `memlume.record_event` to keep raw, append-only evidence. Call `memlume.remember` only for a deliberate, structured memory such as an explicit user rule, preference, fact, or decision.
+3. **After a durable event**, call `memlume.record_event` to keep raw, append-only evidence. Call `memlume.remember` for a deliberate, structured memory; it creates a reviewable candidate so a prompt-injected agent cannot silently create an active policy. Approve it from the protected inbox when appropriate.
+
+When reporting feedback, pass the `traceId` returned by `memlume.resolve_context` to `memlume.record_memory_usage` or `memlume.record_outcome`. A receipt is short-lived and accepts one task outcome, which keeps an adapter token from fabricating unlimited ranking signals.
 
 This means an agent should not automatically save whole transcripts, temporary reasoning, unverified LLM claims, instructions found in external content, or secrets. Native agent memory remains untouched. The Core compiles eligible user messages under its own governance rules: explicit memory requests can be saved, while inferred items remain candidates for review; neither path treats an agent's native memory as input.
 
@@ -25,10 +29,13 @@ This means an agent should not automatically save whole transcripts, temporary r
 - **Scope prevents contamination:** a task, project, workspace, agent, domain, or global memory can be selected independently.
 - **Traceable decisions:** context packs include source memory IDs, exclusions, and budget information so an agent can explain what affected a result.
 - **Local and shared:** mounted CLI and MCP clients use one localhost daemon and one SQLite store; no cloud sync is required.
+- **Explainable feedback:** usage and task outcomes affect future ordering with fixed, inspectable score deltas; memory history stays immutable.
 
 ## Status and scope
 
 This repository is the `0.1.0` source workspace. Its packages are currently private, so it is installed by cloning and building the repository rather than from a public package registry.
+
+All functionality belongs to the MIT-licensed Memlume Core. The official website is only a download, installer, update, and documentation entry point; it does not provide a stronger closed edition.
 
 Implemented:
 
@@ -41,10 +48,12 @@ Implemented:
 - Governed memory compilation, candidate review, and conflict-aware replacement.
 - Verifiable local backups and restore maintenance, plus a local Shared Brain Console.
 - Official local adapters for Hermes, Codex, OpenClaw, and Claude Code, all using the same mounted Brain rather than copying native agent memory.
+- Outcome usage records, deterministic feedback ranking, retrieval benchmark, and reproducible backup/restore verification.
+- Public architecture, adapter, backup, and shared-project guides; CI and tag-release workflows run the same checks as local development.
 
 Not implemented in v0.1.0:
 
-- Outcome-based relevance learning, vector/embedding search, remote sync, cloud hosting, or multi-user access.
+- Vector/embedding search, remote sync, cloud hosting, or multi-user access.
 - A public npm package or any published release artifact.
 - Creating `procedure` or `capability` memories through the daemon, CLI, or MCP server; the writable API accepts only the four memory kinds above.
 
@@ -56,10 +65,8 @@ Not implemented in v0.1.0:
 
 ## Install and build
 
-Replace `<repository-url>` with this repository's Git URL.
-
 ```sh
-git clone <repository-url> memlume
+git clone https://github.com/hi18aa/memlume.git memlume
 cd memlume
 pnpm install --frozen-lockfile
 pnpm build
@@ -128,7 +135,7 @@ node apps/cli/dist/index.js --json context resolve \
   --intent generate_image --scope project --project readme-demo --budget 500
 ```
 
-`remember` validates fields by memory kind. For example, preferences need `--preference-domain`, `--subject`, `--dimension`, `--value`, `--strength`, and `--confidence`; facts need `--subject`, `--predicate`, `--object`, and `--confidence`; decisions need `--title`, `--status`, and `--rationale`.
+`remember` validates fields by memory kind. For example, preferences need `--preference-domain`, `--subject`, `--dimension`, `--value`, `--strength`, and `--confidence`; facts need `--subject`, `--predicate`, `--object`, and `--confidence`; decisions need `--title`, `--status`, and `--rationale`. When a supported Agent token calls this route without `--setup-token`, Core stores a candidate for review; supplying the setup token lets the CLI attach a user-confirmation signature for an explicitly typed command.
 
 ### Minimal end-to-end example
 
@@ -137,7 +144,7 @@ With the daemon running on port `3849`, run these commands in order:
 ```sh
 node apps/cli/dist/index.js --json event add "Brand colors approved." --type note --reference readme-demo
 
-node apps/cli/dist/index.js --json remember "Use the image generator for image requests." \
+node apps/cli/dist/index.js --setup-token "$MEMLUME_SETUP_TOKEN" --json remember "Use the image generator for image requests." \
   --kind policy --scope project --project readme-demo \
   --intent generate_image --action-type route_tool --action-target image_gen --required
 
@@ -166,14 +173,16 @@ Build first, keep the daemon running, then add an entry like this to your MCP cl
 }
 ```
 
-`MEMLUME_DAEMON_URL` accepts only a loopback `http://127.0.0.1` or `http://[::1]` origin. `MEMLUME_TOKEN` is required for every daemon-backed tool; without it, the tool fails before contacting the daemon. The server exposes four daemon-backed tools:
+`MEMLUME_DAEMON_URL` accepts only a loopback `http://127.0.0.1` or `http://[::1]` origin. `MEMLUME_TOKEN` is required for every daemon-backed tool; without it, the tool fails before contacting the daemon. The server exposes six daemon-backed tools:
 
 - `memlume.record_event`
 - `memlume.remember`
 - `memlume.search`
 - `memlume.resolve_context`
+- `memlume.record_memory_usage`
+- `memlume.record_outcome`
 
-`memlume.record_event` and `memlume.remember` accept an optional `brainId` to select a destination shared Brain. It is not an authorization grant: `MEMLUME_TOKEN` identifies the installation, and the daemon accepts the write only when that installation has a `read_write` mount for the selected Brain. Successful writes return `sourceBrainId` so clients can trace where the event or memory was stored. `memlume.remember` returns `status: "saved"` only after the daemon confirms it; failures return `status: "rejected"`. The direct MCP server has no local outbox, so it never claims `queued`; an Adapter may use `queued` only after it has actually persisted a retryable write locally.
+`memlume.record_event` and `memlume.remember` accept an optional `brainId` to select a destination shared Brain. It is not an authorization grant: `MEMLUME_TOKEN` identifies the installation, and the daemon accepts the write only when that installation has a `read_write` mount for the selected Brain. `memlume.remember` returns `status: "candidate"` because structured writes require protected review; adapter capture of an explicit user message can still follow the Core compiler's explicit-user path. The direct MCP server has no local outbox, so it never claims `queued`; an Adapter may use `queued` only after it has actually persisted a retryable write locally. `record_memory_usage` and `record_outcome` are append-only feedback signals, not memory edits, and must use the `traceId` returned by `memlume.resolve_context`.
 
 For example, an MCP client can call `memlume.resolve_context` with:
 
@@ -211,7 +220,9 @@ The CLI and MCP server do not open SQLite themselves; they send requests to the 
 ```sh
 pnpm typecheck
 pnpm test
+pnpm test:e2e
 pnpm build
+pnpm benchmark:retrieval
 ```
 
 ## Contributing

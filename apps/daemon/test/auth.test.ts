@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createHmac } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -46,11 +47,12 @@ function adapterHeaders(token?: string): HeadersInit {
 async function registerInstallation(
   daemon: RunningDaemon,
   installationId = 'desktop',
+  clientType = 'test',
 ): Promise<{ readonly id: string; readonly token: string }> {
   const registration = await requestJson(daemon, '/v1/setup/installations', {
     method: 'POST',
     headers: setupHeaders(),
-    body: JSON.stringify({ clientType: 'codex', installationId, profileId: 'default' }),
+    body: JSON.stringify({ clientType, installationId, profileId: 'default' }),
   });
   expect(registration.response.status).toBe(201);
   const installation = registration.body.installation as { readonly id: string };
@@ -123,6 +125,50 @@ afterEach(async () => {
 });
 
 describe('daemon local authentication and setup API', () => {
+  test('keeps direct structured writes from supported agents as candidates without user confirmation', async () => {
+    const daemon = await start({ setupToken: SETUP_TOKEN });
+    const installation = await registerInstallation(daemon, 'governed-agent', 'codex');
+    await mountBrain(daemon, installation.id, DEFAULT_PERSONAL_BRAIN_ID, 'read_write');
+    const body = {
+      kind: 'fact',
+      canonicalText: 'A direct agent write requires review.',
+      structuredData: { subject: 'write', predicate: 'requires', object: 'review', confidence: 1 },
+      scope: { level: 'global' },
+    };
+    const candidate = await requestJson(daemon, '/v1/memories', {
+      method: 'POST',
+      headers: adapterHeaders(installation.token),
+      body: JSON.stringify(body),
+    });
+    expect(candidate.response.status).toBe(201);
+    expect(candidate.body).toMatchObject({ memory: { status: 'candidate' } });
+
+    const confirmationAt = new Date().toISOString();
+    const confirmation = createHmac('sha256', SETUP_TOKEN).update(JSON.stringify({
+      body: {
+        canonicalText: body.canonicalText,
+        kind: body.kind,
+        scope: body.scope,
+        structuredData: { confidence: 1, object: 'review', predicate: 'requires', subject: 'write' },
+      },
+      issuedAt: confirmationAt,
+    })).digest('hex');
+    const confirmed = await requestJson(daemon, '/v1/memories', {
+      method: 'POST',
+      headers: { ...adapterHeaders(installation.token), 'x-memlume-user-confirmation': confirmation, 'x-memlume-user-confirmation-at': confirmationAt },
+      body: JSON.stringify(body),
+    });
+    expect(confirmed.response.status).toBe(201);
+    expect(confirmed.body).toMatchObject({ memory: { status: 'active' } });
+
+    const replay = await requestJson(daemon, '/v1/memories', {
+      method: 'POST',
+      headers: { ...adapterHeaders(installation.token), 'x-memlume-user-confirmation': confirmation, 'x-memlume-user-confirmation-at': confirmationAt },
+      body: JSON.stringify(body),
+    });
+    expect(replay.response.status).toBe(201);
+    expect(replay.body).toMatchObject({ memory: { status: 'candidate' } });
+  });
   test('keeps health public even when a setup token is configured', async () => {
     const daemon = await start({ setupToken: SETUP_TOKEN });
 
@@ -248,6 +294,8 @@ describe('daemon local authentication and setup API', () => {
     expect(memoryWithoutBearer.response.status).toBe(401);
     expect(memoryWithoutBearer.body).toEqual({ error: 'unauthorized' });
 
+    await mountBrain(daemon, registration.id, DEFAULT_PERSONAL_BRAIN_ID, 'read');
+
     const valid = await requestJson(daemon, '/v1/context/resolve', {
       method: 'POST',
       headers: adapterHeaders(registration.token),
@@ -366,23 +414,30 @@ describe('daemon local authentication and setup API', () => {
     const memoryId = ((captured.body.capture as { readonly memoryId: string })).memoryId;
 
     const unmountedCandidates = await requestJson(daemon, '/v1/memories/candidates', { headers: adapterHeaders(reader.token) });
-    expect(unmountedCandidates.response.status).toBe(200);
-    expect(unmountedCandidates.body).toEqual({ memories: [] });
+    expect(unmountedCandidates.response.status).toBe(403);
+    expect(unmountedCandidates.body).toEqual({ error: 'forbidden' });
     const unmountedHistory = await requestJson(daemon, `/v1/memories/${memoryId}/history`, { headers: adapterHeaders(reader.token) });
     expect(unmountedHistory.response.status).toBe(404);
     const unmountedReject = await requestJson(daemon, `/v1/memories/${memoryId}/reject`, {
       method: 'POST',
-      headers: adapterHeaders(reader.token),
+      headers: { ...adapterHeaders(reader.token), 'x-memlume-setup-token': SETUP_TOKEN },
       body: JSON.stringify({ actor: 'reader', reason: 'Must not inspect another brain.' }),
     });
     expect(unmountedReject.response.status).toBe(404);
+
+    const adapterOnlyReview = await requestJson(daemon, `/v1/memories/${memoryId}/reject`, {
+      method: 'POST',
+      headers: adapterHeaders(writer.token),
+      body: JSON.stringify({ actor: 'writer', reason: 'Adapter tokens cannot review candidates.' }),
+    });
+    expect(adapterOnlyReview.response.status).toBe(401);
 
     await mountBrain(daemon, reader.id, DEFAULT_PERSONAL_BRAIN_ID, 'read');
     const mountedCandidates = await requestJson(daemon, '/v1/memories/candidates', { headers: adapterHeaders(reader.token) });
     expect(mountedCandidates.body).toMatchObject({ memories: [expect.objectContaining({ id: memoryId, status: 'candidate' })] });
     const readOnlyReject = await requestJson(daemon, `/v1/memories/${memoryId}/reject`, {
       method: 'POST',
-      headers: adapterHeaders(reader.token),
+      headers: { ...adapterHeaders(reader.token), 'x-memlume-setup-token': SETUP_TOKEN },
       body: JSON.stringify({ actor: 'reader', reason: 'Read access cannot review.' }),
     });
     expect(readOnlyReject.response.status).toBe(403);
@@ -431,26 +486,24 @@ describe('daemon local authentication and setup API', () => {
     const isolatedSearch = await requestJson(daemon, '/v1/memories/search?q=pnpm', {
       headers: adapterHeaders(isolatedReader.token),
     });
-    expect(isolatedSearch.response.status).toBe(200);
-    expect(isolatedSearch.body).toEqual({ memories: [] });
+    expect(isolatedSearch.response.status).toBe(403);
+    expect(isolatedSearch.body).toEqual({ error: 'forbidden' });
   });
 
-  test('returns an empty context pack for an authenticated installation with no mounts', async () => {
+  test('rejects direct context resolution for an authenticated installation with no mounts', async () => {
     const daemon = await start({ setupToken: SETUP_TOKEN });
     const writer = await registerInstallation(daemon, 'personal-writer');
     const noMountReader = await registerInstallation(daemon, 'no-mount-reader');
     await mountBrain(daemon, writer.id, DEFAULT_PERSONAL_BRAIN_ID, 'read_write');
     await savePolicy(daemon, writer.token, DEFAULT_PERSONAL_BRAIN_ID, 'Personal directive must stay private.');
 
-    const context = await resolveContext(daemon, noMountReader.token);
-    expect(context).toMatchObject({
-      directives: [],
-      procedures: [],
-      preferences: [],
-      knowledge: [],
-      decisions: [],
-      explanation: { sourceMemoryIds: [] },
+    const context = await requestJson(daemon, '/v1/context/resolve', {
+      method: 'POST',
+      headers: adapterHeaders(noMountReader.token),
+      body: JSON.stringify({ intent: 'context_test', scope: { level: 'global' }, task: null, contextBudget: 100 }),
     });
+    expect(context.response.status).toBe(403);
+    expect(context.body).toEqual({ error: 'forbidden' });
   });
 
   test('resolves only a project mounted brain and excludes personal and domain brains', async () => {

@@ -62,7 +62,7 @@ async function connect(options: { readonly token?: string } = { token: 'mcp-adap
 }
 
 describe('Memlume MCP server', () => {
-  test('lists the four daemon-backed tools with required resolve-context schema', async () => {
+  test('lists daemon-backed tools with required resolve-context schema', async () => {
     const { client, server } = await connect();
 
     await expect(client.listTools()).resolves.toMatchObject({
@@ -74,6 +74,8 @@ describe('Memlume MCP server', () => {
         expect.objectContaining({ name: 'memlume.record_event' }),
         expect.objectContaining({ name: 'memlume.remember' }),
         expect.objectContaining({ name: 'memlume.search' }),
+        expect.objectContaining({ name: 'memlume.record_memory_usage' }),
+        expect.objectContaining({ name: 'memlume.record_outcome' }),
       ]),
     });
     await server.close();
@@ -143,6 +145,38 @@ describe('Memlume MCP server', () => {
     await server.close();
   });
 
+  test('posts explainable memory usage and task outcome feedback', async () => {
+    const { client, server } = await connect();
+    const memoryId = '018f9d4e-7c2a-7b91-8dc0-61749dbcc01e';
+    const traceId = '018f9d4e-7c2f-7b91-8dc0-61749dbcc01e';
+    response = { status: 201, body: { usage: { id: memoryId }, outcome: { id: memoryId } } };
+
+    await client.callTool({
+      name: 'memlume.record_memory_usage',
+      arguments: { trace_id: traceId, memory_id: memoryId, task_id: 'task-feedback', retrieval_rank: 1, was_included: true, outcome: 'adopted' },
+    });
+    await client.callTool({
+      name: 'memlume.record_outcome',
+      arguments: { trace_id: traceId, task_id: 'task-feedback', result: 'success', used_memory_ids: [memoryId], used_tool_ids: ['terminal'] },
+    });
+
+    expect(requests).toEqual([
+      {
+        method: 'POST',
+        url: `/v1/memories/${memoryId}/usage`,
+        authorization: 'Bearer mcp-adapter-token',
+        body: { traceId, taskId: 'task-feedback', retrievalRank: 1, wasIncluded: true, outcome: 'adopted' },
+      },
+      {
+        method: 'POST',
+        url: '/v1/outcomes',
+        authorization: 'Bearer mcp-adapter-token',
+        body: { traceId, taskId: 'task-feedback', result: 'success', usedMemoryIds: [memoryId], usedToolIds: ['terminal'] },
+      },
+    ]);
+    await server.close();
+  });
+
   test('record_event forwards an explicit brain selection and returns its source brain', async () => {
     const { client, server } = await connect();
     const body = { event: { id: 'event-1', eventType: 'decision', brainId: PROJECT_BRAIN_ID } };
@@ -200,13 +234,13 @@ describe('Memlume MCP server', () => {
         },
       }),
     ).resolves.toMatchObject({
-      structuredContent: { ...body, status: 'saved', sourceBrainId: PROJECT_BRAIN_ID },
-      content: [{ type: 'text', text: JSON.stringify({ ...body, status: 'saved', sourceBrainId: PROJECT_BRAIN_ID }) }],
+      structuredContent: { ...body, status: 'candidate', sourceBrainId: PROJECT_BRAIN_ID },
+      content: [{ type: 'text', text: JSON.stringify({ ...body, status: 'candidate', sourceBrainId: PROJECT_BRAIN_ID }) }],
     });
     expect(requests).toEqual([
       {
         method: 'POST',
-        url: '/v1/memories',
+        url: '/v1/memories/candidate',
         authorization: 'Bearer mcp-adapter-token',
         body: {
           brainId: PROJECT_BRAIN_ID,
@@ -268,7 +302,7 @@ describe('Memlume MCP server', () => {
     expect(requests).toEqual([
       {
         method: 'POST',
-        url: '/v1/memories',
+        url: '/v1/memories/candidate',
         authorization: 'Bearer mcp-adapter-token',
         body: {
           brainId: PROJECT_BRAIN_ID,

@@ -223,7 +223,7 @@ describe('localhost daemon API', () => {
 
     const approved = await requestJson(daemon, `/v1/memories/${candidateId}/approve`, {
       method: 'POST',
-      headers: { ...headers, 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json', 'x-memlume-setup-token': SETUP_TOKEN },
       body: JSON.stringify({
         actor: 'test-user',
         reason: 'The user corrected the package manager.',
@@ -315,7 +315,7 @@ describe('localhost daemon API', () => {
 
     const approved = await requestJson(daemon, `/v1/memories/${candidateId}/approve`, {
       method: 'POST',
-      headers: { ...headers, 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json', 'x-memlume-setup-token': SETUP_TOKEN },
       body: JSON.stringify({ actor: 'test-user', reason: 'Approve the duplicated candidate.' }),
     });
 
@@ -353,7 +353,7 @@ describe('localhost daemon API', () => {
 
     const invalidSupersede = await requestJson(daemon, `/v1/memories/${candidateId}/approve`, {
       method: 'POST',
-      headers: { ...headers, 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json', 'x-memlume-setup-token': SETUP_TOKEN },
       body: JSON.stringify({ actor: 'test-user', reason: 'This needs no replacement.', supersedeMemoryId: unrelatedId }),
     });
     expect(invalidSupersede.response.status).toBe(400);
@@ -361,13 +361,13 @@ describe('localhost daemon API', () => {
 
     const approved = await requestJson(daemon, `/v1/memories/${candidateId}/approve`, {
       method: 'POST',
-      headers: { ...headers, 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json', 'x-memlume-setup-token': SETUP_TOKEN },
       body: JSON.stringify({ actor: 'test-user', reason: 'Approve the candidate.' }),
     });
     expect(approved.response.status).toBe(200);
     const repeatedApproval = await requestJson(daemon, `/v1/memories/${candidateId}/approve`, {
       method: 'POST',
-      headers: { ...headers, 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json', 'x-memlume-setup-token': SETUP_TOKEN },
       body: JSON.stringify({ actor: 'test-user', reason: 'Repeat approval.' }),
     });
     expect(repeatedApproval.response.status).toBe(409);
@@ -386,13 +386,13 @@ describe('localhost daemon API', () => {
     const rejectedId = (rejected.body as { readonly capture: { readonly memoryId: string } }).capture.memoryId;
     const firstReject = await requestJson(daemon, `/v1/memories/${rejectedId}/reject`, {
       method: 'POST',
-      headers: { ...headers, 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json', 'x-memlume-setup-token': SETUP_TOKEN },
       body: JSON.stringify({ actor: 'test-user', reason: 'Reject this inference.' }),
     });
     expect(firstReject.response.status).toBe(200);
     const repeatedReject = await requestJson(daemon, `/v1/memories/${rejectedId}/reject`, {
       method: 'POST',
-      headers: { ...headers, 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json', 'x-memlume-setup-token': SETUP_TOKEN },
       body: JSON.stringify({ actor: 'test-user', reason: 'Repeat rejection.' }),
     });
     expect(repeatedReject.response.status).toBe(409);

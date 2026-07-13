@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command, CommanderError } from 'commander';
+import { createHmac } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { access, cp, mkdir, readFile, readdir, rmdir, rm, unlink, writeFile } from 'node:fs/promises';
@@ -161,7 +162,12 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
     .action(async (content: string, options: RememberOptions, command: Command) => {
       const global = command.optsWithGlobals<GlobalOptions>();
       const body = memoryRequest(content, options);
-      const result = await request(global.url, adapterToken(global.token, environment), '/v1/memories', 'POST', body, runtime);
+      const confirmation = userMemoryConfirmation(global.setupToken ?? environment.MEMLUME_SETUP_TOKEN, body);
+      const confirmationHeaders = confirmation === undefined ? undefined : {
+        'x-memlume-user-confirmation': confirmation.signature,
+        'x-memlume-user-confirmation-at': confirmation.issuedAt,
+      };
+      const result = await request(global.url, adapterToken(global.token, environment), '/v1/memories', 'POST', body, runtime, confirmationHeaders);
       printResult(result, global.json, io.stdout, (response) => `Saved ${options.kind} memory ${nestedId(response, 'memory') ?? 'memory'}.`);
     });
 
@@ -774,8 +780,8 @@ function requiredFullBackupPassword(options: PasswordOptions, environment: NodeJ
   return password;
 }
 
-async function request(url: string, token: string, path: string, method: 'GET' | 'POST', body: unknown, runtime: CliRuntime): Promise<unknown> {
-  const response = await sendRequest(url, path, method, { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }) }, body === undefined ? undefined : JSON.stringify(body), runtime);
+async function request(url: string, token: string, path: string, method: 'GET' | 'POST', body: unknown, runtime: CliRuntime, extraHeaders?: Record<string, string>): Promise<unknown> {
+  const response = await sendRequest(url, path, method, { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...extraHeaders }, body === undefined ? undefined : JSON.stringify(body), runtime);
   if (response.ok) {
     return responseJson(response);
   }
@@ -784,6 +790,19 @@ async function request(url: string, token: string, path: string, method: 'GET' |
     throw new Error('adapter authentication failed. Create a new token through the protected setup API and update MEMLUME_TOKEN.');
   }
   throw new DaemonResponseError(response.status, daemonErrorCode(result));
+}
+
+function userMemoryConfirmation(setupToken: string | undefined, body: unknown): { readonly signature: string; readonly issuedAt: string } | undefined {
+  if (setupToken === undefined || setupToken.trim() === '') return undefined;
+  const issuedAt = new Date().toISOString();
+  return { signature: createHmac('sha256', setupToken).update(canonicalJson({ body, issuedAt })).digest('hex'), issuedAt };
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
 }
 
 async function requestPublicJson(url: string, path: string, runtime: CliRuntime): Promise<unknown> {
