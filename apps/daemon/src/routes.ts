@@ -24,8 +24,9 @@ import { EventBrainConflictError, EventJournal } from '@memlume/event-journal';
 import { assessMemoryConflict, compileMemory, type MemoryProposal } from '@memlume/memory-compiler';
 import { MemoryStore, SourceEventBrainMismatchError } from '@memlume/retrieval';
 import { BrainStore } from '@memlume/shared-brains';
+import { RestoreRecoveryError } from '@memlume/backup';
 import { timingSafeEqual } from 'node:crypto';
-import { type ErrorRequestHandler, type Express, type RequestHandler } from 'express';
+import express, { type ErrorRequestHandler, type Express, type Request, type RequestHandler, type Response } from 'express';
 import { z, ZodError } from 'zod';
 
 const AppendEventRequestSchema = z
@@ -105,6 +106,10 @@ const RegisterInstallationRequestSchema = z
 
 const MountBrainRequestSchema = BrainMountSchema.strict();
 const InstallationParametersSchema = z.object({ agentInstallationId: UuidV7Schema }).strict();
+const CreateBackupRequestSchema = z.object({
+  brainId: UuidV7Schema.optional(),
+  password: z.string().min(1).max(1024).optional(),
+}).strict();
 
 export interface DaemonServices {
   readonly journal: EventJournal;
@@ -112,6 +117,15 @@ export interface DaemonServices {
   readonly resolver: ContextResolver;
   readonly brains: BrainStore;
   readonly setupToken?: string;
+  readonly backup: BackupLifecycle;
+}
+
+export interface BackupLifecycle {
+  create(input: { readonly brainId?: string; readonly password?: string }): Promise<Buffer>;
+  beginRestore(): boolean;
+  cancelRestore(): void;
+  restore(input: { readonly bundle: Uint8Array; readonly password?: string }): Promise<void>;
+  diagnostics(): unknown;
 }
 
 export interface AuthenticatedRequestLocals {
@@ -145,6 +159,48 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     const { agentInstallationId } = InstallationParametersSchema.parse(request.params);
     response.status(201).json(services.brains.rotateToken(agentInstallationId));
   });
+  app.get('/v1/setup/diagnostics', requireSetup, (_request, response) => {
+    response.json(services.backup.diagnostics());
+  });
+  app.post('/v1/setup/backups', requireSetup, async (request, response) => {
+    const input = CreateBackupRequestSchema.parse(request.body);
+    const bundle = await services.backup.create(input);
+    response
+      .status(200)
+      .type('application/vnd.memlume')
+      .set('content-disposition', 'attachment; filename="memlume-backup.memlume"')
+      .send(bundle);
+  });
+  app.post(
+    '/v1/setup/backups/restore',
+    requireSetup,
+    beginBackupRestore(services.backup),
+    express.raw({ type: ['application/vnd.memlume', 'application/octet-stream'], limit: '64mb' }),
+    cancelBackupRestore(services.backup),
+    async (request: Request, response: Response) => {
+      if (!Buffer.isBuffer(request.body) || request.body.byteLength === 0) {
+        services.backup.cancelRestore();
+        response.status(400).json({ error: 'invalid_backup' });
+        return;
+      }
+      const password = request.get('x-memlume-backup-password');
+      if (password !== undefined && (password.length === 0 || password.length > 1024)) {
+        services.backup.cancelRestore();
+        response.status(400).json({ error: 'invalid_backup' });
+        return;
+      }
+      try {
+        await services.backup.restore({ bundle: request.body, ...(password === undefined ? {} : { password }) });
+        response.json({ status: 'restored' });
+      } catch (error) {
+        if (error instanceof RestoreRecoveryError) {
+          response.status(503).json({ error: 'restore_recovery_required' });
+          return;
+        }
+        response.status(400).json({ error: 'invalid_backup' });
+      }
+    },
+  );
 
   const requireAdapter = requireAdapterToken(services.brains);
   app.post('/v1/events', requireAdapter, (request, response) => {
@@ -369,6 +425,24 @@ function requireSetupToken(setupToken: string | undefined): RequestHandler {
       return;
     }
     next();
+  };
+}
+
+function beginBackupRestore(backup: BackupLifecycle): RequestHandler {
+  return (request, response, next) => {
+    if (!backup.beginRestore()) {
+      response.status(503).json({ error: 'restore_in_progress' });
+      return;
+    }
+    request.once('aborted', () => backup.cancelRestore());
+    next();
+  };
+}
+
+function cancelBackupRestore(backup: BackupLifecycle): ErrorRequestHandler {
+  return (error, _request, _response, next) => {
+    backup.cancelRestore();
+    next(error);
   };
 }
 

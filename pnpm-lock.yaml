@@ -27,6 +27,9 @@ importers:
 
   apps/daemon:
     dependencies:
+      '@memlume/backup':
+        specifier: workspace:*
+        version: link:../../packages/backup
       '@memlume/context-resolver':
         specifier: workspace:*
         version: link:../../packages/context-resolver

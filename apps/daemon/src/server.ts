@@ -1,12 +1,16 @@
-import { openDatabase } from '@memlume/database/internal';
+import { createBackup, restoreBackup, RestoreRecoveryError } from '@memlume/backup';
+import { openDatabase, type SqliteDatabase } from '@memlume/database/internal';
 import { ContextResolver } from '@memlume/context-resolver';
 import { EventJournal } from '@memlume/event-journal';
 import { MemoryStore } from '@memlume/retrieval';
 import { BrainStore } from '@memlume/shared-brains';
 import express, { type Express } from 'express';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { type AddressInfo, type Server } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-import { registerRoutes } from './routes.js';
+import { registerRoutes, type BackupLifecycle } from './routes.js';
 
 export interface DaemonOptions {
   readonly databasePath: string;
@@ -29,32 +33,186 @@ export interface RunningDaemon extends Daemon {
 }
 
 export function createDaemon({ databasePath, setupToken }: DaemonOptions): Daemon {
-  const database = openDatabase(databasePath);
+  let runtime: DaemonRuntime | undefined;
+  let activeRouter: Express;
+  let restoring = false;
   let closed = false;
+  let activeRequests = 0;
+  const drainWaiters: Array<() => void> = [];
+  const app = express();
+  app.disable('x-powered-by');
+
+  const backup: BackupLifecycle = {
+    async create({ brainId, password }) {
+      const current = requireRuntime(runtime);
+      const directory = mkdtempSync(join(tmpdir(), 'memlume-daemon-backup-'));
+      const outputPath = join(directory, 'backup.memlume');
+      try {
+        await createBackup({
+          database: current.database,
+          outputPath,
+          ...(brainId === undefined ? {} : { brainId }),
+          ...(password === undefined ? {} : { password }),
+        });
+        return readFileSync(outputPath);
+      } finally {
+        rmSync(directory, { force: true, recursive: true });
+      }
+    },
+    beginRestore() {
+      if (restoring || closed) {
+        return false;
+      }
+      restoring = true;
+      return true;
+    },
+    cancelRestore() {
+      if (runtime !== undefined && !closed) {
+        restoring = false;
+      }
+    },
+    async restore({ bundle, password }) {
+      if (!restoring || closed) {
+        throw new Error('Daemon restore is unavailable.');
+      }
+      const directory = mkdtempSync(join(tmpdir(), 'memlume-daemon-restore-'));
+      const backupPath = join(directory, 'restore.memlume');
+      let paused = false;
+      let recoveryFailed = false;
+      try {
+        writeFileSync(backupPath, bundle, { mode: 0o600 });
+        try {
+          await restoreBackup({
+            backupPath,
+            databasePath,
+            ...(password === undefined ? {} : { password }),
+            pauseWrites: async () => {
+              await waitForExistingRequests();
+              const current = requireRuntime(runtime);
+              paused = true;
+              current.database.close();
+              runtime = undefined;
+              return () => {
+                if (closed) {
+                  return;
+                }
+                const reopened = openRuntime();
+                runtime = reopened;
+                activeRouter = reopened.router;
+              };
+            },
+          });
+        } catch (error) {
+          recoveryFailed = error instanceof RestoreRecoveryError;
+          throw error;
+        }
+      } finally {
+        rmSync(directory, { force: true, recursive: true });
+        if (paused && runtime === undefined && !closed && !recoveryFailed) {
+          const reopened = openRuntime();
+          runtime = reopened;
+          activeRouter = reopened.router;
+        }
+        restoring = recoveryFailed || runtime === undefined && !closed;
+      }
+    },
+    diagnostics() {
+      const current = requireRuntime(runtime);
+      const integrity = current.database.pragma('integrity_check', { simple: true }) === 'ok' ? 'ok' : 'failed';
+      const migrations = current.database.prepare('SELECT id FROM schema_migrations ORDER BY id').pluck().all() as string[];
+      const mounts = current.database
+        .prepare('SELECT brain_id AS brainId, agent_installation_id AS agentInstallationId, access FROM brain_mounts ORDER BY brain_id, agent_installation_id')
+        .all();
+      return {
+        health: 'ok' as const,
+        schema: { migrations },
+        integrity,
+        brains: current.brains.listBrains(),
+        mounts,
+      };
+    },
+  };
 
   try {
-    const journal = new EventJournal(database);
-    const store = new MemoryStore(database);
-    const resolver = new ContextResolver(store);
-    const brains = new BrainStore(database);
-    const app = express();
-    app.disable('x-powered-by');
-    app.use(express.json({ limit: '1mb' }));
-    registerRoutes(app, { journal, store, resolver, brains, setupToken });
+    const opened = openRuntime();
+    runtime = opened;
+    activeRouter = opened.router;
+
+    app.use((request, response, next) => {
+      if (restoring) {
+        response.status(503).json({ error: 'restore_in_progress' });
+        return;
+      }
+      activeRequests += 1;
+      let released = false;
+      const release = () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        activeRequests -= 1;
+        if (activeRequests <= 1) {
+          drainWaiters.splice(0).forEach((resolve) => resolve());
+        }
+      };
+      response.once('finish', release);
+      response.once('close', release);
+      next();
+    });
+    app.use((request, response, next) => activeRouter(request, response, next));
 
     return {
       app,
       close() {
         if (!closed) {
           closed = true;
-          database.close();
+          runtime?.database.close();
+          runtime = undefined;
         }
       },
     };
   } catch (error) {
-    database.close();
+    runtime?.database.close();
     throw error;
   }
+
+  function openRuntime(): DaemonRuntime {
+    const database = openDatabase(databasePath);
+    try {
+      const journal = new EventJournal(database);
+      const store = new MemoryStore(database);
+      const resolver = new ContextResolver(store);
+      const brains = new BrainStore(database);
+      const router = express();
+      router.disable('x-powered-by');
+      router.use(express.json({ limit: '1mb' }));
+      registerRoutes(router, { journal, store, resolver, brains, setupToken, backup });
+      return { database, brains, router };
+    } catch (error) {
+      database.close();
+      throw error;
+    }
+  }
+
+  function waitForExistingRequests(): Promise<void> {
+    if (activeRequests <= 1) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => drainWaiters.push(resolve));
+  }
+}
+
+interface DaemonRuntime {
+  readonly database: SqliteDatabase;
+  readonly brains: BrainStore;
+  readonly router: Express;
+}
+
+function requireRuntime(runtime: DaemonRuntime | undefined): DaemonRuntime {
+  if (runtime === undefined) {
+    throw new Error('Daemon database is unavailable.');
+  }
+  return runtime;
 }
 
 export async function startDaemon({ databasePath, port = 0, setupToken }: StartDaemonOptions): Promise<RunningDaemon> {

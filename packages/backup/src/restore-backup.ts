@@ -15,6 +15,15 @@ export type RestoreResult = {
   readonly rollbackPath: string;
 };
 
+export class RestoreRecoveryError extends Error {
+  constructor(operationError: unknown, recoveryError: unknown) {
+    super('Memlume could not automatically recover the previous database; manual recovery is required.', {
+      cause: new AggregateError([operationError, recoveryError], 'Restore and automatic recovery both failed.'),
+    });
+    this.name = 'RestoreRecoveryError';
+  }
+}
+
 export async function restoreBackup(options: RestoreBackupOptions): Promise<RestoreResult> {
   const verified = await readVerifiedBackup(options);
   if (typeof options.pauseWrites !== 'function') {
@@ -25,6 +34,9 @@ export async function restoreBackup(options: RestoreBackupOptions): Promise<Rest
   const candidatePath = join(destinationDirectory, `.${basename(options.databasePath)}.${suffix}.restore`);
   const rollbackPath = join(destinationDirectory, `${basename(options.databasePath)}.pre-restore-${new Date().toISOString().replace(/[:.]/g, '-')}.sqlite`);
   let resume: (() => void | Promise<void>) | undefined;
+  let replaced = false;
+  let resumed = false;
+  let recoveryFailed = false;
 
   try {
     writeFileSync(candidatePath, verified.snapshot);
@@ -42,13 +54,39 @@ export async function restoreBackup(options: RestoreBackupOptions): Promise<Rest
       }
     }
     replaceDatabase(candidatePath, options.databasePath, suffix);
+    replaced = true;
+    if (resume !== undefined) {
+      await resume();
+      resumed = true;
+    }
     return { rollbackPath };
+  } catch (error) {
+    if (resume !== undefined && !resumed) {
+      if (replaced) {
+        try {
+          restorePreviousDatabase(rollbackPath, options.databasePath, suffix);
+        } catch (recoveryError) {
+          recoveryFailed = true;
+          throw new RestoreRecoveryError(error, recoveryError);
+        }
+      }
+      await resume();
+      resumed = true;
+    }
+    throw error;
   } finally {
     rmSync(candidatePath, { force: true });
-    if (resume !== undefined) {
+    if (resume !== undefined && !resumed && !recoveryFailed) {
       await resume();
     }
   }
+}
+
+function restorePreviousDatabase(rollbackPath: string, databasePath: string, suffix: string): void {
+  if (!existsSync(rollbackPath)) {
+    throw new Error('The pre-restore database copy is unavailable.');
+  }
+  replaceDatabase(rollbackPath, databasePath, `${suffix}-rollback`);
 }
 
 function replaceDatabase(candidatePath: string, databasePath: string, suffix: string): void {

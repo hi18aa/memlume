@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, test } from 'node:test';
@@ -135,6 +135,35 @@ describe('Memlume backup bundle', () => {
     assert.deepEqual((await backup.verifyBackup({ backupPath: bundlePath, password: 'correct horse battery staple' })).encryption.algorithm, 'aes-256-gcm');
   });
 
+  test('rejects a zip entry whose declared unpacked size exceeds the backup safety limit before decompression', async () => {
+    const directory = temporaryDirectory();
+    const bundlePath = join(directory, 'declared-huge.memlume');
+    const bundle = zipSync({ 'manifest.json': strToU8('{}'), 'snapshot.sqlite': new Uint8Array([0]) });
+    setCentralDirectoryUncompressedSize(bundle, 'snapshot.sqlite', 65 * 1024 * 1024);
+    writeFileSync(bundlePath, bundle);
+
+    await assert.rejects(backup.verifyBackup({ backupPath: bundlePath }), /uncompressed size/i);
+  });
+
+  test('rejects unexpected zip entries before attempting to decompress them', async () => {
+    const directory = temporaryDirectory();
+    const bundlePath = join(directory, 'unexpected-entry.memlume');
+    const bundle = zipSync({ 'manifest.json': strToU8('{}'), 'snapshot.sqlite': new Uint8Array([0]), 'surplus.bin': new Uint8Array([0]) });
+    setCentralDirectoryUncompressedSize(bundle, 'surplus.bin', 65 * 1024 * 1024);
+    writeFileSync(bundlePath, bundle);
+
+    await assert.rejects(backup.verifyBackup({ backupPath: bundlePath }), /unexpected backup entry/i);
+  });
+
+  test('rejects an oversized bundle before reading it into memory', async () => {
+    const directory = temporaryDirectory();
+    const bundlePath = join(directory, 'oversized.memlume');
+    writeFileSync(bundlePath, '');
+    truncateSync(bundlePath, 65 * 1024 * 1024);
+
+    await assert.rejects(backup.verifyBackup({ backupPath: bundlePath }), /compressed size/i);
+  });
+
   test('rejects a tampered snapshot before it can be restored', async () => {
     const directory = temporaryDirectory();
     const source = seedDatabase(join(directory, 'source.sqlite'));
@@ -157,6 +186,28 @@ describe('Memlume backup bundle', () => {
     const files = unzipSync(readFileSync(bundlePath));
     const manifest = JSON.parse(strFromU8(files['manifest.json']));
     manifest.schema.migrations = [];
+    files['manifest.json'] = strToU8(JSON.stringify(manifest));
+    writeFileSync(bundlePath, zipSync(files));
+
+    await assert.rejects(backup.verifyBackup({ backupPath: bundlePath }), /schema/i);
+  });
+
+  test('rejects a snapshot whose migration ledger is intact but required schema objects are missing', async () => {
+    const directory = temporaryDirectory();
+    const source = seedDatabase(join(directory, 'source.sqlite'));
+    const bundlePath = join(directory, 'schema-object-tampered.memlume');
+    await backup.createBackup({ database: source, outputPath: bundlePath });
+    source.close();
+    const files = unzipSync(readFileSync(bundlePath));
+    const snapshotPath = join(directory, 'tampered.sqlite');
+    writeFileSync(snapshotPath, files['snapshot.sqlite']);
+    const snapshot = new Database(snapshotPath);
+    snapshot.pragma('foreign_keys = OFF');
+    snapshot.exec('DROP TRIGGER events_reject_update; DROP TRIGGER events_reject_delete; DROP TABLE events;');
+    snapshot.close();
+    files['snapshot.sqlite'] = readFileSync(snapshotPath);
+    const manifest = JSON.parse(strFromU8(files['manifest.json']));
+    manifest.checksums['snapshot.sqlite'] = createHash('sha256').update(files['snapshot.sqlite']).digest('hex');
     files['manifest.json'] = strToU8(JSON.stringify(manifest));
     writeFileSync(bundlePath, zipSync(files));
 
@@ -220,6 +271,66 @@ describe('Memlume backup bundle', () => {
     rollback.close();
   });
 
+  test('rolls back the replacement and reopens the original runtime when resume fails', async () => {
+    const directory = temporaryDirectory();
+    const source = seedDatabase(join(directory, 'source.sqlite'));
+    const bundlePath = join(directory, 'source.memlume');
+    await backup.createBackup({ database: source, outputPath: bundlePath, brainId: projectBrainId });
+    source.close();
+    const targetPath = join(directory, 'target.sqlite');
+    const current = seedDatabase(targetPath);
+    current.prepare('UPDATE memory_items SET canonical_text = ? WHERE id = ?').run('Old database content.', '00000000-0000-7000-8000-000000000051');
+    current.close();
+    let resumes = 0;
+
+    await assert.rejects(
+      backup.restoreBackup({
+        backupPath: bundlePath,
+        databasePath: targetPath,
+        pauseWrites: () => () => {
+          resumes += 1;
+          if (resumes === 1) throw new Error('runtime reopen failed');
+        },
+      }),
+      /runtime reopen failed/,
+    );
+
+    const intact = openDatabase(targetPath);
+    assert.equal(intact.prepare('SELECT canonical_text FROM memory_items WHERE id = ?').pluck().get('00000000-0000-7000-8000-000000000051'), 'Old database content.');
+    intact.close();
+    assert.equal(resumes, 2);
+  });
+
+  test('does not resume a replacement database when the rollback copy is unavailable', async () => {
+    const directory = temporaryDirectory();
+    const source = seedDatabase(join(directory, 'source.sqlite'));
+    const bundlePath = join(directory, 'source.memlume');
+    await backup.createBackup({ database: source, outputPath: bundlePath, brainId: projectBrainId });
+    source.close();
+    const targetPath = join(directory, 'target.sqlite');
+    seedDatabase(targetPath).close();
+    let resumes = 0;
+
+    await assert.rejects(
+      backup.restoreBackup({
+        backupPath: bundlePath,
+        databasePath: targetPath,
+        pauseWrites: () => () => {
+          resumes += 1;
+          if (resumes === 1) {
+            for (const name of readdirSync(directory)) {
+              if (name.includes('.pre-restore-')) rmSync(join(directory, name), { force: true });
+            }
+            throw new Error('runtime reopen failed');
+          }
+        },
+      }),
+      /manual recovery/i,
+    );
+
+    assert.equal(resumes, 1);
+  });
+
   test('leaves the main database unchanged when a sidecar prevents replacement', async () => {
     const directory = temporaryDirectory();
     const source = seedDatabase(join(directory, 'source.sqlite'));
@@ -274,3 +385,18 @@ describe('Memlume backup bundle', () => {
     intact.close();
   });
 });
+
+function setCentralDirectoryUncompressedSize(bundle, filename, size) {
+  for (let offset = 0; offset <= bundle.length - 46; offset += 1) {
+    if (bundle[offset] !== 0x50 || bundle[offset + 1] !== 0x4b || bundle[offset + 2] !== 0x01 || bundle[offset + 3] !== 0x02) continue;
+    const nameLength = bundle[offset + 28] | bundle[offset + 29] << 8;
+    const name = strFromU8(bundle.subarray(offset + 46, offset + 46 + nameLength));
+    if (name !== filename) continue;
+    bundle[offset + 24] = size & 0xff;
+    bundle[offset + 25] = size >>> 8 & 0xff;
+    bundle[offset + 26] = size >>> 16 & 0xff;
+    bundle[offset + 27] = size >>> 24 & 0xff;
+    return;
+  }
+  throw new Error(`Missing ${filename} central directory entry.`);
+}

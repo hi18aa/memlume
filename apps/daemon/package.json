@@ -16,6 +16,7 @@
     "typecheck": "pnpm run build:dependencies && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@memlume/backup": "workspace:*",
     "@memlume/contracts": "workspace:*",
     "@memlume/context-resolver": "workspace:*",
     "@memlume/database": "workspace:*",
