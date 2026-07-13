@@ -1,0 +1,252 @@
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { afterEach, describe, expect, test } from 'vitest';
+
+const root = fileURLToPath(new URL('../../../', import.meta.url));
+const sourcePlugin = fileURLToPath(new URL('../', import.meta.url));
+const brainId = '00000000-0000-7000-8000-000000000013';
+const installationId = '00000000-0000-7000-8000-000000000010';
+const profileId = '00000000-0000-7000-8000-000000000011';
+const projectId = '00000000-0000-7000-8000-000000000012';
+const token = 'codex-hook-token-never-echoed';
+const directories: string[] = [];
+const scope = { level: 'project', projectId };
+
+afterEach(() => {
+  while (directories.length > 0) {
+    rmSync(directories.pop()!, { force: true, recursive: true });
+  }
+});
+
+function temporaryDirectory(): string {
+  const directory = mkdtempSync(join(tmpdir(), 'memlume-codex-hook-'));
+  directories.push(directory);
+  return directory;
+}
+
+function copiedHook(): string {
+  const plugin = join(temporaryDirectory(), 'memlume-codex');
+  cpSync(sourcePlugin, plugin, { recursive: true });
+  return join(plugin, 'hooks', 'memlume.mjs');
+}
+
+function environment(daemonUrl: string, outboxDirectory = temporaryDirectory()): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    MEMLUME_HOME: root,
+    MEMLUME_DAEMON_URL: daemonUrl,
+    MEMLUME_TOKEN: token,
+    MEMLUME_INSTALLATION_ID: installationId,
+    MEMLUME_PROFILE_ID: profileId,
+    MEMLUME_PROJECT_ID: projectId,
+    MEMLUME_BRAIN_ID: brainId,
+    MEMLUME_OUTBOX_DIRECTORY: outboxDirectory,
+  };
+}
+
+function invoke(hook: string, body: Record<string, unknown>, env: NodeJS.ProcessEnv): Promise<{ readonly output: unknown; readonly stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [hook], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `Hook exited with ${code}.`));
+        return;
+      }
+      try {
+        resolve({ output: JSON.parse(stdout), stderr });
+      } catch (error) {
+        reject(error);
+      }
+    });
+    child.stdin.end(`${JSON.stringify(body)}\n`);
+  });
+}
+
+function context() {
+  return {
+    traceId: '00000000-0000-7000-8000-000000000001',
+    intent: 'shared_memory',
+    scope,
+    directives: [{
+      memoryId: '00000000-0000-7000-8000-000000000017',
+      brainId,
+      text: '專案套件管理器使用 pnpm。',
+      priority: 1,
+      mandatory: false,
+    }],
+    procedures: [],
+    preferences: [],
+    knowledge: [],
+    decisions: [],
+    explanation: {
+      sourceMemoryIds: [],
+      exclusions: [],
+      budget: { limitUnits: 320, usedUnits: 0, included: [], omitted: [], truncated: false },
+    },
+  };
+}
+
+function outboxPath(directory: string): string {
+  const identity = JSON.stringify(['codex', installationId, profileId]);
+  return join(directory, 'outbox', `${createHash('sha256').update(identity).digest('hex')}.jsonl`);
+}
+
+describe('Codex plugin hook', () => {
+  test('packages a copied plugin with bundled MCP and hook configuration', () => {
+    const plugin = JSON.parse(readFileSync(new URL('../.codex-plugin/plugin.json', import.meta.url), 'utf8')) as Record<string, unknown>;
+    const mcp = JSON.parse(readFileSync(new URL('../.mcp.json', import.meta.url), 'utf8')) as { readonly mcpServers: Record<string, { readonly args: string[]; readonly env_vars: string[] }> };
+    const hooks = JSON.parse(readFileSync(new URL('../hooks/hooks.json', import.meta.url), 'utf8')) as { readonly hooks: Record<string, unknown[]> };
+
+    expect(plugin).toMatchObject({ name: 'memlume-codex', mcpServers: './.mcp.json', hooks: './hooks/hooks.json' });
+    expect(mcp.mcpServers.memlume.args).toEqual(['./scripts/mcp.mjs']);
+    expect(mcp.mcpServers.memlume.env_vars).toEqual(['MEMLUME_HOME', 'MEMLUME_TOKEN', 'MEMLUME_DAEMON_URL']);
+    expect(Object.keys(hooks.hooks)).toEqual(['SessionStart', 'UserPromptSubmit', 'Stop']);
+    expect(JSON.stringify(hooks)).toContain('PLUGIN_ROOT');
+    expect(JSON.stringify(hooks)).toContain('commandWindows');
+  });
+
+  test('initializes on SessionStart without sending a Core write', async () => {
+    const requests: string[] = [];
+    const server = createServer((request, response) => {
+      requests.push(request.url!);
+      response.statusCode = 500;
+      response.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      if (address === null || typeof address === 'string') throw new Error('Server address is unavailable.');
+      const result = await invoke(copiedHook(), {
+        hook_event_name: 'SessionStart', session_id: 'codex-session', cwd: 'C:/work/memlume', source: 'startup',
+      }, environment(`http://127.0.0.1:${address.port}`));
+
+      expect(result).toEqual({ output: {}, stderr: '' });
+      expect(requests).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  test('injects context and sends the explicit project capture through the built SDK', async () => {
+    const requests: Array<{ readonly path: string; readonly body: Record<string, unknown> }> = [];
+    const server = createServer(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(chunk as Buffer);
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+      requests.push({ path: request.url!, body });
+      response.setHeader('content-type', 'application/json');
+      if (request.url === '/v1/context/resolve') {
+        response.end(JSON.stringify({ context: context() }));
+        return;
+      }
+      if (request.url === '/v1/memories/capture') {
+        response.statusCode = 201;
+        response.end(JSON.stringify({
+          capture: { memoryId: '00000000-0000-7000-8000-000000000014', status: 'active', brain: brainId, scope, requiresConfirmation: false, source: { eventId: '00000000-0000-7000-8000-000000000015' } },
+        }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end(JSON.stringify({ error: 'not_found' }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      if (address === null || typeof address === 'string') throw new Error('Server address is unavailable.');
+      const result = await invoke(copiedHook(), {
+        hook_event_name: 'UserPromptSubmit', session_id: 'codex-session', turn_id: 'turn-1', cwd: 'C:/work/memlume', prompt: '記住專案使用 pnpm',
+      }, environment(`http://127.0.0.1:${address.port}`));
+
+      expect(result).toEqual({
+        output: { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: 'Memlume shared context:\n- 專案套件管理器使用 pnpm。' } },
+        stderr: '',
+      });
+      expect(requests.map(({ path }) => path).sort()).toEqual(['/v1/context/resolve', '/v1/memories/capture']);
+      expect(requests.find(({ path }) => path === '/v1/memories/capture')!.body).toMatchObject({
+        rawContent: '記住專案使用 pnpm',
+        brainId,
+        scope,
+        source: { type: 'codex', conversationId: 'codex-session', messageId: 'codex:codex-session:turn-1' },
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  test('records Stop as a turn audit and always returns an empty JSON object', async () => {
+    const events: Record<string, unknown>[] = [];
+    const server = createServer(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(chunk as Buffer);
+      events.push(JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>);
+      response.statusCode = 201;
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ event: { id: '00000000-0000-7000-8000-000000000016', brainId } }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      if (address === null || typeof address === 'string') throw new Error('Server address is unavailable.');
+      const result = await invoke(copiedHook(), {
+        hook_event_name: 'Stop', session_id: 'codex-session', turn_id: 'turn-1', cwd: 'C:/work/memlume', last_assistant_message: '已完成 pnpm 設定。',
+      }, environment(`http://127.0.0.1:${address.port}`));
+
+      expect(result).toEqual({ output: {}, stderr: '' });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        eventType: 'task_completed',
+        rawContent: '已完成 pnpm 設定。',
+        brainId,
+        source: { messageId: 'codex:codex-session:turn-1:assistant' },
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  test('fails open and queues an explicit capture without leaving an outbox lock', async () => {
+    const outboxDirectory = temporaryDirectory();
+    const hook = copiedHook();
+    const server = createServer(() => undefined);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      if (address === null || typeof address === 'string') throw new Error('Server address is unavailable.');
+      const startedAt = performance.now();
+      const result = await invoke(hook, {
+        hook_event_name: 'UserPromptSubmit', session_id: 'offline-session', turn_id: 'offline-turn', cwd: 'C:/work/memlume', prompt: '記住專案使用 pnpm',
+      }, environment(`http://127.0.0.1:${address.port}`, outboxDirectory));
+
+      expect(performance.now() - startedAt).toBeLessThan(800);
+      expect(result).toEqual({ output: {}, stderr: '' });
+      expect(readFileSync(outboxPath(outboxDirectory), 'utf8')).toContain('記住專案使用 pnpm');
+      expect(existsSync(`${outboxPath(outboxDirectory)}.lock`)).toBe(false);
+      expect(JSON.stringify(result)).not.toContain(token);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+
+  test('never uses a session-end callback and leaves missing configuration silent', async () => {
+    const hook = copiedHook();
+    const source = readFileSync(hook, 'utf8');
+    const result = await invoke(hook, {
+      hook_event_name: 'UserPromptSubmit', session_id: 'codex-session', turn_id: 'turn-1', prompt: '記住專案使用 pnpm',
+    }, { ...process.env });
+
+    expect(source).not.toContain('onSessionEnd');
+    expect(result).toEqual({ output: {}, stderr: '' });
+  });
+});

@@ -30,6 +30,8 @@ export interface AdapterClientOptions {
   readonly token?: string;
   readonly outboxPath?: string;
   readonly outboxDirectory?: string;
+  /** Bounded write deadline for short-lived host hooks. Defaults to the normal daemon deadline. */
+  readonly writeTimeoutMs?: number;
   readonly fetch?: typeof globalThis.fetch;
   readonly warn?: (message: string) => void;
 }
@@ -114,16 +116,18 @@ export class AdapterClient {
   private readonly fetch: typeof globalThis.fetch;
   private outboxPath: string | undefined;
   private readonly outboxDirectory: string;
+  private readonly writeTimeoutMs: number;
   private readonly warn: (message: string) => void;
   private warnedAboutContext = false;
   private writeChain: Promise<void> = Promise.resolve();
 
-  constructor({ daemonUrl, token, outboxPath, outboxDirectory = join(homedir(), '.memlume'), fetch = globalThis.fetch, warn = console.warn }: AdapterClientOptions) {
+  constructor({ daemonUrl, token, outboxPath, outboxDirectory = join(homedir(), '.memlume'), writeTimeoutMs = REQUEST_TIMEOUT_MS, fetch = globalThis.fetch, warn = console.warn }: AdapterClientOptions) {
     this.daemonUrl = daemonOrigin(daemonUrl);
     this.token = token ?? process.env.MEMLUME_TOKEN;
     this.fetch = fetch;
     this.outboxPath = outboxPath;
     this.outboxDirectory = outboxDirectory;
+    this.writeTimeoutMs = validTimeout(writeTimeoutMs) ? writeTimeoutMs : REQUEST_TIMEOUT_MS;
     this.warn = warn;
   }
 
@@ -275,7 +279,7 @@ export class AdapterClient {
 
     try {
       const { endpoint, ...body } = request;
-      const response = await this.request(endpoint, 'POST', body);
+      const response = await this.request(endpoint, 'POST', body, this.writeTimeoutMs);
       if (response.ok) {
         const result = await response.json();
         if (request.endpoint === '/v1/events') {
@@ -611,6 +615,10 @@ function daemonOrigin(value: string): string {
 
 function hasToken(token: string | undefined): token is string {
   return token !== undefined && token.trim() !== '';
+}
+
+function validTimeout(value: number): boolean {
+  return Number.isSafeInteger(value) && value > 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
