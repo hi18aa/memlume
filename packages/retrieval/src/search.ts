@@ -42,6 +42,12 @@ export type UpdateMemoryInput = Partial<Omit<SaveMemoryInput, 'brainId' | 'kind'
   readonly reason: string;
 };
 
+export interface ReviewCandidateInput {
+  readonly actor: string;
+  readonly reason: string;
+  readonly supersedeMemoryId?: string;
+}
+
 export interface MemoryQuery {
   readonly brainIds?: readonly string[];
   readonly scope?: MemoryScope;
@@ -127,6 +133,122 @@ export class MemoryStore {
   constructor(private readonly database: SqliteDatabase) {}
 
   save(input: SaveMemoryInput): MemoryItem {
+    return this.saveWithStatus(input, 'active');
+  }
+
+  saveCandidate(input: SaveMemoryInput): MemoryItem {
+    return this.saveWithStatus(input, 'candidate');
+  }
+
+  approveCandidate(id: string, input: ReviewCandidateInput, brainIds?: readonly string[]): MemoryItem {
+    const allowedBrainIds = normalizeBrainIds(brainIds);
+    const candidate = this.getStored(id, allowedBrainIds);
+    if (candidate === undefined) {
+      throw new Error(`Memory not found: ${id}`);
+    }
+    if (candidate.status !== 'candidate') {
+      throw new Error('Only candidate memories can be approved.');
+    }
+    const changedBy = NonEmptyTextSchema.parse(input.actor);
+    const changeReason = NonEmptyTextSchema.parse(input.reason);
+    const now = new Date().toISOString();
+    const approved = MemoryItemSchema.parse({ ...candidate, status: 'active', updatedAt: now });
+
+    this.database.transaction(() => {
+      const active = this.list({ brainIds: allowedBrainIds, status: 'active' });
+      if (active.some((memory) =>
+        memory.brainId === candidate.brainId &&
+        memory.kind === candidate.kind &&
+        sameScope(memory.scope, candidate.scope) &&
+        sameCanonicalText(memory.canonicalText, candidate.canonicalText),
+      )) {
+        throw new Error('Candidate duplicates an active memory.');
+      }
+      const conflicting = active.filter((memory) =>
+        memory.brainId === candidate.brainId &&
+        memory.kind === candidate.kind &&
+        sameScope(memory.scope, candidate.scope) &&
+        sameSupersessionSubject(memory, candidate),
+      );
+      if (conflicting.some((memory) => memory.id !== input.supersedeMemoryId)) {
+        throw new Error('Candidate conflicts with an active memory and must supersede the matching memory.');
+      }
+      this.insertVersion(candidate, changedBy, changeReason, now);
+      if (input.supersedeMemoryId !== undefined) {
+        const existing = this.getStored(input.supersedeMemoryId, allowedBrainIds);
+        if (
+          existing === undefined ||
+          existing.status !== 'active' ||
+          existing.brainId !== candidate.brainId ||
+          existing.kind !== candidate.kind ||
+          !sameScope(existing.scope, candidate.scope) ||
+          !sameSupersessionSubject(existing, candidate)
+        ) {
+          throw new Error('Candidate can only supersede an active memory with the same subject in the same brain, kind, and scope.');
+        }
+        this.insertVersion(existing, changedBy, changeReason, now);
+        this.replace(MemoryItemSchema.parse({
+          ...existing,
+          status: 'superseded',
+          supersededBy: candidate.id,
+          updatedAt: now,
+        }));
+      }
+      this.replace(approved);
+    }).immediate();
+    return approved;
+  }
+
+  rejectCandidate(id: string, input: Omit<ReviewCandidateInput, 'supersedeMemoryId'>, brainIds?: readonly string[]): MemoryItem {
+    const candidate = this.getStored(id, normalizeBrainIds(brainIds));
+    if (candidate === undefined) {
+      throw new Error(`Memory not found: ${id}`);
+    }
+    if (candidate.status !== 'candidate') {
+      throw new Error('Only candidate memories can be rejected.');
+    }
+    const changedBy = NonEmptyTextSchema.parse(input.actor);
+    const changeReason = NonEmptyTextSchema.parse(input.reason);
+    const now = new Date().toISOString();
+    const rejected = MemoryItemSchema.parse({ ...candidate, status: 'rejected', updatedAt: now });
+    this.database.transaction(() => {
+      this.insertVersion(candidate, changedBy, changeReason, now);
+      this.replace(rejected);
+    }).immediate();
+    return rejected;
+  }
+
+  listHistory(id: string, brainIds?: readonly string[]): MemoryItem[] {
+    const memoryId = UuidV7Schema.parse(id);
+    const memories = this.list({ brainIds });
+    const byId = new Map(memories.map((memory) => [memory.id, memory]));
+    const selected = byId.get(memoryId);
+    if (selected === undefined) {
+      return [];
+    }
+    let oldest: MemoryItem = selected;
+    const ancestors = new Set<string>();
+    while (!ancestors.has(oldest.id)) {
+      ancestors.add(oldest.id);
+      const predecessor = memories.find((memory) => memory.supersededBy === oldest.id);
+      if (predecessor === undefined) {
+        break;
+      }
+      oldest = predecessor;
+    }
+
+    const history: MemoryItem[] = [];
+    let current: MemoryItem | undefined = oldest;
+    const path = new Set<string>();
+    while (current !== undefined && !path.has(current.id)) {
+      path.add(current.id);
+      history.push(current);
+      current = current.supersededBy === undefined ? undefined : byId.get(current.supersededBy);
+    }
+    return history;
+  }
+
+  private saveWithStatus(input: SaveMemoryInput, status: 'active' | 'candidate'): MemoryItem {
     if (!isManualMemoryKind(input.kind)) {
       throw new Error('Manual memory must be a policy, preference, fact, or decision.');
     }
@@ -135,7 +257,7 @@ export class MemoryStore {
     const memory = MemoryItemSchema.parse({
       id: createUuidV7(),
       ...input,
-      status: 'active',
+      status,
       priority: input.priority ?? 0,
       confidence: input.confidence ?? 1,
       explicitness: input.explicitness ?? 1,
@@ -296,7 +418,7 @@ export class MemoryStore {
     this.database
       .prepare(`
         UPDATE memory_items
-        SET title = ?, canonical_text = ?, structured_data = ?, scope_data = ?, priority = ?,
+        SET title = ?, canonical_text = ?, structured_data = ?, scope_data = ?, status = ?, priority = ?,
             confidence = ?, explicitness = ?, source_event_id = ?, updated_at = ?, valid_from = ?,
             valid_until = ?, superseded_by = ?
         WHERE id = ?
@@ -306,6 +428,7 @@ export class MemoryStore {
         memory.canonicalText,
         JSON.stringify(memory.structuredData),
         JSON.stringify(memory.scope),
+        memory.status,
         memory.priority,
         memory.confidence,
         memory.explicitness,
@@ -489,6 +612,36 @@ function sameScope(left: MemoryScope, right: MemoryScope): boolean {
       (field) => Object.hasOwn(leftScope, field) === Object.hasOwn(rightScope, field) && leftScope[field] === rightScope[field],
     )
   );
+}
+
+function sameCanonicalText(left: string, right: string): boolean {
+  return left.trim().replace(/\s+/gu, ' ').replace(/[。.!！?？]+$/gu, '').toLowerCase() ===
+    right.trim().replace(/\s+/gu, ' ').replace(/[。.!！?？]+$/gu, '').toLowerCase();
+}
+
+function sameSupersessionSubject(left: MemoryItem, right: MemoryItem): boolean {
+  if (!isRecord(left.structuredData) || !isRecord(right.structuredData)) {
+    return false;
+  }
+  if (left.kind === 'fact' && right.kind === 'fact') {
+    return sameSemanticText(left.structuredData.subject, right.structuredData.subject) &&
+      sameSemanticText(left.structuredData.predicate, right.structuredData.predicate);
+  }
+  if (left.kind === 'preference' && right.kind === 'preference') {
+    return sameSemanticText(left.structuredData.domain, right.structuredData.domain) &&
+      sameSemanticText(left.structuredData.subject, right.structuredData.subject) &&
+      sameSemanticText(left.structuredData.dimension, right.structuredData.dimension);
+  }
+  return false;
+}
+
+function sameSemanticText(left: JsonValue | undefined, right: JsonValue | undefined): boolean {
+  return typeof left === 'string' && typeof right === 'string' &&
+    left.trim().replace(/\s+/gu, ' ').toLowerCase() === right.trim().replace(/\s+/gu, ' ').toLowerCase();
+}
+
+function isRecord(value: JsonValue): value is Record<string, JsonValue> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function toFtsQuery(value: string): string {

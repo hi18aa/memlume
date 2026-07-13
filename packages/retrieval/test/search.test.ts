@@ -31,6 +31,17 @@ type MemoryFilters = {
 
 type MemoryStore = {
   save(input: MemoryDraft): MemoryItem;
+  saveCandidate(input: MemoryDraft): MemoryItem;
+  approveCandidate(
+    id: string,
+    input: { readonly actor: string; readonly reason: string; readonly supersedeMemoryId?: string },
+    brainIds?: readonly string[],
+  ): MemoryItem;
+  rejectCandidate(
+    id: string,
+    input: { readonly actor: string; readonly reason: string },
+    brainIds?: readonly string[],
+  ): MemoryItem;
   update(
     id: string,
     input: Partial<Omit<MemoryDraft, 'kind'>> & { readonly actor: string; readonly reason: string },
@@ -40,6 +51,7 @@ type MemoryStore = {
   list(filters?: MemoryFilters): MemoryItem[];
   search(query: string, filters?: MemoryFilters): MemoryItem[];
   findApplicable(scope: MemoryScope, filters?: MemoryFilters): MemoryItem[];
+  listHistory(id: string, brainIds?: readonly string[]): MemoryItem[];
   listVersions(id: string, brainIds?: readonly string[]): Array<{
     readonly version: number;
     readonly canonicalText: string;
@@ -142,6 +154,150 @@ afterEach(() => {
 });
 
 describe('MemoryStore', () => {
+  test('keeps inferred memories as candidates until approval, then supersedes the corrected active memory', () => {
+    const { store } = createStore();
+    const oldMemory = store.save({
+      kind: 'fact',
+      canonicalText: 'The project uses pnpm.',
+      structuredData: { subject: 'project', predicate: 'package_manager', object: 'pnpm', confidence: 1 },
+      scope: { level: 'project', projectId: 'memlume' },
+    });
+    const candidate = store.saveCandidate({
+      kind: 'fact',
+      canonicalText: 'The project uses npm.',
+      structuredData: { subject: ' Project ', predicate: 'PACKAGE_MANAGER', object: 'npm', confidence: 0.5 },
+      scope: { level: 'project', projectId: 'memlume' },
+    });
+
+    expect(candidate.status).toBe('candidate');
+    expect(store.get(oldMemory.id)).toMatchObject({ status: 'active', supersededBy: undefined });
+    expect(store.list({ status: 'candidate' })).toEqual([candidate]);
+
+    const approved = store.approveCandidate(candidate.id, {
+      actor: 'test-user',
+      reason: 'The user corrected the project package manager.',
+      supersedeMemoryId: oldMemory.id,
+    });
+
+    expect(approved).toMatchObject({ id: candidate.id, status: 'active' });
+    expect(store.get(oldMemory.id)).toMatchObject({ status: 'superseded', supersededBy: candidate.id });
+    expect(store.listVersions(oldMemory.id)).toEqual([
+      expect.objectContaining({ canonicalText: oldMemory.canonicalText, changedBy: 'test-user' }),
+    ]);
+    expect(store.listVersions(candidate.id)).toEqual([
+      expect.objectContaining({ canonicalText: candidate.canonicalText, changedBy: 'test-user' }),
+    ]);
+    expect(store.listHistory(oldMemory.id).map((memory) => memory.id)).toEqual([oldMemory.id, candidate.id]);
+  });
+
+  test('rejects a candidate without changing the active memory', () => {
+    const { store } = createStore();
+    const active = store.save({
+      kind: 'fact',
+      canonicalText: 'The project uses pnpm.',
+      structuredData: { subject: 'project', predicate: 'package_manager', object: 'pnpm', confidence: 1 },
+      scope: { level: 'project', projectId: 'memlume' },
+    });
+    const candidate = store.saveCandidate({
+      kind: 'fact',
+      canonicalText: 'The project uses npm.',
+      structuredData: { subject: 'project', predicate: 'package_manager', object: 'npm', confidence: 0.5 },
+      scope: { level: 'project', projectId: 'memlume' },
+    });
+
+    expect(store.rejectCandidate(candidate.id, { actor: 'test-user', reason: 'This was only an inference.' })).toMatchObject({
+      id: candidate.id,
+      status: 'rejected',
+    });
+    expect(store.get(active.id)).toMatchObject({ status: 'active', supersededBy: undefined });
+    expect(store.list({ status: 'candidate' })).toEqual([]);
+    expect(store.listVersions(candidate.id)).toEqual([
+      expect.objectContaining({ canonicalText: candidate.canonicalText, changedBy: 'test-user' }),
+    ]);
+  });
+
+  test('does not approve a candidate into an active duplicate', () => {
+    const { store } = createStore();
+    const candidate = store.saveCandidate({
+      kind: 'fact',
+      canonicalText: 'The project uses pnpm.',
+      structuredData: { subject: 'project', predicate: 'package_manager', object: 'pnpm', confidence: 0.5 },
+      scope: { level: 'project', projectId: 'memlume' },
+    });
+    const active = store.save({
+      kind: 'fact',
+      canonicalText: 'The project uses pnpm.',
+      structuredData: { subject: 'project', predicate: 'package_manager', object: 'pnpm', confidence: 1 },
+      scope: { level: 'project', projectId: 'memlume' },
+    });
+
+    expect(() => store.approveCandidate(candidate.id, {
+      actor: 'test-user',
+      reason: 'Approve the inferred fact.',
+    })).toThrow(/duplicate/i);
+    expect(store.list({ status: 'active' })).toEqual([active]);
+    expect(store.get(candidate.id)).toMatchObject({ status: 'candidate' });
+  });
+
+  test('does not let a candidate supersede an unrelated active memory', () => {
+    const { store } = createStore();
+    const unrelated = store.save({
+      kind: 'fact',
+      canonicalText: 'The user lives in Taipei.',
+      structuredData: { subject: 'user', predicate: 'location', object: 'Taipei', confidence: 1 },
+      scope: { level: 'project', projectId: 'memlume' },
+    });
+    const candidate = store.saveCandidate({
+      kind: 'fact',
+      canonicalText: 'The project uses pnpm.',
+      structuredData: { subject: 'project', predicate: 'package_manager', object: 'pnpm', confidence: 0.5 },
+      scope: { level: 'project', projectId: 'memlume' },
+    });
+
+    expect(() => store.approveCandidate(candidate.id, {
+      actor: 'test-user',
+      reason: 'This must not replace an unrelated fact.',
+      supersedeMemoryId: unrelated.id,
+    })).toThrow(/same subject/i);
+    expect(store.get(unrelated.id)).toMatchObject({ status: 'active' });
+    expect(store.get(candidate.id)).toMatchObject({ status: 'candidate' });
+  });
+
+  test('requires the matching active memory id when a candidate conflicts on its semantic subject', () => {
+    const { store } = createStore();
+    const conflicting = store.save({
+      kind: 'fact',
+      canonicalText: 'The project uses pnpm.',
+      structuredData: { subject: 'project', predicate: 'package_manager', object: 'pnpm', confidence: 1 },
+      scope: { level: 'project', projectId: 'memlume' },
+    });
+    const unrelated = store.save({
+      kind: 'fact',
+      canonicalText: 'The project uses TypeScript.',
+      structuredData: { subject: 'project', predicate: 'language', object: 'TypeScript', confidence: 1 },
+      scope: { level: 'project', projectId: 'memlume' },
+    });
+    const candidate = store.saveCandidate({
+      kind: 'fact',
+      canonicalText: 'The project uses npm.',
+      structuredData: { subject: 'project', predicate: 'package_manager', object: 'npm', confidence: 0.5 },
+      scope: { level: 'project', projectId: 'memlume' },
+    });
+
+    expect(() => store.approveCandidate(candidate.id, {
+      actor: 'test-user',
+      reason: 'Approve without the required supersession target.',
+    })).toThrow(/supersede/i);
+    expect(() => store.approveCandidate(candidate.id, {
+      actor: 'test-user',
+      reason: 'Approve with an unrelated target.',
+      supersedeMemoryId: unrelated.id,
+    })).toThrow(/supersede/i);
+    expect(store.get(conflicting.id)).toMatchObject({ status: 'active' });
+    expect(store.get(unrelated.id)).toMatchObject({ status: 'active' });
+    expect(store.get(candidate.id)).toMatchObject({ status: 'candidate' });
+  });
+
   test('writes incrementing prior snapshots atomically with a required actor and reason', () => {
     const { database, store } = createStore();
     const fact = store.save({

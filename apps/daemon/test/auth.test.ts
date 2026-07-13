@@ -346,6 +346,48 @@ describe('daemon local authentication and setup API', () => {
     expect(readOnlyMemory.body).toEqual({ error: 'forbidden' });
   });
 
+  test('keeps candidate review and history inside the authenticated installation mounts', async () => {
+    const daemon = await start({ setupToken: SETUP_TOKEN });
+    const writer = await registerInstallation(daemon, 'candidate-writer');
+    const reader = await registerInstallation(daemon, 'candidate-reader');
+    await mountBrain(daemon, writer.id, DEFAULT_PERSONAL_BRAIN_ID, 'read_write');
+
+    const captured = await requestJson(daemon, '/v1/memories/capture', {
+      method: 'POST',
+      headers: adapterHeaders(writer.token),
+      body: JSON.stringify({
+        rawContent: 'This project uses pnpm.',
+        eventType: 'user_statement',
+        source: { type: 'test', reference: 'candidate-isolation' },
+        scope: { level: 'project', projectId: 'memlume' },
+      }),
+    });
+    expect(captured.response.status).toBe(201);
+    const memoryId = ((captured.body.capture as { readonly memoryId: string })).memoryId;
+
+    const unmountedCandidates = await requestJson(daemon, '/v1/memories/candidates', { headers: adapterHeaders(reader.token) });
+    expect(unmountedCandidates.response.status).toBe(200);
+    expect(unmountedCandidates.body).toEqual({ memories: [] });
+    const unmountedHistory = await requestJson(daemon, `/v1/memories/${memoryId}/history`, { headers: adapterHeaders(reader.token) });
+    expect(unmountedHistory.response.status).toBe(404);
+    const unmountedReject = await requestJson(daemon, `/v1/memories/${memoryId}/reject`, {
+      method: 'POST',
+      headers: adapterHeaders(reader.token),
+      body: JSON.stringify({ actor: 'reader', reason: 'Must not inspect another brain.' }),
+    });
+    expect(unmountedReject.response.status).toBe(404);
+
+    await mountBrain(daemon, reader.id, DEFAULT_PERSONAL_BRAIN_ID, 'read');
+    const mountedCandidates = await requestJson(daemon, '/v1/memories/candidates', { headers: adapterHeaders(reader.token) });
+    expect(mountedCandidates.body).toMatchObject({ memories: [expect.objectContaining({ id: memoryId, status: 'candidate' })] });
+    const readOnlyReject = await requestJson(daemon, `/v1/memories/${memoryId}/reject`, {
+      method: 'POST',
+      headers: adapterHeaders(reader.token),
+      body: JSON.stringify({ actor: 'reader', reason: 'Read access cannot review.' }),
+    });
+    expect(readOnlyReject.response.status).toBe(403);
+  });
+
   test('writes and searches only the authenticated installation mounted brains', async () => {
     const daemon = await start({ setupToken: SETUP_TOKEN });
     const projectBrainId = await createBrain(daemon, 'Shared Project');

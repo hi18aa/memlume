@@ -15,7 +15,7 @@ export interface CompileMemoryInput {
 
 export interface MemoryProposal {
   readonly status: 'candidate' | 'active';
-  readonly kind: MemoryKind;
+  readonly kind: Extract<MemoryKind, 'preference' | 'fact'>;
   readonly brainId: string;
   readonly scope: MemoryScope;
   readonly sourceEventId: string;

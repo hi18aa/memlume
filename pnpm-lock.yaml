@@ -39,6 +39,9 @@ importers:
       '@memlume/event-journal':
         specifier: workspace:*
         version: link:../../packages/event-journal
+      '@memlume/memory-compiler':
+        specifier: workspace:*
+        version: link:../../packages/memory-compiler
       '@memlume/retrieval':
         specifier: workspace:*
         version: link:../../packages/retrieval

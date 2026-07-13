@@ -15,9 +15,11 @@ import {
   PreferenceDataSchema,
   UuidV7Schema,
   type AgentInstallation,
+  type JsonValue,
 } from '@memlume/contracts';
 import { ContextResolver } from '@memlume/context-resolver';
 import { EventBrainConflictError, EventJournal } from '@memlume/event-journal';
+import { assessMemoryConflict, compileMemory, redactSecrets, type MemoryProposal } from '@memlume/memory-compiler';
 import { MemoryStore, SourceEventBrainMismatchError } from '@memlume/retrieval';
 import { BrainStore } from '@memlume/shared-brains';
 import { timingSafeEqual } from 'node:crypto';
@@ -34,6 +36,10 @@ const AppendEventRequestSchema = z
     occurredAt: IsoUtcDateTimeSchema.optional(),
   })
   .strict();
+
+const CaptureMemoryRequestSchema = AppendEventRequestSchema.extend({
+  scope: MemoryScopeSchema,
+}).strict();
 
 const MemoryRequestBaseSchema = z
   .object({
@@ -59,6 +65,13 @@ const SaveMemoryRequestSchema = z.discriminatedUnion('kind', [
 
 const SearchQuerySchema = z.object({
   q: NonEmptyTextSchema.refine((value) => /[\p{L}\p{N}_]/u.test(value), 'Expected searchable text.'),
+}).strict();
+
+const MemoryParametersSchema = z.object({ memoryId: UuidV7Schema }).strict();
+const ReviewCandidateRequestSchema = z.object({
+  actor: NonEmptyTextSchema,
+  reason: NonEmptyTextSchema,
+  supersedeMemoryId: UuidV7Schema.optional(),
 }).strict();
 
 const ResolveContextRequestSchema = z
@@ -148,6 +161,157 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
       return;
     }
     response.status(201).json({ memory: services.store.save({ ...input, brainId }) });
+  });
+
+  app.post('/v1/memories/capture', requireAdapter, (request, response) => {
+    const input = CaptureMemoryRequestSchema.parse(request.body);
+    const brainId = input.brainId ?? DEFAULT_PERSONAL_BRAIN_ID;
+    if (!hasWriteAccess(response, services.brains, brainId)) {
+      return;
+    }
+    const redaction = redactSecrets(input.rawContent);
+    const event = services.journal.append({
+      brainId,
+      rawContent: redaction.redacted,
+      eventType: input.eventType,
+      source: input.source,
+      structuredData: input.structuredData,
+      occurredAt: input.occurredAt,
+    });
+    const compiled = compileMemory({
+      event: redaction.detected ? { ...event, rawContent: input.rawContent } : event,
+      scope: input.scope,
+    });
+    if (compiled.status === 'ignore' || compiled.status === 'rejected') {
+      response.json({
+        capture: {
+          memoryId: null,
+          status: compiled.status,
+          brain: brainId,
+          scope: input.scope,
+          requiresConfirmation: false,
+          source: { eventId: event.id },
+        },
+      });
+      return;
+    }
+
+    const proposal = { ...compiled, structuredData: capturedStructuredData(compiled) };
+    const resolution = assessMemoryConflict({
+      proposal,
+      existing: services.store.list({ brainIds: [brainId] }),
+    });
+    const existing = resolution.action === 'reuse'
+      ? services.store.get(resolution.memoryId, [brainId])!
+      : undefined;
+    const memory = existing === undefined
+      ? (compiled.status === 'candidate' || resolution.action === 'review'
+          ? services.store.saveCandidate({ ...proposal, brainId })
+          : services.store.save({ ...proposal, brainId }))
+      : (compiled.status === 'active' && existing.status === 'candidate'
+          ? services.store.approveCandidate(existing.id, {
+            actor: 'memlume',
+            reason: 'Explicit user request confirms pending candidate.',
+          }, [brainId])
+          : existing);
+    response.status(resolution.action === 'reuse' ? 200 : 201).json({
+      capture: {
+        memoryId: memory.id,
+        status: memory.status,
+        brain: memory.brainId,
+        scope: memory.scope,
+        requiresConfirmation: resolution.requiresConfirmation,
+        source: { eventId: event.id },
+      },
+    });
+  });
+
+  app.get('/v1/memories/candidates', requireAdapter, (_request, response) => {
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const brainIds = services.brains.listMountedBrains(installation.id).map(({ brain }) => brain.id);
+    response.json({ memories: services.store.list({ brainIds, status: 'candidate' }) });
+  });
+
+  app.post('/v1/memories/:memoryId/approve', requireAdapter, (request, response) => {
+    const { memoryId } = MemoryParametersSchema.parse(request.params);
+    const input = ReviewCandidateRequestSchema.parse(request.body);
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const brainIds = services.brains.listMountedBrains(installation.id).map(({ brain }) => brain.id);
+    const candidate = services.store.get(memoryId, brainIds);
+    if (candidate === undefined) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (candidate.status !== 'candidate') {
+      response.status(409).json({ error: 'candidate_not_pending' });
+      return;
+    }
+    if (!hasWriteAccess(response, services.brains, candidate.brainId)) {
+      return;
+    }
+    const active = services.store.list({ brainIds: [candidate.brainId], status: 'active' });
+    const resolution = assessMemoryConflict({ proposal: { ...candidate, status: 'active' }, existing: active });
+    if (input.supersedeMemoryId !== undefined && resolution.action !== 'review') {
+      response.status(400).json({ error: 'invalid_supersede' });
+      return;
+    }
+    if (resolution.action === 'reuse') {
+      response.status(409).json({ error: 'active_duplicate' });
+      return;
+    }
+    if (resolution.action === 'review' && input.supersedeMemoryId !== resolution.memoryId) {
+      response.status(400).json({ error: 'confirmation_required' });
+      return;
+    }
+    response.json({ memory: services.store.approveCandidate(memoryId, input, brainIds) });
+  });
+
+  app.post('/v1/memories/:memoryId/reject', requireAdapter, (request, response) => {
+    const { memoryId } = MemoryParametersSchema.parse(request.params);
+    const input = ReviewCandidateRequestSchema.omit({ supersedeMemoryId: true }).parse(request.body);
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const brainIds = services.brains.listMountedBrains(installation.id).map(({ brain }) => brain.id);
+    const candidate = services.store.get(memoryId, brainIds);
+    if (candidate === undefined) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (candidate.status !== 'candidate') {
+      response.status(409).json({ error: 'candidate_not_pending' });
+      return;
+    }
+    if (!hasWriteAccess(response, services.brains, candidate.brainId)) {
+      return;
+    }
+    response.json({ memory: services.store.rejectCandidate(memoryId, input, brainIds) });
+  });
+
+  app.get('/v1/memories/:memoryId/history', requireAdapter, (request, response) => {
+    const { memoryId } = MemoryParametersSchema.parse(request.params);
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const brainIds = services.brains.listMountedBrains(installation.id).map(({ brain }) => brain.id);
+    const memories = services.store.listHistory(memoryId, brainIds);
+    if (memories.length === 0) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    response.json({ memories });
   });
 
   app.get('/v1/memories/search', requireAdapter, (request, response) => {
@@ -240,6 +404,27 @@ function contextBrainIds(brains: BrainStore, agentInstallationId: string): strin
         left.brain.id.localeCompare(right.brain.id),
     )
     .map(({ brain }) => brain.id);
+}
+
+function capturedStructuredData(proposal: MemoryProposal): JsonValue {
+  if (proposal.kind === 'preference') {
+    return {
+      domain: 'general',
+      subject: 'user',
+      dimension: proposal.canonicalText,
+      value: proposal.canonicalText,
+      strength: proposal.confidence,
+      confidence: proposal.confidence,
+    };
+  }
+  const packageManager = /^(?:this\s+)?project\s+(?:uses?|使用)\s+(.+)$/iu.exec(proposal.canonicalText)?.[1]
+    ?? /^這個專案使用\s*(.+)$/u.exec(proposal.canonicalText)?.[1];
+  return {
+    subject: packageManager === undefined ? 'statement' : 'project',
+    predicate: packageManager === undefined ? 'content' : 'package_manager',
+    object: packageManager ?? proposal.canonicalText,
+    confidence: proposal.confidence,
+  };
 }
 
 function tokensMatch(expected: string, actual: string | undefined): boolean {
