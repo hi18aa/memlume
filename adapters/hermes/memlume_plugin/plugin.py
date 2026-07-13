@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 
-BridgeRunner = Callable[[dict[str, Any], float], Any]
+BridgeRunner = Callable[[dict[str, Any], float | None], Any]
 COMPLETED_SESSION_LIMIT = 256
 TURN_LIMIT = 256
 
@@ -53,10 +53,10 @@ class MemlumePlugin:
             "envelope": envelope,
             "message": {"messageId": message_id, "content": user_message, "brainId": self._environment["MEMLUME_BRAIN_ID"], "scope": scope},
         })
-        context = self._invoke({
+        context = self._bounded_invoke({
             "operation": "beforeTask",
             "input": {"envelope": envelope, "intent": "shared_memory", "scope": scope, "task": None, "contextBudget": 600},
-        }, self._timeout_seconds)
+        })
         return _ephemeral_context(context)
 
     def post_llm_call(self, *, session_id: str, assistant_response: str, **_kwargs: Any) -> None:
@@ -96,11 +96,9 @@ class MemlumePlugin:
             while len(self._finished_sessions) > COMPLETED_SESSION_LIMIT:
                 self._finished_sessions.popitem(last=False)
             self._turns.pop(session_id, None)
-        scope = {"level": "project", "projectId": envelope["projectId"]}
         self._background({
             "operation": "onSessionEnd",
-            # 新 bridge process 需先以同一 envelope 綁定 SDK outbox，才能重送既有資料。
-            "input": {"envelope": envelope, "intent": "shared_memory", "scope": scope, "task": None, "contextBudget": 0},
+            "envelope": envelope,
         })
         return None
 
@@ -121,9 +119,22 @@ class MemlumePlugin:
         return envelope
 
     def _background(self, payload: dict[str, Any]) -> None:
-        threading.Thread(target=self._invoke, args=(payload, 11.0), daemon=True).start()
+        threading.Thread(target=self._invoke, args=(payload, None), daemon=True).start()
 
-    def _invoke(self, payload: dict[str, Any], timeout: float) -> Any:
+    def _bounded_invoke(self, payload: dict[str, Any]) -> Any:
+        completed = threading.Event()
+        result: list[Any] = [None]
+
+        def run() -> None:
+            try:
+                result[0] = self._invoke(payload, None)
+            finally:
+                completed.set()
+
+        threading.Thread(target=run, daemon=True).start()
+        return result[0] if completed.wait(max(self._timeout_seconds, 0)) else None
+
+    def _invoke(self, payload: dict[str, Any], timeout: float | None) -> Any:
         try:
             return self._runner(payload, timeout)
         except Exception:
@@ -134,7 +145,7 @@ class _SubprocessBridge:
     def __init__(self, environment: Mapping[str, str]) -> None:
         self._environment = dict(environment)
 
-    def __call__(self, payload: dict[str, Any], timeout: float) -> Any:
+    def __call__(self, payload: dict[str, Any], timeout: float | None) -> Any:
         bridge = self._environment.get("MEMLUME_NODE_BRIDGE") or str(Path(__file__).resolve().parents[1] / "bridge.mjs")
         environment = os.environ.copy()
         environment.update(self._environment)

@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import sys
 import threading
+import time
 import unittest
 
 
@@ -101,6 +102,32 @@ class HermesPluginTests(unittest.TestCase):
         audits = [call for call in calls if call["operation"] == "afterTask"]
         self.assertEqual([audit["envelope"]["sessionId"] for audit in audits], ["unfinished-256"])
 
+    def test_pre_timeout_keeps_bridge_running_without_a_kill_timeout(self):
+        plugin_module = importlib.import_module("memlume_plugin.plugin")
+        calls = []
+        started = threading.Event()
+        release = threading.Event()
+        completed = threading.Event()
+
+        def runner(payload, timeout):
+            calls.append((payload, timeout))
+            if payload["operation"] == "beforeTask":
+                started.set()
+                release.wait(1)
+                completed.set()
+                return {"directives": [{"text": "稍後完成的共享內容。"}]}
+            return {}
+
+        plugin = plugin_module.MemlumePlugin(environment=self.environment, runner=runner, timeout_seconds=0.01)
+        started_at = time.monotonic()
+        self.assertIsNone(plugin.pre_llm_call(session_id="slow-context", user_message="記住專案使用 pnpm"))
+        self.assertLess(time.monotonic() - started_at, 0.2)
+        self.assertTrue(started.is_set())
+        self.assertIsNone(next(timeout for payload, timeout in calls if payload["operation"] == "beforeTask"))
+
+        release.set()
+        self.assertTrue(completed.wait(0.3))
+
     def test_finalization_without_session_flushes_last_envelope_once_and_bounds_completed_sessions(self):
         plugin_module = importlib.import_module("memlume_plugin.plugin")
         calls = []
@@ -119,7 +146,7 @@ class HermesPluginTests(unittest.TestCase):
         self.assertTrue(flushed.wait(0.3))
         session_end = [call for call in calls if call["operation"] == "onSessionEnd"]
         self.assertEqual(len(session_end), 1)
-        self.assertEqual(session_end[0]["input"]["envelope"]["sessionId"], "finalize-session")
+        self.assertEqual(session_end[0]["envelope"]["sessionId"], "finalize-session")
         plugin.on_session_end(session_id="finalize-session")
         self.assertEqual(len([call for call in calls if call["operation"] == "onSessionEnd"]), 1)
 

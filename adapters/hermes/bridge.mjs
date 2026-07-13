@@ -8,6 +8,7 @@ try {
   const client = new AdapterClient({
     daemonUrl: process.env.MEMLUME_DAEMON_URL ?? 'http://127.0.0.1:3849',
     token: process.env.MEMLUME_TOKEN,
+    ...(process.env.MEMLUME_OUTBOX_DIRECTORY ? { outboxDirectory: process.env.MEMLUME_OUTBOX_DIRECTORY } : {}),
     warn: () => undefined,
   });
   const result = await invoke(client, request);
@@ -27,9 +28,7 @@ async function invoke(client, request) {
     case 'afterTask':
       return client.afterTask(request.envelope, request.message);
     case 'onSessionEnd':
-      // A one-shot bridge must bind the SDK's stable outbox identity before flush.
-      await client.beforeTask(request.input);
-      return client.onSessionEnd();
+      return client.onSessionEnd(request.envelope);
     default:
       throw new Error('Unsupported bridge operation.');
   }

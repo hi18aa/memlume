@@ -170,7 +170,8 @@ export class AdapterClient {
     });
   }
 
-  async onSessionEnd(): Promise<readonly WriteResult[]> {
+  async onSessionEnd(envelope?: AdapterEnvelope): Promise<readonly WriteResult[]> {
+    this.bindOutbox(envelope);
     return this.serialize(() => this.flush());
   }
 

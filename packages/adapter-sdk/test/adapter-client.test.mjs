@@ -429,6 +429,25 @@ describe('AdapterClient', () => {
     assert.deepEqual(await client.onSessionEnd(), []);
   });
 
+  test('binds a default outbox from the ending envelope before flushing a fresh client', async () => {
+    const outboxDirectory = temporaryOutboxDirectory();
+    const offline = new AdapterClient({
+      daemonUrl: 'http://127.0.0.1:3849',
+      token,
+      outboxDirectory,
+      fetch: fakeFetch({ status: 503, body: { error: 'unavailable' } }).fetch,
+    });
+    await offline.onUserMessage(envelope, { messageId: 'ending-pending', content: 'Remember this project uses pnpm.' });
+
+    const recovered = new AdapterClient({
+      daemonUrl: 'http://127.0.0.1:3849',
+      token,
+      outboxDirectory,
+      fetch: fakeFetch({ status: 201, body: savedCapture() }).fetch,
+    });
+    assert.deepEqual(await recovered.onSessionEnd(envelope), [{ status: 'saved', memoryStatus: 'active' }]);
+  });
+
   test('flushes an existing outbox at the next user-turn callback without waiting for session end', async () => {
     const outboxPath = temporaryOutbox();
     const offline = new AdapterClient({

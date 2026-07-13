@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -88,10 +89,15 @@ function envelope(clientType: string, installationId: string) {
   return { clientType, installationId, profileId: 'default', sessionId: 'shared-session', projectId: 'memlume' };
 }
 
-function invokeHermesBridge(daemon: RunningDaemon, token: string, payload: unknown): Promise<unknown> {
+function invokeHermesBridge(daemon: RunningDaemon, token: string, payload: unknown, outboxDirectory?: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [HERMES_BRIDGE], {
-      env: { ...process.env, MEMLUME_DAEMON_URL: daemonUrl(daemon), MEMLUME_TOKEN: token },
+      env: {
+        ...process.env,
+        MEMLUME_DAEMON_URL: daemonUrl(daemon),
+        MEMLUME_TOKEN: token,
+        ...(outboxDirectory === undefined ? {} : { MEMLUME_OUTBOX_DIRECTORY: outboxDirectory }),
+      },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let output = '';
@@ -112,6 +118,11 @@ function invokeHermesBridge(daemon: RunningDaemon, token: string, payload: unkno
     });
     child.stdin!.end(`${JSON.stringify(payload)}\n`);
   });
+}
+
+function defaultOutboxLockPath(source: ReturnType<typeof envelope>, outboxDirectory: string): string {
+  const identity = JSON.stringify([source.clientType, source.installationId, source.profileId]);
+  return join(outboxDirectory, 'outbox', `${createHash('sha256').update(identity).digest('hex')}.jsonl.lock`);
 }
 
 async function rememberThroughMcp(daemon: RunningDaemon, token: string, brainId: string): Promise<unknown> {
@@ -267,6 +278,47 @@ describe('shared brain adapter end-to-end flow', () => {
       envelope: envelope('hermes', 'hermes-read-only'),
       message: { ...message, messageId: 'hermes-denied' },
     })).resolves.toEqual({ ok: true, result: { status: 'rejected' } });
+  });
+
+  test('flushes a queued Hermes bridge capture after a daemon restart without leaving an outbox lock', async () => {
+    const { daemon, databasePath } = await start();
+    const brainId = await createBrain(daemon);
+    const hermes = await registerAdapter(daemon, 'hermes', 'hermes-offline-bridge');
+    await mount(daemon, hermes.id, brainId, 'read_write');
+    const source = envelope('hermes', 'hermes-offline-bridge');
+    const outboxDirectory = temporaryDirectory();
+    const lockPath = defaultOutboxLockPath(source, outboxDirectory);
+    const message = {
+      brainId,
+      messageId: 'hermes-offline-pnpm',
+      content: '記住專案使用 pnpm',
+      scope: { level: 'project' as const, projectId: 'memlume' },
+    };
+
+    await daemon.stop();
+    await expect(invokeHermesBridge(daemon, hermes.token, {
+      operation: 'onUserMessage',
+      envelope: source,
+      message,
+    }, outboxDirectory)).resolves.toEqual({ ok: true, result: { status: 'queued' } });
+    expect(existsSync(lockPath)).toBe(false);
+
+    const restarted = await startDaemon({ databasePath, port: daemon.address.port, setupToken: SETUP_TOKEN });
+    daemons.push(restarted);
+    await expect(invokeHermesBridge(restarted, hermes.token, {
+      operation: 'onSessionEnd',
+      envelope: source,
+    }, outboxDirectory)).resolves.toEqual({ ok: true, result: [{ status: 'saved', memoryStatus: 'active' }] });
+    expect(existsSync(lockPath)).toBe(false);
+
+    const reader = new AdapterClient({ daemonUrl: daemonUrl(restarted), token: hermes.token, outboxDirectory: temporaryDirectory() });
+    await expect(reader.beforeTask({
+      envelope: source,
+      intent: 'implementation',
+      scope: message.scope,
+      task: 'pnpm',
+      contextBudget: 100,
+    })).resolves.toMatchObject({ knowledge: [{ brainId, summary: '專案使用 pnpm' }] });
   });
 
   test('continues without shared context then resends a queued capture after daemon restart', async () => {
