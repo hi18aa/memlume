@@ -18,6 +18,8 @@ import {
 } from '@memlume/contracts';
 
 const REQUEST_TIMEOUT_MS = 10_000;
+const CONTEXT_REQUEST_TIMEOUT_MS = 250;
+const OUTBOX_FLUSH_GRACE_MS = 50;
 const OUTBOX_LOCK_RETRY_MS = 10;
 const OUTBOX_LOCK_TIMEOUT_MS = 15_000;
 const SECRET_OUTBOX_WARNING = 'Memlume outbox skipped a message containing a secret.';
@@ -135,23 +137,21 @@ export class AdapterClient {
     }
     const { envelope, ...requestInput } = input;
     this.bindOutbox(envelope);
-    return this.serialize(async () => {
-      await this.flush();
-      try {
-        const response = await this.request('/v1/context/resolve', 'POST', requestInput);
-        if (!response.ok) {
-          throw new Error('Context request failed.');
-        }
-        const result = await response.json();
-        return ContextPackSchema.parse(isRecord(result) ? result.context : undefined);
-      } catch {
-        if (!this.warnedAboutContext) {
-          this.warnedAboutContext = true;
-          this.warn('Memlume context unavailable; continuing without shared context.');
-        }
-        return emptyContext(input);
+    await withTimeout(this.flush(), OUTBOX_FLUSH_GRACE_MS).catch(() => undefined);
+    try {
+      const response = await this.request('/v1/context/resolve', 'POST', requestInput, CONTEXT_REQUEST_TIMEOUT_MS);
+      if (!response.ok) {
+        throw new Error('Context request failed.');
       }
-    });
+      const result = await response.json();
+      return ContextPackSchema.parse(isRecord(result) ? result.context : undefined);
+    } catch {
+      if (!this.warnedAboutContext) {
+        this.warnedAboutContext = true;
+        this.warn('Memlume context unavailable; continuing without shared context.');
+      }
+      return emptyContext(input);
+    }
   }
 
   async onUserMessage(envelope: AdapterEnvelope, message: AdapterMessage): Promise<WriteResult> {
@@ -326,17 +326,17 @@ export class AdapterClient {
     }
   }
 
-  private request(path: string, method: 'POST', body: unknown): Promise<Response> {
+  private request(path: string, method: 'POST', body: unknown, timeoutMs = REQUEST_TIMEOUT_MS): Promise<Response> {
     if (!hasToken(this.token)) {
       throw new Error('Adapter token is unavailable.');
     }
-    return this.fetch(new URL(path, this.daemonUrl), {
+    return withTimeout(this.fetch(new URL(path, this.daemonUrl), {
       method,
       redirect: 'error',
       headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+      signal: AbortSignal.timeout(timeoutMs),
+    }), timeoutMs);
   }
 
   private bindOutbox(envelope: AdapterEnvelope | undefined): void {
@@ -346,6 +346,22 @@ export class AdapterClient {
     const parsed = AdapterEnvelopeSchema.safeParse(envelope);
     if (parsed.success) {
       this.outboxPath = defaultOutboxPath(parsed.data, this.outboxDirectory);
+    }
+  }
+}
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error('Memlume request timed out.')), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
     }
   }
 }
