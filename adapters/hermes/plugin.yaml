@@ -1,0 +1,4 @@
+name: memlume
+version: "0.1.0"
+description: 將 Hermes 對話連接到本機 Memlume Shared Brain。
+entry_point: memlume_plugin.plugin:register
