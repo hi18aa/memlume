@@ -57,6 +57,83 @@ afterEach(async () => {
 });
 
 describe('localhost daemon API', () => {
+  test('redacts raw and nested structured credentials before direct event and capture writes reach SQLite', async () => {
+    const { daemon, headers, databasePath } = await startAdapterDaemon();
+    const secret = 'sk-live-never-persist-this';
+
+    const event = await requestJson(daemon, '/v1/events', {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        rawContent: `Authorization: Bearer ${secret}`,
+        eventType: 'task_completed',
+        source: { type: 'test', reference: 'event:redaction' },
+        structuredData: { metadata: [{ apiKey: secret }, { note: `AUTH_TOKEN=${secret}` }] },
+      }),
+    });
+    const capture = await requestJson(daemon, '/v1/memories/capture', {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        rawContent: 'remember this project uses pnpm',
+        eventType: 'user_statement',
+        source: { type: 'test', reference: 'capture:redaction' },
+        structuredData: { nested: { password: secret } },
+        scope: { level: 'project', projectId: 'memlume' },
+      }),
+    });
+
+    expect(event.response.status).toBe(201);
+    expect(capture.response.status).toBe(201);
+    const database = openDatabase(databasePath);
+    try {
+      const stored = database.prepare('SELECT raw_content, structured_data FROM events ORDER BY rowid').all();
+      expect(JSON.stringify(stored)).not.toContain(secret);
+      expect(JSON.stringify(stored)).toContain('[redacted]');
+      expect(JSON.stringify(database.prepare('SELECT canonical_text, structured_data FROM memory_items').all())).not.toContain(secret);
+    } finally {
+      database.close();
+    }
+  });
+
+  test('redacts credentials carried by event sources and capture scopes before persistence', async () => {
+    const { daemon, headers, databasePath } = await startAdapterDaemon();
+    const secret = 'sk-live-never-persist-this';
+
+    const event = await requestJson(daemon, '/v1/events', {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        rawContent: 'A safe event body.',
+        eventType: 'task_completed',
+        source: { type: 'test', reference: `Authorization: Bearer ${secret}` },
+      }),
+    });
+    const capture = await requestJson(daemon, '/v1/memories/capture', {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        rawContent: 'remember this project uses pnpm',
+        eventType: 'user_statement',
+        source: { type: 'test', messageId: secret },
+        scope: { level: 'project', projectId: secret },
+      }),
+    });
+
+    expect(event.response.status).toBe(201);
+    expect(capture.response.status).toBe(201);
+    expect(JSON.stringify(capture.body)).not.toContain(secret);
+    const database = openDatabase(databasePath);
+    try {
+      const events = database.prepare('SELECT source_reference, source_data FROM events ORDER BY rowid').all();
+      const memories = database.prepare('SELECT scope_data FROM memory_items').all();
+      expect(JSON.stringify({ events, memories })).not.toContain(secret);
+      expect(JSON.stringify({ events, memories })).toContain('[redacted]');
+    } finally {
+      database.close();
+    }
+  });
+
   test('captures a redacted audit event for a secret without persisting the secret', async () => {
     const { daemon, headers, databasePath } = await startAdapterDaemon();
     const secret = 'sk-live-never-persist-this';

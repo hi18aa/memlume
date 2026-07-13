@@ -14,12 +14,14 @@ import {
   PolicyDataSchema,
   PreferenceDataSchema,
   UuidV7Schema,
+  redactSensitiveJson,
+  redactSensitiveText,
   type AgentInstallation,
   type JsonValue,
 } from '@memlume/contracts';
 import { ContextResolver } from '@memlume/context-resolver';
 import { EventBrainConflictError, EventJournal } from '@memlume/event-journal';
-import { assessMemoryConflict, compileMemory, redactSecrets, type MemoryProposal } from '@memlume/memory-compiler';
+import { assessMemoryConflict, compileMemory, type MemoryProposal } from '@memlume/memory-compiler';
 import { MemoryStore, SourceEventBrainMismatchError } from '@memlume/retrieval';
 import { BrainStore } from '@memlume/shared-brains';
 import { timingSafeEqual } from 'node:crypto';
@@ -151,7 +153,10 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     if (!hasWriteAccess(response, services.brains, brainId)) {
       return;
     }
-    response.status(201).json({ event: services.journal.append({ ...input, brainId }) });
+    const rawContent = redactSensitiveText(input.rawContent).redacted;
+    const structuredData = input.structuredData === undefined ? undefined : redactSensitiveJson(input.structuredData).redacted;
+    const source = redactEventSource(input.source);
+    response.status(201).json({ event: services.journal.append({ ...input, brainId, rawContent, source, ...(structuredData === undefined ? {} : { structuredData }) }) });
   });
 
   app.post('/v1/memories', requireAdapter, (request, response) => {
@@ -160,7 +165,14 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     if (!hasWriteAccess(response, services.brains, brainId)) {
       return;
     }
-    response.status(201).json({ memory: services.store.save({ ...input, brainId }) });
+    const sanitized = SaveMemoryRequestSchema.parse({
+      ...input,
+      canonicalText: redactSensitiveText(input.canonicalText).redacted,
+      ...(input.title === undefined ? {} : { title: redactSensitiveText(input.title).redacted }),
+      structuredData: redactSensitiveJson(input.structuredData).redacted,
+      scope: redactMemoryScope(input.scope),
+    });
+    response.status(201).json({ memory: services.store.save({ ...sanitized, brainId }) });
   });
 
   app.post('/v1/memories/capture', requireAdapter, (request, response) => {
@@ -169,18 +181,21 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     if (!hasWriteAccess(response, services.brains, brainId)) {
       return;
     }
-    const redaction = redactSecrets(input.rawContent);
+    const redaction = redactSensitiveText(input.rawContent);
+    const structuredData = input.structuredData === undefined ? undefined : redactSensitiveJson(input.structuredData).redacted;
+    const source = redactEventSource(input.source);
+    const scope = redactMemoryScope(input.scope);
     const event = services.journal.append({
       brainId,
       rawContent: redaction.redacted,
       eventType: input.eventType,
-      source: input.source,
-      structuredData: input.structuredData,
+      source,
+      ...(structuredData === undefined ? {} : { structuredData }),
       occurredAt: input.occurredAt,
     });
     const compiled = compileMemory({
       event: redaction.detected ? { ...event, rawContent: input.rawContent } : event,
-      scope: input.scope,
+      scope,
     });
     if (compiled.status === 'ignore' || compiled.status === 'rejected') {
       response.json({
@@ -188,7 +203,7 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
           memoryId: null,
           status: compiled.status,
           brain: brainId,
-          scope: input.scope,
+          scope,
           requiresConfirmation: false,
           source: { eventId: event.id },
         },
@@ -404,6 +419,18 @@ function contextBrainIds(brains: BrainStore, agentInstallationId: string): strin
         left.brain.id.localeCompare(right.brain.id),
     )
     .map(({ brain }) => brain.id);
+}
+
+function redactEventSource(source: z.infer<typeof EventSourceSchema>): z.infer<typeof EventSourceSchema> {
+  return EventSourceSchema.parse(
+    Object.fromEntries(
+      Object.entries(source).map(([key, value]) => [key, value === undefined ? undefined : redactSensitiveText(value).redacted]),
+    ),
+  );
+}
+
+function redactMemoryScope(scope: z.infer<typeof MemoryScopeSchema>): z.infer<typeof MemoryScopeSchema> {
+  return MemoryScopeSchema.parse(redactSensitiveJson(scope as unknown as JsonValue).redacted);
 }
 
 function capturedStructuredData(proposal: MemoryProposal): JsonValue {

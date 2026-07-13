@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -9,6 +9,8 @@ import {
   MemoryScopeSchema,
   UuidV7Schema,
   createUuidV7,
+  redactSensitiveJson,
+  redactSensitiveText,
   type AdapterEnvelope,
   type ContextPack,
   type JsonValue,
@@ -16,6 +18,10 @@ import {
 } from '@memlume/contracts';
 
 const REQUEST_TIMEOUT_MS = 10_000;
+const OUTBOX_LOCK_RETRY_MS = 10;
+const OUTBOX_LOCK_TIMEOUT_MS = 15_000;
+const SECRET_OUTBOX_WARNING = 'Memlume outbox skipped a message containing a secret.';
+const explicitMemoryRequestPattern = /^\s*(?:(?:請|請你)\s*)?(?:記住|記下|記錄|remember|memorize|save(?:\s+this)?)\s*[,，:：]?\s*/iu;
 
 export interface AdapterClientOptions {
   readonly daemonUrl: string;
@@ -40,13 +46,25 @@ export interface AdapterMessage {
   readonly messageId: string;
   readonly content: string;
   readonly brainId?: string;
+  readonly scope?: MemoryScope;
   readonly occurredAt?: string;
   readonly structuredData?: JsonValue;
 }
 
-export type WriteResult = { readonly status: 'saved' | 'queued' | 'rejected' };
+export type CapturedMemoryStatus = 'active' | 'candidate' | 'ignore' | 'rejected';
+export type WriteResult =
+  | { readonly status: 'saved'; readonly memoryStatus?: CapturedMemoryStatus }
+  | { readonly status: 'ignored'; readonly memoryStatus: 'ignore' }
+  | { readonly status: 'queued' | 'rejected' };
 
-interface AppendEventRequest {
+export interface OutboxStatus {
+  readonly state: 'unbound' | 'unavailable' | 'empty' | 'pending' | 'discarded';
+  readonly pending: number;
+  readonly retry: number;
+  readonly discarded: number;
+}
+
+interface BaseWriteRequest {
   readonly rawContent: string;
   readonly eventType: 'user_message' | 'task_completed';
   readonly source: {
@@ -61,10 +79,32 @@ interface AppendEventRequest {
   readonly structuredData: JsonValue;
 }
 
-interface PendingEvent {
-  readonly messageId: string;
-  readonly request: AppendEventRequest;
+interface AppendEventRequest extends BaseWriteRequest {
+  readonly endpoint: '/v1/events';
 }
+
+interface CaptureMemoryRequest extends BaseWriteRequest {
+  readonly endpoint: '/v1/memories/capture';
+  readonly scope: MemoryScope;
+}
+
+type WriteRequest = AppendEventRequest | CaptureMemoryRequest;
+
+interface PendingWrite {
+  readonly state: 'pending' | 'retry';
+  readonly retryCount: number;
+  readonly messageId: string;
+  readonly request: WriteRequest;
+}
+
+interface DiscardedWrite {
+  readonly state: 'discarded';
+  readonly messageId: string;
+  readonly endpoint: WriteRequest['endpoint'];
+  readonly discardedAt: string;
+}
+
+type OutboxEntry = PendingWrite | DiscardedWrite;
 
 export class AdapterClient {
   private readonly daemonUrl: string;
@@ -86,36 +126,76 @@ export class AdapterClient {
   }
 
   async beforeTask(input: BeforeTaskInput): Promise<ContextPack> {
-    const { envelope, ...requestInput } = input;
-    this.bindOutbox(envelope);
-    try {
-      const response = await this.request('/v1/context/resolve', 'POST', requestInput);
-      if (!response.ok) {
-        throw new Error('Context request failed.');
-      }
-      const result = await response.json();
-      return ContextPackSchema.parse(isRecord(result) ? result.context : undefined);
-    } catch {
+    if (redactSensitiveJson(input.scope).detected) {
       if (!this.warnedAboutContext) {
         this.warnedAboutContext = true;
         this.warn('Memlume context unavailable; continuing without shared context.');
       }
       return emptyContext(input);
     }
+    const { envelope, ...requestInput } = input;
+    this.bindOutbox(envelope);
+    return this.serialize(async () => {
+      await this.flush();
+      try {
+        const response = await this.request('/v1/context/resolve', 'POST', requestInput);
+        if (!response.ok) {
+          throw new Error('Context request failed.');
+        }
+        const result = await response.json();
+        return ContextPackSchema.parse(isRecord(result) ? result.context : undefined);
+      } catch {
+        if (!this.warnedAboutContext) {
+          this.warnedAboutContext = true;
+          this.warn('Memlume context unavailable; continuing without shared context.');
+        }
+        return emptyContext(input);
+      }
+    });
   }
 
   async onUserMessage(envelope: AdapterEnvelope, message: AdapterMessage): Promise<WriteResult> {
     this.bindOutbox(envelope);
-    return this.serialize(() => this.write(eventRequest(envelope, message, 'user_message')));
+    return this.serialize(async () => {
+      await this.flush();
+      return this.write(captureRequest(envelope, message));
+    });
   }
 
   async afterTask(envelope: AdapterEnvelope, message: AdapterMessage): Promise<WriteResult> {
     this.bindOutbox(envelope);
-    return this.serialize(() => this.write(eventRequest(envelope, message, 'task_completed')));
+    return this.serialize(async () => {
+      await this.flush();
+      return this.write(eventRequest(envelope, message, 'task_completed'));
+    });
   }
 
   async onSessionEnd(): Promise<readonly WriteResult[]> {
     return this.serialize(() => this.flush());
+  }
+
+  outboxStatus(): Promise<OutboxStatus> {
+    return this.serialize(() => this.readOutboxStatus());
+  }
+
+  private async readOutboxStatus(): Promise<OutboxStatus> {
+    const outboxPath = this.outboxPath;
+    if (outboxPath === undefined) {
+      return { state: 'unbound', pending: 0, retry: 0, discarded: 0 };
+    }
+    try {
+      const entries = await readOutbox(outboxPath);
+      const pending = entries.filter(isPendingWrite);
+      const discarded = entries.filter(isDiscardedWrite).length;
+      return {
+        state: pending.length > 0 ? 'pending' : discarded > 0 ? 'discarded' : 'empty',
+        pending: pending.length,
+        retry: pending.filter(({ state }) => state === 'retry').length,
+        discarded,
+      };
+    } catch {
+      return { state: 'unavailable', pending: 0, retry: 0, discarded: 0 };
+    }
   }
 
   private async flush(): Promise<readonly WriteResult[]> {
@@ -123,26 +203,48 @@ export class AdapterClient {
     if (outboxPath === undefined) {
       return [];
     }
-    let pending: PendingEvent[];
     try {
-      pending = await readOutbox(outboxPath);
+      return await withOutboxLock(outboxPath, () => this.flushLocked(outboxPath));
+    } catch {
+      return [];
+    }
+  }
+
+  private async flushLocked(outboxPath: string): Promise<readonly WriteResult[]> {
+    let entries: OutboxEntry[];
+    try {
+      entries = await readOutbox(outboxPath);
     } catch {
       return [];
     }
 
     const results: WriteResult[] = [];
-    const remaining: PendingEvent[] = [];
-    for (const entry of pending) {
+    const remaining: OutboxEntry[] = entries.filter(isDiscardedWrite);
+    for (const entry of entries.filter(isPendingWrite)) {
+      if (containsSecret(entry.request)) {
+        this.warn(SECRET_OUTBOX_WARNING);
+        results.push({ status: 'rejected' });
+        continue;
+      }
       const result = await this.deliver(entry.request);
       results.push(result);
       if (result.status === 'queued') {
-        remaining.push(entry);
+        remaining.push({ ...entry, state: 'retry', retryCount: entry.retryCount + 1 });
+      } else if (result.status === 'rejected') {
+        remaining.push({
+          state: 'discarded',
+          messageId: entry.messageId,
+          endpoint: entry.request.endpoint,
+          discardedAt: new Date().toISOString(),
+        });
       }
     }
-    try {
-      await writeOutbox(outboxPath, remaining);
-    } catch {
-      this.warn('Memlume outbox update unavailable; queued events will retry later.');
+    if (entries.length > 0) {
+      try {
+        await writeOutbox(outboxPath, remaining);
+      } catch {
+        this.warn('Memlume outbox update unavailable; queued events will retry later.');
+      }
     }
     return results;
   }
@@ -156,7 +258,7 @@ export class AdapterClient {
     return next;
   }
 
-  private async write(request: AppendEventRequest | undefined): Promise<WriteResult> {
+  private async write(request: WriteRequest | undefined): Promise<WriteResult> {
     if (request === undefined) {
       return { status: 'rejected' };
     }
@@ -165,35 +267,59 @@ export class AdapterClient {
     return result.status === 'queued' ? this.queue(request) : result;
   }
 
-  private async deliver(request: AppendEventRequest): Promise<WriteResult> {
+  private async deliver(request: WriteRequest): Promise<WriteResult> {
     if (!hasToken(this.token)) {
       return { status: 'rejected' };
     }
 
     try {
-      const response = await this.request('/v1/events', 'POST', request);
+      const { endpoint, ...body } = request;
+      const response = await this.request(endpoint, 'POST', body);
       if (response.ok) {
-        return confirmedEvent(await response.json()) ? { status: 'saved' } : { status: 'queued' };
+        const result = await response.json();
+        if (request.endpoint === '/v1/events') {
+          return confirmedEvent(result) ? { status: 'saved' } : { status: 'queued' };
+        }
+        const memoryStatus = confirmedCapture(result);
+        if (memoryStatus === undefined) {
+          return { status: 'queued' };
+        }
+        if (memoryStatus === 'rejected') {
+          return { status: 'rejected' };
+        }
+        if (memoryStatus === 'ignore') {
+          return { status: 'ignored', memoryStatus };
+        }
+        return { status: 'saved', memoryStatus };
       }
-      return response.status >= 400 && response.status < 500 ? { status: 'rejected' } : { status: 'queued' };
+      return response.status >= 400 && response.status < 500 && response.status !== 429 ? { status: 'rejected' } : { status: 'queued' };
     } catch {
       return { status: 'queued' };
     }
   }
 
-  private async queue(request: AppendEventRequest): Promise<WriteResult> {
+  private async queue(request: WriteRequest): Promise<WriteResult> {
+    if (containsSecret(request)) {
+      this.warn(SECRET_OUTBOX_WARNING);
+      return { status: 'rejected' };
+    }
+    if (!canQueueOffline(request)) {
+      return { status: 'rejected' };
+    }
     const outboxPath = this.outboxPath;
     if (outboxPath === undefined) {
       this.warn('Memlume outbox unavailable; event was not persisted.');
       return { status: 'rejected' };
     }
     try {
-      const pending = await readOutbox(outboxPath);
-      if (!pending.some((entry) => sameEvent(entry.request, request))) {
-        await mkdir(dirname(outboxPath), { recursive: true });
-        await appendFile(outboxPath, `${JSON.stringify({ messageId: request.source.messageId, request })}\n`, 'utf8');
-      }
-      return { status: 'queued' };
+      return await withOutboxLock(outboxPath, async () => {
+        const pending = await readOutbox(outboxPath);
+        if (!pending.filter(isPendingWrite).some((entry) => sameRequest(entry.request, request))) {
+          pending.push({ state: 'pending', retryCount: 0, messageId: request.source.messageId, request });
+        }
+        await writeOutbox(outboxPath, pending);
+        return { status: 'queued' };
+      });
     } catch {
       this.warn('Memlume outbox unavailable; event was not persisted.');
       return { status: 'rejected' };
@@ -234,26 +360,48 @@ function eventRequest(
     return undefined;
   }
   const value = parsedEnvelope.data;
+  const structuredData: JsonValue = {
+    envelope: value,
+    ...(message.structuredData === undefined ? {} : { data: message.structuredData }),
+  };
+  const source = {
+    type: value.clientType,
+    agent: value.clientType,
+    conversationId: value.sessionId,
+    messageId: message.messageId,
+    reference: JSON.stringify([value.clientType, value.installationId, value.profileId, value.sessionId, message.messageId]),
+  };
+  if (redactSensitiveText(message.content).detected || redactSensitiveJson(structuredData).detected || redactSensitiveJson(source).detected) {
+    return undefined;
+  }
   return {
+    endpoint: '/v1/events',
     rawContent: message.content,
     eventType,
-    source: {
-      type: value.clientType,
-      agent: value.clientType,
-      conversationId: value.sessionId,
-      messageId: message.messageId,
-      reference: JSON.stringify([value.clientType, value.installationId, value.profileId, value.sessionId, message.messageId]),
-    },
+    source,
     ...(message.brainId === undefined ? {} : { brainId: message.brainId }),
     ...(message.occurredAt === undefined ? {} : { occurredAt: message.occurredAt }),
-    structuredData: {
-      envelope: value,
-      ...(message.structuredData === undefined ? {} : { data: message.structuredData }),
-    },
+    structuredData,
   };
 }
 
-async function readOutbox(path: string): Promise<PendingEvent[]> {
+function captureRequest(envelope: AdapterEnvelope, message: AdapterMessage): CaptureMemoryRequest | undefined {
+  const request = eventRequest(envelope, message, 'user_message');
+  const parsedEnvelope = AdapterEnvelopeSchema.safeParse(envelope);
+  if (request === undefined || !parsedEnvelope.success) {
+    return undefined;
+  }
+  const scope = MemoryScopeSchema.safeParse(message.scope ?? { level: 'project', projectId: parsedEnvelope.data.projectId });
+  if (!scope.success) {
+    return undefined;
+  }
+  if (redactSensitiveJson(scope.data).detected) {
+    return undefined;
+  }
+  return { ...request, endpoint: '/v1/memories/capture', scope: scope.data };
+}
+
+async function readOutbox(path: string): Promise<OutboxEntry[]> {
   let text: string;
   try {
     text = await readFile(path, 'utf8');
@@ -263,22 +411,142 @@ async function readOutbox(path: string): Promise<PendingEvent[]> {
     }
     throw error;
   }
-  return text
-    .split('\n')
-    .filter((line) => line !== '')
-    .map((line) => JSON.parse(line) as PendingEvent);
+  const lines = text.split('\n');
+  const entries: OutboxEntry[] = [];
+  for (const [index, line] of lines.entries()) {
+    if (line === '') {
+      continue;
+    }
+    try {
+      entries.push(parseOutboxEntry(JSON.parse(line)));
+    } catch (error) {
+      if (index === lines.length - 1 && !text.endsWith('\n')) {
+        continue;
+      }
+      throw error;
+    }
+  }
+  return entries;
 }
 
-async function writeOutbox(path: string, pending: readonly PendingEvent[]): Promise<void> {
+async function writeOutbox(path: string, pending: readonly OutboxEntry[]): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporaryPath = `${path}.${process.pid}.tmp`;
-  // ponytail: one AdapterClient serializes one outbox path; add a cross-process lock if multiple processes share one.
   await writeFile(temporaryPath, pending.map((entry) => JSON.stringify(entry)).join('\n') + (pending.length === 0 ? '' : '\n'), 'utf8');
   await rename(temporaryPath, path);
 }
 
-function sameEvent(left: AppendEventRequest, right: AppendEventRequest): boolean {
-  return left.rawContent === right.rawContent && left.source.reference === right.source.reference;
+async function withOutboxLock<T>(outboxPath: string, operation: () => Promise<T>): Promise<T> {
+  const lockPath = `${outboxPath}.lock`;
+  await mkdir(dirname(outboxPath), { recursive: true });
+  const deadline = Date.now() + OUTBOX_LOCK_TIMEOUT_MS;
+  for (;;) {
+    try {
+      await mkdir(lockPath);
+      break;
+    } catch (error) {
+      if (!isExistingPath(error) || Date.now() >= deadline) {
+        throw error;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, OUTBOX_LOCK_RETRY_MS));
+    }
+  }
+  try {
+    return await operation();
+  } finally {
+    // ponytail: directory lock serializes local processes; replace with SQLite only if outbox volume needs cross-host coordination.
+    await rm(lockPath, { force: true, recursive: true });
+  }
+}
+
+function sameRequest(left: WriteRequest, right: WriteRequest): boolean {
+  return left.endpoint === right.endpoint && left.rawContent === right.rawContent && left.source.reference === right.source.reference;
+}
+
+function containsSecret(request: WriteRequest): boolean {
+  return redactSensitiveText(request.rawContent).detected ||
+    redactSensitiveJson(request.structuredData).detected ||
+    redactSensitiveJson(request.source).detected ||
+    (request.endpoint === '/v1/memories/capture' && redactSensitiveJson(request.scope).detected);
+}
+
+function canQueueOffline(request: WriteRequest): request is CaptureMemoryRequest {
+  return request.endpoint === '/v1/memories/capture' && explicitMemoryRequestPattern.test(request.rawContent);
+}
+
+function parseOutboxEntry(value: unknown): OutboxEntry {
+  if (!isRecord(value) || typeof value.messageId !== 'string') {
+    throw new Error('Outbox entry is invalid.');
+  }
+  if (value.state === 'discarded') {
+    if (!isWriteEndpoint(value.endpoint) || typeof value.discardedAt !== 'string') {
+      throw new Error('Discarded outbox entry is invalid.');
+    }
+    return { state: 'discarded', messageId: value.messageId, endpoint: value.endpoint, discardedAt: value.discardedAt };
+  }
+  if (value.state !== undefined && value.state !== 'pending' && value.state !== 'retry') {
+    throw new Error('Outbox entry state is invalid.');
+  }
+  const retryCount = value.retryCount === undefined ? 0 : value.retryCount;
+  if (typeof retryCount !== 'number' || !Number.isSafeInteger(retryCount) || retryCount < 0) {
+    throw new Error('Outbox retry count is invalid.');
+  }
+  return {
+    state: value.state === 'retry' ? 'retry' : 'pending',
+    retryCount,
+    messageId: value.messageId,
+    request: parseWriteRequest(value.request),
+  };
+}
+
+function parseWriteRequest(value: unknown): WriteRequest {
+  if (!isRecord(value) || typeof value.rawContent !== 'string' || (value.eventType !== 'user_message' && value.eventType !== 'task_completed') || !isRecord(value.source)) {
+    throw new Error('Outbox request is invalid.');
+  }
+  const source = value.source;
+  if (
+    typeof source.type !== 'string' ||
+    typeof source.agent !== 'string' ||
+    typeof source.conversationId !== 'string' ||
+    typeof source.messageId !== 'string' ||
+    typeof source.reference !== 'string'
+  ) {
+    throw new Error('Outbox event source is invalid.');
+  }
+  const request: BaseWriteRequest = {
+    rawContent: value.rawContent,
+    eventType: value.eventType,
+    source: {
+      type: source.type,
+      agent: source.agent,
+      conversationId: source.conversationId,
+      messageId: source.messageId,
+      reference: source.reference,
+    },
+    ...(typeof value.brainId === 'string' ? { brainId: value.brainId } : {}),
+    ...(typeof value.occurredAt === 'string' ? { occurredAt: value.occurredAt } : {}),
+    structuredData: value.structuredData as JsonValue,
+  };
+  if (value.endpoint === undefined || value.endpoint === '/v1/events') {
+    return { ...request, endpoint: '/v1/events' };
+  }
+  const scope = MemoryScopeSchema.safeParse(value.scope);
+  if (value.endpoint !== '/v1/memories/capture' || !scope.success) {
+    throw new Error('Outbox endpoint is invalid.');
+  }
+  return { ...request, endpoint: '/v1/memories/capture', scope: scope.data };
+}
+
+function isPendingWrite(entry: OutboxEntry): entry is PendingWrite {
+  return entry.state === 'pending' || entry.state === 'retry';
+}
+
+function isDiscardedWrite(entry: OutboxEntry): entry is DiscardedWrite {
+  return entry.state === 'discarded';
+}
+
+function isWriteEndpoint(value: unknown): value is WriteRequest['endpoint'] {
+  return value === '/v1/events' || value === '/v1/memories/capture';
 }
 
 function defaultOutboxPath(envelope: AdapterEnvelope, outboxDirectory: string): string {
@@ -336,6 +604,27 @@ function confirmedEvent(value: unknown): boolean {
   return isRecord(value) && isRecord(value.event) && UuidV7Schema.safeParse(value.event.brainId).success;
 }
 
+function confirmedCapture(value: unknown): CapturedMemoryStatus | undefined {
+  if (!isRecord(value) || !isRecord(value.capture) || !UuidV7Schema.safeParse(value.capture.brain).success || !MemoryScopeSchema.safeParse(value.capture.scope).success) {
+    return undefined;
+  }
+  const status = value.capture.status;
+  if (status !== 'active' && status !== 'candidate' && status !== 'ignore' && status !== 'rejected') {
+    return undefined;
+  }
+  if ((status === 'active' || status === 'candidate') && !UuidV7Schema.safeParse(value.capture.memoryId).success) {
+    return undefined;
+  }
+  if ((status === 'ignore' || status === 'rejected') && value.capture.memoryId !== null) {
+    return undefined;
+  }
+  return status;
+}
+
 function isMissingFile(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
+}
+
+function isExistingPath(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST';
 }

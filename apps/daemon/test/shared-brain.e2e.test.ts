@@ -164,17 +164,17 @@ describe('shared brain adapter end-to-end flow', () => {
     ).resolves.toEqual({ status: 'rejected' });
   });
 
-  test('deduplicates retried SDK events in their mounted brain', async () => {
+  test('deduplicates retried governed SDK captures in their mounted brain', async () => {
     const { daemon, databasePath } = await start();
     const brainId = await createBrain(daemon);
     const hermes = await registerAdapter(daemon, 'hermes', 'hermes-desktop');
     await mount(daemon, hermes.id, brainId, 'read_write');
     const client = new AdapterClient({ daemonUrl: daemonUrl(daemon), token: hermes.token, outboxDirectory: temporaryDirectory() });
     const source = envelope('hermes', 'hermes-desktop');
-    const message = { brainId, messageId: 'retry-once', content: 'Keep this event exactly once.' };
+    const message = { brainId, messageId: 'retry-once', content: 'Remember this project uses pnpm.' };
 
-    await expect(client.onUserMessage(source, message)).resolves.toEqual({ status: 'saved' });
-    await expect(client.onUserMessage(source, message)).resolves.toEqual({ status: 'saved' });
+    await expect(client.onUserMessage(source, message)).resolves.toEqual({ status: 'saved', memoryStatus: 'active' });
+    await expect(client.onUserMessage(source, message)).resolves.toEqual({ status: 'saved', memoryStatus: 'active' });
 
     await daemon.stop();
     const database = openDatabase(databasePath);
@@ -188,13 +188,22 @@ describe('shared brain adapter end-to-end flow', () => {
         )
         .get(brainId, JSON.stringify(['hermes', 'hermes-desktop', 'default', 'shared-session', 'retry-once'])) as { readonly count: number };
       expect(result.count).toBe(1);
+      const memories = database
+        .prepare(
+          `SELECT COUNT(*) AS count
+             FROM memory_items AS memory
+             INNER JOIN memory_brains AS memory_brain ON memory_brain.memory_id = memory.id
+             WHERE memory_brain.brain_id = ? AND memory.status = 'active'`,
+        )
+        .get(brainId) as { readonly count: number };
+      expect(memories.count).toBe(1);
     } finally {
       database.close();
     }
   });
 
-  test('continues without shared context and queues writes after a running daemon stops', async () => {
-    const { daemon } = await start();
+  test('continues without shared context then resends a queued capture after daemon restart', async () => {
+    const { daemon, databasePath } = await start();
     const brainId = await createBrain(daemon);
     const codex = await registerAdapter(daemon, 'codex', 'offline-codex');
     await mount(daemon, codex.id, brainId, 'read_write');
@@ -223,9 +232,16 @@ describe('shared brain adapter end-to-end flow', () => {
       explanation: { sourceMemoryIds: [], budget: { limitUnits: 42 } },
     });
     await expect(
-      client.onUserMessage(source, { brainId, messageId: 'offline-message', content: 'Queue this after the daemon returns.' }),
+      client.onUserMessage(source, { brainId, messageId: 'offline-message', content: 'Remember this project uses pnpm.' }),
     ).resolves.toEqual({ status: 'queued' });
     expect(warnings).toEqual(['Memlume context unavailable; continuing without shared context.']);
-    expect(readFileSync(outboxPath, 'utf8')).toContain('Queue this after the daemon returns.');
+    expect(readFileSync(outboxPath, 'utf8')).toContain('Remember this project uses pnpm.');
+    await expect(client.outboxStatus()).resolves.toEqual({ state: 'pending', pending: 1, retry: 0, discarded: 0 });
+
+    const restarted = await startDaemon({ databasePath, port: 0, setupToken: SETUP_TOKEN });
+    daemons.push(restarted);
+    const retrying = new AdapterClient({ daemonUrl: daemonUrl(restarted), token: codex.token, outboxPath });
+    await expect(retrying.onSessionEnd()).resolves.toEqual([{ status: 'saved', memoryStatus: 'active' }]);
+    await expect(retrying.outboxStatus()).resolves.toEqual({ state: 'empty', pending: 0, retry: 0, discarded: 0 });
   });
 });
