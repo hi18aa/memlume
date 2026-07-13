@@ -190,7 +190,7 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
     printResult(result, global.json, io.stdout, contextSummary);
   });
 
-  program
+  const setup = program
     .command('setup')
     .description('設定本機備份目錄並檢查 daemon。')
     .option('--backup-dir <path>', '本機備份目錄')
@@ -198,7 +198,10 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
       const global = command.optsWithGlobals<GlobalOptions>();
       const path = configPath(global, runtime);
       const existing = await readConfig(path, runtime);
-      const desired: CliConfig = { version: 1, backupDirectory: options.backupDir ?? existing.config.backupDirectory };
+      const desired: CliConfig = {
+        ...existing.config,
+        backupDirectory: options.backupDir ?? existing.config.backupDirectory,
+      };
       const existingBackup = await runtime.readFile(`${path}.backup`);
       io.stdout(configDiff(existing.config, desired));
       await runtime.mkdir(dirname(path));
@@ -225,6 +228,99 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
         throw new Error('設定已還原，診斷檢查失敗。');
       }
       io.stdout('設定已套用並通過診斷檢查。\n');
+    });
+
+  setup
+    .command('adapter <agent>')
+    .description('註冊、掛載並驗證 Agent 的本機 Shared Brain profile。')
+    .requiredOption('--installation-id <id>', 'Agent 的穩定本機 installation ID')
+    .option('--profile-id <id>', 'Agent profile ID', 'default')
+    .requiredOption('--project-id <id>', 'Shared Brain 專案 ID')
+    .requiredOption('--brain-id <id>', '要掛載的 Project Brain UUIDv7')
+    .option('--workspace-path <path>', '選填：Agent workspace 路徑')
+    .option('--core-path <path>', 'Memlume Core repository 路徑')
+    .action(async (agent: string, options: AdapterSetupOptions, command: Command) => {
+      const clientType = supportedAdapter(agent);
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const path = configPath(global, runtime);
+      const existing = await readConfig(path, runtime);
+      const duplicate = existing.config.adapters.find((profile) => (
+        profile.clientType === clientType
+        && profile.installationId === options.installationId
+        && profile.profileId === options.profileId
+      ));
+      if (duplicate !== undefined) {
+        throw new Error('此 Adapter profile 已存在。請使用既有設定，或先明確移除／輪替它。');
+      }
+
+      const setupSecret = setupToken(global.setupToken, environment);
+      const registered = await requestSetupJson(global.url, setupSecret, '/v1/setup/installations', 'GET', undefined, runtime);
+      const existingInstallation = arrayValue(registered, 'installations').some((installation) => (
+        objectString(installation, 'clientType') === clientType
+        && objectString(installation, 'installationId') === options.installationId
+        && objectString(installation, 'profileId') === options.profileId
+      ));
+      if (existingInstallation) {
+        throw new Error('daemon already has this Adapter installation, but its local profile is missing. Restore the local config or rotate the token explicitly.');
+      }
+      const registration = await requestSetupJson(global.url, setupSecret, '/v1/setup/installations', 'POST', {
+        clientType,
+        installationId: required(options.installationId, '--installation-id'),
+        profileId: required(options.profileId, '--profile-id'),
+        displayName: `Memlume ${adapterDisplayName(clientType)}`,
+      }, runtime);
+      const installation = objectValue(registration, 'installation');
+      const agentInstallationId = requiredResponseString(installation, 'id', 'installation registration');
+      const token = requiredResponseString(registration, 'token', 'installation registration');
+      const brainId = required(options.brainId, '--brain-id');
+      const projectId = required(options.projectId, '--project-id');
+      await requestSetupJson(global.url, setupSecret, '/v1/setup/mounts', 'POST', {
+        agentInstallationId,
+        brainId,
+        access: 'read_write',
+      }, runtime);
+
+      const desired: CliConfig = {
+        ...existing.config,
+        adapters: [
+          ...existing.config.adapters,
+          compact({
+            clientType,
+            installationId: required(options.installationId, '--installation-id'),
+            profileId: required(options.profileId, '--profile-id'),
+            projectId,
+            brainId,
+            token,
+            corePath: options.corePath ?? runtime.cwd(),
+            workspacePath: options.workspacePath,
+            daemonUrl: global.url,
+          }),
+        ],
+      };
+      await runtime.mkdir(dirname(path));
+      if (existing.raw !== undefined) {
+        const backupPath = await runtime.readFile(`${path}.backup`) === undefined ? `${path}.backup` : await configSnapshotPath(path, runtime);
+        await runtime.writeFile(backupPath, existing.raw);
+      }
+      await runtime.writeFile(path, JSON.stringify(desired));
+      try {
+        await request(global.url, token, '/v1/context/resolve', 'POST', {
+          intent: 'shared_memory',
+          scope: { level: 'project', projectId },
+          task: 'Memlume adapter setup smoke test.',
+          contextBudget: 1,
+          availableTools: [],
+          entities: [],
+        }, runtime);
+      } catch {
+        if (existing.raw === undefined) {
+          await runtime.removeFile(path);
+        } else {
+          await runtime.writeFile(path, existing.raw);
+        }
+        throw new Error('Adapter profile 已還原，daemon smoke test 失敗。');
+      }
+      io.stdout(`${adapterDisplayName(clientType)} adapter profile is registered, mounted, and passed the daemon smoke test.\n`);
     });
 
   program
@@ -415,7 +511,32 @@ interface PasswordOptions {
 interface CliConfig {
   readonly version: 1;
   readonly backupDirectory: string;
+  readonly adapters: readonly AdapterProfile[];
 }
+
+interface AdapterProfile {
+  readonly clientType: SupportedAdapter;
+  readonly installationId: string;
+  readonly profileId: string;
+  readonly projectId: string;
+  readonly brainId: string;
+  readonly token: string;
+  readonly corePath: string;
+  readonly workspacePath?: string;
+  readonly daemonUrl: string;
+}
+
+interface AdapterSetupOptions {
+  readonly installationId: string;
+  readonly profileId: string;
+  readonly projectId: string;
+  readonly brainId: string;
+  readonly workspacePath?: string;
+  readonly corePath?: string;
+}
+
+const supportedAdapters = ['hermes', 'codex', 'openclaw', 'claude-code'] as const;
+type SupportedAdapter = (typeof supportedAdapters)[number];
 
 function memoryRequest(content: string, options: RememberOptions): Record<string, unknown> {
   const base = compact({
@@ -749,7 +870,7 @@ async function configSnapshotPath(path: string, runtime: CliRuntime): Promise<st
 async function readConfig(path: string, runtime: CliRuntime): Promise<{ readonly config: CliConfig; readonly raw?: Uint8Array }> {
   const raw = await runtime.readFile(path);
   if (raw === undefined) {
-    return { config: { version: 1, backupDirectory: join(runtime.cwd(), 'memlume-backups') } };
+    return { config: { version: 1, backupDirectory: join(runtime.cwd(), 'memlume-backups'), adapters: [] } };
   }
   let parsed: unknown;
   try {
@@ -765,7 +886,18 @@ async function readConfig(path: string, runtime: CliRuntime): Promise<{ readonly
   ) {
     throw new Error('CLI configuration is invalid.');
   }
-  return { config: { version: 1, backupDirectory: (parsed as { backupDirectory: string }).backupDirectory }, raw };
+  const adapters = objectValue(parsed, 'adapters');
+  if (adapters !== undefined && (!Array.isArray(adapters) || adapters.some((profile) => !isAdapterProfile(profile)))) {
+    throw new Error('CLI configuration is invalid.');
+  }
+  return {
+    config: {
+      version: 1,
+      backupDirectory: (parsed as { backupDirectory: string }).backupDirectory,
+      adapters: (adapters ?? []) as AdapterProfile[],
+    },
+    raw,
+  };
 }
 
 function configDiff(current: CliConfig, desired: CliConfig): string {
@@ -773,6 +905,51 @@ function configDiff(current: CliConfig, desired: CliConfig): string {
     return '設定未變更。\n';
   }
   return `設定變更：\nbackupDirectory: ${current.backupDirectory} -> ${desired.backupDirectory}\n`;
+}
+
+function supportedAdapter(value: string): SupportedAdapter {
+  if ((supportedAdapters as readonly string[]).includes(value)) {
+    return value as SupportedAdapter;
+  }
+  throw new Error(`Agent must be one of: ${supportedAdapters.join(', ')}.`);
+}
+
+function adapterDisplayName(adapter: SupportedAdapter): string {
+  switch (adapter) {
+    case 'claude-code':
+      return 'Claude Code';
+    case 'openclaw':
+      return 'OpenClaw';
+    case 'codex':
+      return 'Codex';
+    case 'hermes':
+      return 'Hermes';
+  }
+}
+
+function requiredResponseString(value: unknown, key: string, resource: string): string {
+  const result = objectString(value, key);
+  if (result === undefined) {
+    throw new Error(`${resource} returned an invalid response.`);
+  }
+  return result;
+}
+
+function isAdapterProfile(value: unknown): value is AdapterProfile {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const profile = value as Record<string, unknown>;
+  return typeof profile.clientType === 'string'
+    && (supportedAdapters as readonly string[]).includes(profile.clientType)
+    && typeof profile.installationId === 'string' && profile.installationId.trim() !== ''
+    && typeof profile.profileId === 'string' && profile.profileId.trim() !== ''
+    && typeof profile.projectId === 'string' && profile.projectId.trim() !== ''
+    && typeof profile.brainId === 'string' && profile.brainId.trim() !== ''
+    && typeof profile.token === 'string' && profile.token.trim() !== ''
+    && typeof profile.corePath === 'string' && profile.corePath.trim() !== ''
+    && (profile.workspacePath === undefined || typeof profile.workspacePath === 'string')
+    && typeof profile.daemonUrl === 'string' && profile.daemonUrl.trim() !== '';
 }
 
 async function requiredFile(path: string, runtime: CliRuntime): Promise<Uint8Array> {
