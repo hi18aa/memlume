@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -102,6 +102,21 @@ function outboxPath(directory: string): string {
   return join(directory, 'outbox', `${createHash('sha256').update(identity).digest('hex')}.jsonl`);
 }
 
+async function eventually(assertion: () => void, timeoutMs = 1_500): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
+  let lastError: unknown;
+  while (performance.now() < deadline) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw lastError;
+}
+
 describe('Codex plugin hook', () => {
   test('packages a copied plugin with bundled MCP and hook configuration', () => {
     const plugin = JSON.parse(readFileSync(new URL('../.codex-plugin/plugin.json', import.meta.url), 'utf8')) as Record<string, unknown>;
@@ -177,7 +192,7 @@ describe('Codex plugin hook', () => {
         },
         stderr: '',
       });
-      expect(requests.map(({ path }) => path).sort()).toEqual(['/v1/context/resolve', '/v1/memories/capture']);
+      await eventually(() => expect(requests.map(({ path }) => path).sort()).toEqual(['/v1/context/resolve', '/v1/memories/capture']));
       expect(requests.find(({ path }) => path === '/v1/memories/capture')!.body).toMatchObject({
         rawContent: '記住專案使用 pnpm',
         brainId,
@@ -208,7 +223,7 @@ describe('Codex plugin hook', () => {
       }, environment(`http://127.0.0.1:${address.port}`));
 
       expect(result).toEqual({ output: {}, stderr: '' });
-      expect(events).toHaveLength(1);
+      await eventually(() => expect(events).toHaveLength(1));
       expect(events[0]).toMatchObject({
         eventType: 'task_completed',
         rawContent: '已完成 pnpm 設定。',
@@ -235,9 +250,57 @@ describe('Codex plugin hook', () => {
 
       expect(performance.now() - startedAt).toBeLessThan(800);
       expect(result).toEqual({ output: {}, stderr: '' });
+      await eventually(() => expect(existsSync(outboxPath(outboxDirectory))).toBe(true));
       expect(readFileSync(outboxPath(outboxDirectory), 'utf8')).toContain('記住專案使用 pnpm');
       expect(existsSync(`${outboxPath(outboxDirectory)}.lock`)).toBe(false);
       expect(JSON.stringify(result)).not.toContain(token);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+
+  test('returns from a prompt hook before a pre-existing outbox lock is released', async () => {
+    const outboxDirectory = temporaryDirectory();
+    const captureRequests: string[] = [];
+    const server = createServer((request, response) => {
+      if (request.url === '/v1/context/resolve') {
+        response.statusCode = 503;
+        response.end();
+        return;
+      }
+      if (request.url === '/v1/memories/capture') {
+        captureRequests.push(request.url);
+        response.statusCode = 201;
+        response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify({
+          capture: { memoryId: '00000000-0000-7000-8000-000000000014', status: 'active', brain: brainId, scope, requiresConfirmation: false, source: { eventId: '00000000-0000-7000-8000-000000000015' } },
+        }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const lockPath = `${outboxPath(outboxDirectory)}.lock`;
+    mkdirSync(lockPath, { recursive: true });
+    const release = new Promise<void>((resolve) => setTimeout(() => {
+      rmSync(lockPath, { force: true, recursive: true });
+      resolve();
+    }, 1_200));
+    try {
+      const address = server.address();
+      if (address === null || typeof address === 'string') throw new Error('Server address is unavailable.');
+      const startedAt = performance.now();
+      const result = await invoke(copiedHook(), {
+        hook_event_name: 'UserPromptSubmit', session_id: 'locked-session', turn_id: 'locked-turn', cwd: 'C:/work/memlume', prompt: '記住專案使用 pnpm',
+      }, environment(`http://127.0.0.1:${address.port}`, outboxDirectory));
+
+      expect(performance.now() - startedAt).toBeLessThan(800);
+      expect(result).toEqual({ output: {}, stderr: '' });
+      await release;
+      await eventually(() => expect(captureRequests).toEqual(['/v1/memories/capture']));
+      expect(existsSync(lockPath)).toBe(false);
     } finally {
       server.closeAllConnections();
       server.close();
