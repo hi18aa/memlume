@@ -33,7 +33,7 @@ Memlume 不會自動保存每一則對話，也不會把整個資料庫塞進 LL
 
 ## 狀態與範圍
 
-此儲存庫是 `0.1.0` 原始碼 workspace。目前所有套件均為 private；請以 clone 並建置此儲存庫的方式使用，不能從公開套件 registry 安裝。
+此儲存庫是 `0.2.0` 原始碼 workspace。目前所有套件均為 private；請以 clone 並建置此儲存庫的方式使用，不能從公開套件 registry 安裝。
 
 所有功能皆屬 MIT 授權的 Memlume Core。官方網站僅提供下載、安裝器、更新與文件入口，不存在功能較強的封閉版本。
 
@@ -50,10 +50,10 @@ Memlume 不會自動保存每一則對話，也不會把整個資料庫塞進 LL
 - Hermes、Codex、OpenClaw、Claude Code 的官方本機 Adapter；它們共用同一個已掛載 Brain，不複製 Agent 的原生記憶。
 - Outcome usage、確定性 feedback ranking、retrieval benchmark、公開 guides/examples 與 CI/release 流程。
 
-v0.1.0 尚未實作：
+v0.2.0 尚未實作：
 
 - vector／embedding search、遠端同步、雲端託管、多使用者存取。
-- 公開 npm 套件或任何已發布的 release artifact。
+- 公開 npm 套件。
 - 經由 daemon、CLI、MCP Server 建立 `procedure` 或 `capability` 記憶；可寫入 API 僅接受上述四種記憶類型。
 
 ## 需求
@@ -199,7 +199,7 @@ MCP 使用 `available_tools`（snake case）；daemon 會收到 `availableTools`
 
 ## 隱私與本機運作
 
-Memlume 將資料儲存在 `--database` 指定的 SQLite 檔案，預設為 `data/memlume.sqlite`。v0.1.0 沒有遠端同步或雲端服務，daemon 也只綁定 loopback。Adapter API 需要 Bearer Token，setup API 需要 `MEMLUME_SETUP_TOKEN`，而 `/v1/health` 特意保持公開。請勿提交任何真實 token 或貼到 log。驗證不會加密靜態資料庫；請以作業系統權限保護它，且不要存放不適合置於本機明文 SQLite 檔案的秘密資料。
+Memlume 將資料儲存在 `--database` 指定的 SQLite 檔案，預設為 `data/memlume.sqlite`。v0.2.0 沒有遠端同步或雲端服務，daemon 也只綁定 loopback。Adapter API 需要 Bearer Token，setup API 需要 `MEMLUME_SETUP_TOKEN`，而 `/v1/health` 特意保持公開。請勿提交任何真實 token 或貼到 log。驗證不會加密靜態資料庫；請以作業系統權限保護它，且不要存放不適合置於本機明文 SQLite 檔案的秘密資料。
 
 ## 架構
 
@@ -226,7 +226,7 @@ pnpm benchmark:retrieval
 
 ## 貢獻
 
-請保持變更精簡；非平凡行為請新增或更新最接近的 Vitest coverage，並在開啟 pull request 前執行上述命令。請勿把遠端儲存或 vector search 當作 v0.1.0 的附帶變更加入。
+請保持變更精簡；非平凡行為請新增或更新最接近的 Vitest coverage，並在開啟 pull request 前執行上述命令。請勿把遠端儲存或 vector search 當作 v0.2.0 的附帶變更加入。
 
 ## 授權
 

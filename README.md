@@ -33,7 +33,7 @@ This means an agent should not automatically save whole transcripts, temporary r
 
 ## Status and scope
 
-This repository is the `0.1.0` source workspace. Its packages are currently private, so it is installed by cloning and building the repository rather than from a public package registry.
+This repository is the `0.2.0` source workspace. Its packages are currently private, so it is installed by cloning and building the repository rather than from a public package registry.
 
 All functionality belongs to the MIT-licensed Memlume Core. The official website is only a download, installer, update, and documentation entry point; it does not provide a stronger closed edition.
 
@@ -51,10 +51,10 @@ Implemented:
 - Outcome usage records, deterministic feedback ranking, retrieval benchmark, and reproducible backup/restore verification.
 - Public architecture, adapter, backup, and shared-project guides; CI and tag-release workflows run the same checks as local development.
 
-Not implemented in v0.1.0:
+Not implemented in v0.2.0:
 
 - Vector/embedding search, remote sync, cloud hosting, or multi-user access.
-- A public npm package or any published release artifact.
+- A public npm package.
 - Creating `procedure` or `capability` memories through the daemon, CLI, or MCP server; the writable API accepts only the four memory kinds above.
 
 ## Requirements
@@ -200,7 +200,7 @@ MCP uses `available_tools` (snake case); the daemon receives it as `availableToo
 
 ## Privacy and local operation
 
-Memlume stores data in the SQLite file selected with `--database`; the default is `data/memlume.sqlite`. v0.1.0 has no remote sync or cloud service, and the daemon binds only to loopback. Adapter APIs require a bearer token, while setup APIs require `MEMLUME_SETUP_TOKEN`; `/v1/health` is intentionally public. Never commit a real token or paste one into logs. Authentication does not encrypt the database at rest: protect it with normal operating-system permissions and do not store secrets you would not keep in a local plaintext SQLite file.
+Memlume stores data in the SQLite file selected with `--database`; the default is `data/memlume.sqlite`. v0.2.0 has no remote sync or cloud service, and the daemon binds only to loopback. Adapter APIs require a bearer token, while setup APIs require `MEMLUME_SETUP_TOKEN`; `/v1/health` is intentionally public. Never commit a real token or paste one into logs. Authentication does not encrypt the database at rest: protect it with normal operating-system permissions and do not store secrets you would not keep in a local plaintext SQLite file.
 
 ## Architecture
 
@@ -227,7 +227,7 @@ pnpm benchmark:retrieval
 
 ## Contributing
 
-Keep changes small, add or update the nearest Vitest coverage for non-trivial behavior, and run the commands above before opening a pull request. Do not add remote storage or vector search as incidental changes to v0.1.0.
+Keep changes small, add or update the nearest Vitest coverage for non-trivial behavior, and run the commands above before opening a pull request. Do not add remote storage or vector search as incidental changes to v0.2.0.
 
 ## License
 

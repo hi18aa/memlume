@@ -1,6 +1,6 @@
 {
   "name": "memlume-codex",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "將 Codex 回合連接至本機 Memlume Shared Brain。",
   "author": {
     "name": "hi18aa",

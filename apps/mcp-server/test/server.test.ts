@@ -55,7 +55,7 @@ afterEach(async () => {
 
 async function connect(options: { readonly token?: string } = { token: 'mcp-adapter-token' }) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: 'memlume-test', version: '0.1.0' });
+  const client = new Client({ name: 'memlume-test', version: '0.2.0' });
   const server = createMcpServer({ daemonUrl, ...options });
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
   return { client, server };

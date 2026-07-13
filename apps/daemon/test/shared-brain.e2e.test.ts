@@ -127,7 +127,7 @@ function defaultOutboxLockPath(source: ReturnType<typeof envelope>, outboxDirect
 
 async function rememberThroughMcp(daemon: RunningDaemon, token: string, brainId: string): Promise<unknown> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: 'memlume-shared-brain-e2e', version: '0.1.0' });
+  const client = new Client({ name: 'memlume-shared-brain-e2e', version: '0.2.0' });
   const server = createMcpServer({ daemonUrl: daemonUrl(daemon), token });
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
   try {

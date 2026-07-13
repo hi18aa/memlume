@@ -104,7 +104,7 @@ export interface McpServerOptions {
 
 export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL, token = process.env.MEMLUME_TOKEN }: McpServerOptions = {}): McpServer {
   const safeDaemonUrl = daemonOrigin(daemonUrl);
-  const server = new McpServer({ name: 'memlume', version: '0.1.0' });
+  const server = new McpServer({ name: 'memlume', version: '0.2.0' });
 
   server.registerTool(
     'memlume.resolve_context',

@@ -33,7 +33,7 @@ Memlume 不会自动保存每一条对话，也不会把整个数据库塞进 LL
 
 ## 状态与范围
 
-此仓库是 `0.1.0` 源码 workspace。目前所有包均为 private；请通过 clone 并构建此仓库的方式使用，不能从公开包 registry 安装。
+此仓库是 `0.2.0` 源码 workspace。目前所有包均为 private；请通过 clone 并构建此仓库的方式使用，不能从公开包 registry 安装。
 
 所有功能都属于 MIT 授权的 Memlume Core。官方网站仅提供下载、安装器、更新与文档入口，不存在功能更强的闭源版本。
 
@@ -50,10 +50,10 @@ Memlume 不会自动保存每一条对话，也不会把整个数据库塞进 LL
 - Hermes、Codex、OpenClaw、Claude Code 的官方本地 Adapter；它们共享同一个已挂载 Brain，不复制 Agent 的原生记忆。
 - Outcome usage、确定性 feedback ranking、retrieval benchmark、公开 guides/examples 与 CI/release 流程。
 
-v0.1.0 尚未实现：
+v0.2.0 尚未实现：
 
 - vector／embedding search、远程同步、云托管、多用户访问。
-- 公开 npm 包或任何已发布的 release artifact。
+- 公开 npm 包。
 - 经由 daemon、CLI、MCP Server 创建 `procedure` 或 `capability` 记忆；可写入 API 仅接受上述四种记忆类型。
 
 ## 环境要求
@@ -199,7 +199,7 @@ MCP 使用 `available_tools`（snake case）；daemon 会收到 `availableTools`
 
 ## 隐私与本地运行
 
-Memlume 将数据保存到 `--database` 指定的 SQLite 文件，默认值为 `data/memlume.sqlite`。v0.1.0 没有远程同步或云服务，daemon 也只绑定 loopback。Adapter API 需要 Bearer Token，setup API 需要 `MEMLUME_SETUP_TOKEN`，而 `/v1/health` 特意保持公开。请勿提交任何真实 token 或粘贴到 log。验证不会加密静态数据库；请用操作系统权限保护它，不要保存不适合放在本地明文 SQLite 文件中的秘密数据。
+Memlume 将数据保存到 `--database` 指定的 SQLite 文件，默认值为 `data/memlume.sqlite`。v0.2.0 没有远程同步或云服务，daemon 也只绑定 loopback。Adapter API 需要 Bearer Token，setup API 需要 `MEMLUME_SETUP_TOKEN`，而 `/v1/health` 特意保持公开。请勿提交任何真实 token 或粘贴到 log。验证不会加密静态数据库；请用操作系统权限保护它，不要保存不适合放在本地明文 SQLite 文件中的秘密数据。
 
 ## 架构
 
@@ -226,7 +226,7 @@ pnpm benchmark:retrieval
 
 ## 贡献
 
-请保持变更精简；非平凡行为请新增或更新最近的 Vitest coverage，并在创建 pull request 前执行上述命令。请勿将远程存储或 vector search 作为 v0.1.0 的附带变更加入。
+请保持变更精简；非平凡行为请新增或更新最近的 Vitest coverage，并在创建 pull request 前执行上述命令。请勿将远程存储或 vector search 作为 v0.2.0 的附带变更加入。
 
 ## 许可
 
