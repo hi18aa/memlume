@@ -15,6 +15,7 @@
   "scripts": {
     "build": "pnpm -r --if-present run build",
     "test": "pnpm -r --if-present run test",
+    "test:e2e": "pnpm --filter @memlume/daemon build && pnpm --filter @memlume/daemon exec vitest run test/shared-brain.e2e.test.ts",
     "lint": "pnpm -r --if-present run lint",
     "typecheck": "pnpm -r --if-present run typecheck"
   },

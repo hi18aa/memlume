@@ -9,6 +9,7 @@ import { AdapterClient } from '../dist/index.js';
 
 const directories = [];
 const token = 'adapter-token-that-must-not-be-persisted';
+const brainId = '00000000-0000-7000-8000-000000000002';
 const envelope = {
   clientType: 'codex',
   installationId: 'desktop',
@@ -64,6 +65,10 @@ function context() {
   };
 }
 
+function savedEvent(id) {
+  return { event: { id, brainId } };
+}
+
 function fakeFetch(...responses) {
   const calls = [];
   return {
@@ -73,6 +78,9 @@ function fakeFetch(...responses) {
       const next = responses.shift();
       if (next instanceof Error) {
         throw next;
+      }
+      if (next instanceof Response) {
+        return next;
       }
       return new Response(JSON.stringify(next.body), { status: next.status, headers: { 'content-type': 'application/json' } });
     },
@@ -89,8 +97,8 @@ describe('AdapterClient', () => {
     process.env.MEMLUME_TOKEN = token;
     const fake = fakeFetch(
       { status: 200, body: { context: context() } },
-      { status: 201, body: { event: { id: 'event-user' } } },
-      { status: 201, body: { event: { id: 'event-task' } } },
+      { status: 201, body: savedEvent('event-user') },
+      { status: 201, body: savedEvent('event-task') },
     );
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', fetch: fake.fetch });
 
@@ -138,7 +146,7 @@ describe('AdapterClient', () => {
     const fake = {
       fetch: async (_input, init) => {
         references.add(JSON.parse(init.body).source.reference);
-        return new Response(JSON.stringify({ event: { id: `event-${references.size}` } }), { status: 201 });
+        return new Response(JSON.stringify(savedEvent(`event-${references.size}`)), { status: 201 });
       },
     };
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, fetch: fake.fetch });
@@ -152,6 +160,20 @@ describe('AdapterClient', () => {
       JSON.stringify(['codex', 'desktop', 'default', 'session-1', 'message-2']),
     ]);
     assert.equal(JSON.stringify([...references]).includes(token), false);
+  });
+
+  test('queues a write when a successful event response is not valid JSON with a UUIDv7 brain ID', async () => {
+    const outboxPath = temporaryOutbox();
+    const malformed = new Response('not json', { status: 201, headers: { 'content-type': 'application/json' } });
+    const missingBody = new Response(null, { status: 204 });
+    const invalidBrain = new Response(JSON.stringify({ event: { id: 'event-user', brainId: 'not-a-uuid' } }), { status: 201 });
+
+    for (const [index, response] of [malformed, missingBody, invalidBrain].entries()) {
+      const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: fakeFetch(response).fetch });
+      assert.deepEqual(await client.onUserMessage(envelope, { messageId: `invalid-${index}`, content: 'Only confirmed events are saved.' }), { status: 'queued' });
+    }
+
+    assert.equal(readFileSync(outboxPath, 'utf8').trim().split('\n').length, 3);
   });
 
   test('queues a 503 in a persistent stable-identity default outbox when no path is specified', async () => {
@@ -199,7 +221,7 @@ describe('AdapterClient', () => {
 
     const recovered = fakeFetch(
       { status: 200, body: { context: context() } },
-      { status: 201, body: { event: { id: 'event-user' } } },
+      { status: 201, body: savedEvent('event-user') },
     );
     const newClient = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token: newToken, outboxDirectory, fetch: recovered.fetch });
     await newClient.beforeTask({ ...beforeTask, envelope });
@@ -227,7 +249,7 @@ describe('AdapterClient', () => {
     assert.equal(lines.length, 1);
     assert.equal(readFileSync(outboxPath, 'utf8').includes(token), false);
 
-    const recovering = fakeFetch({ status: 201, body: { event: { id: 'event-user' } } });
+    const recovering = fakeFetch({ status: 201, body: savedEvent('event-user') });
     const retryingClient = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: recovering.fetch });
     assert.deepEqual(await retryingClient.onSessionEnd(), [{ status: 'saved' }]);
     assert.equal(readFileSync(outboxPath, 'utf8'), '');
@@ -242,7 +264,7 @@ describe('AdapterClient', () => {
     mkdirSync(`${outboxPath}.${process.pid}.tmp`, { recursive: true });
 
     const warnings = [];
-    const accepting = fakeFetch({ status: 201, body: { event: { id: 'event-user' } } });
+    const accepting = fakeFetch({ status: 201, body: savedEvent('event-user') });
     const client = new AdapterClient({
       daemonUrl: 'http://127.0.0.1:3849',
       token,
@@ -324,7 +346,7 @@ describe('AdapterClient', () => {
         if (messageId === 'message-old') {
           oldRequestStarted.resolve();
           await releaseOldRequest.promise;
-          return new Response(JSON.stringify({ event: { id: 'event-old' } }), { status: 201 });
+          return new Response(JSON.stringify(savedEvent('event-old')), { status: 201 });
         }
         return new Response(JSON.stringify({ error: 'unavailable' }), { status: 503 });
       },

@@ -7,6 +7,7 @@ import {
   AdapterEnvelopeSchema,
   ContextPackSchema,
   MemoryScopeSchema,
+  UuidV7Schema,
   createUuidV7,
   type AdapterEnvelope,
   type ContextPack,
@@ -172,7 +173,7 @@ export class AdapterClient {
     try {
       const response = await this.request('/v1/events', 'POST', request);
       if (response.ok) {
-        return { status: 'saved' };
+        return confirmedEvent(await response.json()) ? { status: 'saved' } : { status: 'queued' };
       }
       return response.status >= 400 && response.status < 500 ? { status: 'rejected' } : { status: 'queued' };
     } catch {
@@ -329,6 +330,10 @@ function hasToken(token: string | undefined): token is string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function confirmedEvent(value: unknown): boolean {
+  return isRecord(value) && isRecord(value.event) && UuidV7Schema.safeParse(value.event.brainId).success;
 }
 
 function isMissingFile(error: unknown): boolean {
