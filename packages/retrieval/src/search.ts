@@ -1,4 +1,5 @@
 import {
+  DEFAULT_PERSONAL_BRAIN_ID,
   MemoryItemSchema,
   MemoryKindSchema,
   MemoryScopeSchema,
@@ -21,6 +22,7 @@ const scopeFields = ['domain', 'agentId', 'workspace', 'projectId', 'taskId'] as
 export type ManualMemoryKind = (typeof manualMemoryKinds)[number];
 
 export interface SaveMemoryInput {
+  readonly brainId?: string;
   readonly kind: ManualMemoryKind;
   readonly canonicalText: string;
   readonly structuredData: JsonValue;
@@ -35,12 +37,13 @@ export interface SaveMemoryInput {
   readonly supersededBy?: string;
 }
 
-export type UpdateMemoryInput = Partial<Omit<SaveMemoryInput, 'kind'>> & {
+export type UpdateMemoryInput = Partial<Omit<SaveMemoryInput, 'brainId' | 'kind'>> & {
   readonly actor: string;
   readonly reason: string;
 };
 
 export interface MemoryQuery {
+  readonly brainIds?: readonly string[];
   readonly scope?: MemoryScope;
   readonly status?: MemoryStatus;
   readonly kinds?: readonly MemoryKind[];
@@ -55,6 +58,13 @@ export interface MemoryVersion {
   readonly changedBy: string;
   readonly changeReason: string;
   readonly createdAt: string;
+}
+
+export class SourceEventBrainMismatchError extends Error {
+  constructor() {
+    super('Source event is not available in the selected brain.');
+    this.name = 'SourceEventBrainMismatchError';
+  }
 }
 
 type MemoryRow = {
@@ -74,6 +84,7 @@ type MemoryRow = {
   valid_from: string | null;
   valid_until: string | null;
   superseded_by: string | null;
+  brain_id: string;
 };
 
 type MemoryVersionRow = {
@@ -109,6 +120,8 @@ const memoryItemColumns = memoryColumns
   .split(',')
   .map((column) => `memory_items.${column.trim()}`)
   .join(', ');
+const memorySelectColumns = `${memoryItemColumns}, memory_brains.brain_id`;
+const memoryFrom = 'FROM memory_items JOIN memory_brains ON memory_brains.memory_id = memory_items.id';
 
 export class MemoryStore {
   constructor(private readonly database: SqliteDatabase) {}
@@ -130,19 +143,23 @@ export class MemoryStore {
       updatedAt: now,
     });
 
-    this.database.transaction(() => this.insert(memory)).immediate();
+    this.database.transaction(() => {
+      this.ensureSourceEventBelongsToBrain(memory);
+      this.insert(memory);
+    }).immediate();
     return memory;
   }
 
-  update(id: string, input: UpdateMemoryInput): MemoryItem {
-    const existing = this.get(id);
+  update(id: string, input: UpdateMemoryInput, brainIds?: readonly string[]): MemoryItem {
+    const existing = this.getStored(id, normalizeBrainIds(brainIds));
     if (!existing) {
       throw new Error(`Memory not found: ${id}`);
     }
     if (!isManualMemoryKind(existing.kind) || existing.status !== 'active') {
       throw new Error('Only active manual memories can be updated.');
     }
-    const { actor, reason, ...changes } = input;
+    const { actor, reason, ...unsafeChanges } = input;
+    const { brainId: _, ...changes } = unsafeChanges as typeof unsafeChanges & { readonly brainId?: unknown };
     const changedBy = NonEmptyTextSchema.parse(actor);
     const changeReason = NonEmptyTextSchema.parse(reason);
     const now = new Date().toISOString();
@@ -164,30 +181,46 @@ export class MemoryStore {
     return updated;
   }
 
-  listVersions(id: string): MemoryVersion[] {
+  listVersions(id: string, brainIds?: readonly string[]): MemoryVersion[] {
+    const allowedBrainIds = normalizeBrainIds(brainIds);
+    if (allowedBrainIds.length === 0) {
+      return [];
+    }
     const rows = this.database
       .prepare(`
-        SELECT id, memory_id, version, canonical_text, structured_data, changed_by, change_reason, created_at
+        SELECT memory_versions.id, memory_versions.memory_id, version, canonical_text, structured_data,
+               changed_by, change_reason, memory_versions.created_at
         FROM memory_versions
-        WHERE memory_id = ?
-        ORDER BY version
+        JOIN memory_brains ON memory_brains.memory_id = memory_versions.memory_id
+        WHERE memory_versions.memory_id = ? AND ${brainFilter(allowedBrainIds)}
+        ORDER BY memory_versions.version
       `)
-      .all(UuidV7Schema.parse(id)) as MemoryVersionRow[];
+      .all(UuidV7Schema.parse(id), ...allowedBrainIds) as MemoryVersionRow[];
     return rows.map(toMemoryVersion);
   }
 
-  get(id: string): MemoryItem | undefined {
+  get(id: string, brainIds?: readonly string[]): MemoryItem | undefined {
+    const allowedBrainIds = normalizeBrainIds(brainIds);
+    if (allowedBrainIds.length === 0) {
+      return undefined;
+    }
     const row = this.database
-      .prepare(`SELECT ${memoryColumns} FROM memory_items WHERE id = ?`)
-      .get(UuidV7Schema.parse(id)) as MemoryRow | undefined;
+      .prepare(`
+        SELECT ${memorySelectColumns} ${memoryFrom}
+        WHERE memory_items.id = ? AND ${brainFilter(allowedBrainIds)}
+      `)
+      .get(UuidV7Schema.parse(id), ...allowedBrainIds) as MemoryRow | undefined;
     return row === undefined ? undefined : toMemoryItem(row);
   }
 
   list(filters: MemoryQuery = {}): MemoryItem[] {
     const query = normalizeQuery(filters);
+    if (query.brainIds!.length === 0) {
+      return [];
+    }
     const { where, values } = sqlFilters(query);
     const rows = this.database
-      .prepare(`SELECT ${memoryColumns} FROM memory_items${where} ORDER BY updated_at DESC, id`)
+      .prepare(`SELECT ${memorySelectColumns} ${memoryFrom}${where} ORDER BY memory_items.updated_at DESC, memory_items.id`)
       .all(...values) as MemoryRow[];
 
     return rows.map(toMemoryItem).filter((memory) => matchesQuery(memory, query));
@@ -196,12 +229,16 @@ export class MemoryStore {
   search(queryText: string, filters: MemoryQuery = {}): MemoryItem[] {
     const ftsQuery = toFtsQuery(queryText);
     const query = normalizeQuery(filters);
+    if (query.brainIds!.length === 0) {
+      return [];
+    }
     const { where, values } = sqlFilters(query, 'memory_items');
     const rows = this.database
       .prepare(`
-        SELECT ${memoryItemColumns}
+        SELECT ${memorySelectColumns}
         FROM memory_search
         JOIN memory_items ON memory_items.id = memory_search.memory_id
+        JOIN memory_brains ON memory_brains.memory_id = memory_items.id
         WHERE memory_search MATCH ?${where === '' ? '' : ` AND ${where.slice(' WHERE '.length)}`}
         ORDER BY bm25(memory_search), memory_items.id
       `)
@@ -227,7 +264,32 @@ export class MemoryStore {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(...memoryValues(memory));
+    this.database
+      .prepare('INSERT INTO memory_brains (memory_id, brain_id, created_at) VALUES (?, ?, ?)')
+      .run(memory.id, memory.brainId, memory.createdAt);
     this.replaceSearch(memory);
+  }
+
+  private ensureSourceEventBelongsToBrain(memory: MemoryItem): void {
+    if (memory.sourceEventId === undefined) {
+      return;
+    }
+    const sourceEvent = this.database
+      .prepare('SELECT 1 FROM event_brains WHERE event_id = ? AND brain_id = ?')
+      .get(memory.sourceEventId, memory.brainId);
+    if (sourceEvent === undefined) {
+      throw new SourceEventBrainMismatchError();
+    }
+  }
+
+  private getStored(id: string, brainIds: readonly string[]): MemoryItem | undefined {
+    if (brainIds.length === 0) {
+      return undefined;
+    }
+    const row = this.database
+      .prepare(`SELECT ${memorySelectColumns} ${memoryFrom} WHERE memory_items.id = ? AND ${brainFilter(brainIds)}`)
+      .get(UuidV7Schema.parse(id), ...brainIds) as MemoryRow | undefined;
+    return row === undefined ? undefined : toMemoryItem(row);
   }
 
   private replace(memory: MemoryItem): void {
@@ -341,6 +403,7 @@ function memoryValues(memory: MemoryItem): readonly unknown[] {
 function toMemoryItem(row: MemoryRow): MemoryItem {
   return MemoryItemSchema.parse({
     id: row.id,
+    brainId: row.brain_id,
     kind: row.kind,
     title: row.title ?? undefined,
     canonicalText: row.canonical_text,
@@ -374,6 +437,7 @@ function toMemoryVersion(row: MemoryVersionRow): MemoryVersion {
 
 function normalizeQuery(filters: MemoryQuery): MemoryQuery {
   return {
+    brainIds: normalizeBrainIds(filters.brainIds),
     scope: filters.scope === undefined ? undefined : MemoryScopeSchema.parse(filters.scope),
     status: filters.status === undefined ? undefined : MemoryStatusSchema.parse(filters.status),
     kinds: filters.kinds === undefined ? undefined : filters.kinds.map((kind) => MemoryKindSchema.parse(kind)),
@@ -384,6 +448,9 @@ function sqlFilters(filters: MemoryQuery, tableName = ''): { where: string; valu
   const prefix = tableName === '' ? '' : `${tableName}.`;
   const clauses: string[] = [];
   const values: unknown[] = [];
+  const brainIds = filters.brainIds!;
+  clauses.push(brainFilter(brainIds));
+  values.push(...brainIds);
   if (filters.status !== undefined) {
     clauses.push(`${prefix}status = ?`);
     values.push(filters.status);
@@ -393,6 +460,16 @@ function sqlFilters(filters: MemoryQuery, tableName = ''): { where: string; valu
     values.push(...filters.kinds);
   }
   return { where: clauses.length === 0 ? '' : ` WHERE ${clauses.join(' AND ')}`, values };
+}
+
+function normalizeBrainIds(brainIds: readonly string[] | undefined): readonly string[] {
+  return brainIds === undefined
+    ? [DEFAULT_PERSONAL_BRAIN_ID]
+    : brainIds.map((brainId) => UuidV7Schema.parse(brainId));
+}
+
+function brainFilter(brainIds: readonly string[]): string {
+  return `memory_brains.brain_id IN (${brainIds.map(() => '?').join(', ')})`;
 }
 
 function matchesQuery(memory: MemoryItem, filters: MemoryQuery): boolean {

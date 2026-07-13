@@ -2,11 +2,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { MemoryItemSchema, type MemoryItem, type MemoryScope } from '@memlume/contracts';
+import { DEFAULT_PERSONAL_BRAIN_ID, MemoryItemSchema, type MemoryItem, type MemoryScope } from '@memlume/contracts';
 import { openDatabase, type SqliteDatabase } from '@memlume/database/internal';
 import { afterEach, describe, expect, test } from 'vitest';
 
 import * as retrieval from '../src/index.js';
+import { SourceEventBrainMismatchError } from '../src/index.js';
 
 type MemoryDraft = {
   readonly kind: 'policy' | 'preference' | 'fact' | 'decision';
@@ -17,15 +18,29 @@ type MemoryDraft = {
   readonly priority?: number;
   readonly confidence?: number;
   readonly explicitness?: number;
+  readonly brainId?: string;
+  readonly sourceEventId?: string;
+};
+
+type MemoryFilters = {
+  readonly scope?: MemoryScope;
+  readonly status?: string;
+  readonly kinds?: readonly string[];
+  readonly brainIds?: readonly string[];
 };
 
 type MemoryStore = {
   save(input: MemoryDraft): MemoryItem;
-  update(id: string, input: Partial<Omit<MemoryDraft, 'kind'>> & { readonly actor: string; readonly reason: string }): MemoryItem;
-  get(id: string): MemoryItem | undefined;
-  list(filters?: { readonly scope?: MemoryScope; readonly status?: string; readonly kinds?: readonly string[] }): MemoryItem[];
-  search(query: string, filters?: { readonly status?: string; readonly kinds?: readonly string[] }): MemoryItem[];
-  listVersions(id: string): Array<{
+  update(
+    id: string,
+    input: Partial<Omit<MemoryDraft, 'kind'>> & { readonly actor: string; readonly reason: string },
+    brainIds?: readonly string[],
+  ): MemoryItem;
+  get(id: string, brainIds?: readonly string[]): MemoryItem | undefined;
+  list(filters?: MemoryFilters): MemoryItem[];
+  search(query: string, filters?: MemoryFilters): MemoryItem[];
+  findApplicable(scope: MemoryScope, filters?: MemoryFilters): MemoryItem[];
+  listVersions(id: string, brainIds?: readonly string[]): Array<{
     readonly version: number;
     readonly canonicalText: string;
     readonly changedBy: string;
@@ -47,6 +62,74 @@ function createStore(): { database: SqliteDatabase; store: MemoryStore } {
 
   expect(MemoryStore).toBeTypeOf('function');
   return { database, store: new MemoryStore!(database) };
+}
+
+function createBrain(database: SqliteDatabase, id: string): void {
+  database
+    .prepare(`
+      INSERT INTO brains (id, kind, name, created_at, updated_at)
+      VALUES (?, 'project', ?, '2026-07-12T15:00:00.000Z', '2026-07-12T15:00:00.000Z')
+    `)
+    .run(id, `Test ${id}`);
+}
+
+function insertUnmappedMemory(database: SqliteDatabase): string {
+  const id = '018f9d4e-7c25-7b91-8dc0-61749dbcc015';
+  const canonicalText = 'An unmapped memory is not a personal memory.';
+  database
+    .prepare(`
+      INSERT INTO memory_items (
+        id, kind, title, canonical_text, structured_data, scope_data, status, priority,
+        confidence, explicitness, source_event_id, created_at, updated_at, valid_from,
+        valid_until, superseded_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .run(
+      id,
+      'fact',
+      null,
+      canonicalText,
+      JSON.stringify({ subject: 'memory', predicate: 'mapping', object: 'missing', confidence: 1 }),
+      JSON.stringify({ level: 'global' }),
+      'active',
+      0,
+      1,
+      1,
+      null,
+      '2026-07-12T15:00:00.000Z',
+      '2026-07-12T15:00:00.000Z',
+      null,
+      null,
+      null,
+    );
+  database
+    .prepare(`
+      INSERT INTO memory_search (memory_id, title, canonical_text, summary, keywords, entities, content)
+      VALUES (?, '', ?, ?, '', '', ?)
+    `)
+    .run(id, canonicalText, canonicalText, canonicalText);
+  return id;
+}
+
+function insertEvent(database: SqliteDatabase, id: string, brainId: string): void {
+  database
+    .prepare(`
+      INSERT INTO events (
+        id, event_type, raw_content, structured_data, source_type, source_agent, source_reference,
+        source_data, occurred_at, ingested_at, content_hash
+      ) VALUES (?, 'user_statement', 'Source event.', NULL, 'cli', 'codex-cli', ?, ?, ?, ?, ?)
+    `)
+    .run(
+      id,
+      `source:${id}`,
+      JSON.stringify({ type: 'cli', agent: 'codex-cli', reference: `source:${id}` }),
+      '2026-07-12T15:00:00.000Z',
+      '2026-07-12T15:00:00.000Z',
+      '0'.repeat(64),
+    );
+  database
+    .prepare('INSERT INTO event_brains (event_id, brain_id, created_at) VALUES (?, ?, ?)')
+    .run(id, brainId, '2026-07-12T15:00:00.000Z');
 }
 
 afterEach(() => {
@@ -144,7 +227,7 @@ describe('MemoryStore', () => {
   });
 
   test('saves only manual active memories, validates stored JSON, and refreshes FTS5 on update', () => {
-    const { store } = createStore();
+    const { database, store } = createStore();
     const fact = store.save({
       kind: 'fact',
       title: 'Storage choice',
@@ -155,6 +238,10 @@ describe('MemoryStore', () => {
     });
 
     expect(MemoryItemSchema.parse(fact)).toEqual(fact);
+    expect(fact.brainId).toBe(DEFAULT_PERSONAL_BRAIN_ID);
+    expect(database.prepare('SELECT brain_id FROM memory_brains WHERE memory_id = ?').get(fact.id)).toEqual({
+      brain_id: DEFAULT_PERSONAL_BRAIN_ID,
+    });
     expect(store.get(fact.id)).toEqual(fact);
     expect(store.search('SQLite durable memory', { status: 'active', kinds: ['fact'] })).toEqual([fact]);
 
@@ -177,5 +264,109 @@ describe('MemoryStore', () => {
         scope: { level: 'global' },
       }),
     ).toThrow(/policy|preference|fact|decision/i);
+  });
+
+  test('isolates memory reads by brain while allowing an explicit multi-brain search', () => {
+    const { database, store } = createStore();
+    const firstBrainId = '018f9d4e-7c22-7b91-8dc0-61749dbcc012';
+    const secondBrainId = '018f9d4e-7c23-7b91-8dc0-61749dbcc013';
+    createBrain(database, firstBrainId);
+    createBrain(database, secondBrainId);
+
+    const draft = {
+      kind: 'fact' as const,
+      canonicalText: 'pnpm is the project package manager.',
+      structuredData: { subject: 'project', predicate: 'package_manager', object: 'pnpm', confidence: 1 },
+      scope: { level: 'global' as const },
+    };
+    const first = store.save({ ...draft, brainId: firstBrainId });
+    const second = store.save({ ...draft, brainId: secondBrainId });
+
+    expect(first.brainId).toBe(firstBrainId);
+    expect(second.brainId).toBe(secondBrainId);
+    expect(store.get(first.id)).toBeUndefined();
+    expect(store.get(first.id, [secondBrainId])).toBeUndefined();
+    expect(store.get(first.id, [firstBrainId])).toEqual(first);
+    expect(store.list()).toEqual([]);
+    expect(store.search('pnpm package manager')).toEqual([]);
+    expect(store.findApplicable({ level: 'global' })).toEqual([]);
+    expect(store.search('pnpm package manager', { brainIds: [firstBrainId] })).toEqual([first]);
+    expect(store.findApplicable({ level: 'global' }, { brainIds: [secondBrainId] })).toEqual([second]);
+    expect(store.search('pnpm package manager', { brainIds: [firstBrainId, secondBrainId] })).toEqual(
+      expect.arrayContaining([first, second]),
+    );
+
+    expect(() =>
+      store.update(
+        first.id,
+        {
+          canonicalText: 'This cross-brain update must be rejected.',
+          actor: 'test-user',
+          reason: 'Verify read/write access is scoped to the selected brain.',
+        },
+        [secondBrainId],
+      ),
+    ).toThrow(/Memory not found/);
+
+    const updated = store.update(first.id, {
+      canonicalText: 'pnpm is the project package manager for this workspace.',
+      brainId: secondBrainId,
+      actor: 'test-user',
+      reason: 'Verify that updates cannot move a memory between brains.',
+    } as never, [firstBrainId]);
+
+    expect(updated.brainId).toBe(firstBrainId);
+    expect(store.listVersions(first.id)).toEqual([]);
+    expect(store.listVersions(first.id, [secondBrainId])).toEqual([]);
+    expect(store.listVersions(first.id, [firstBrainId])).toHaveLength(1);
+    expect(database.prepare('SELECT brain_id FROM memory_brains WHERE memory_id = ?').all(first.id)).toEqual([
+      { brain_id: firstBrainId },
+    ]);
+  });
+
+  test('does not expose an unmapped memory row as a personal memory', () => {
+    const { database, store } = createStore();
+    const id = insertUnmappedMemory(database);
+
+    expect(store.get(id)).toBeUndefined();
+    expect(store.list()).toEqual([]);
+    expect(store.search('unmapped memory')).toEqual([]);
+    expect(store.findApplicable({ level: 'global' })).toEqual([]);
+  });
+
+  test('requires a source event from the same brain before writing any memory rows', () => {
+    const { database, store } = createStore();
+    const memoryBrainId = '018f9d4e-7c26-7b91-8dc0-61749dbcc016';
+    const otherBrainId = '018f9d4e-7c27-7b91-8dc0-61749dbcc017';
+    const sameBrainEventId = '018f9d4e-7c28-7b91-8dc0-61749dbcc018';
+    const otherBrainEventId = '018f9d4e-7c29-7b91-8dc0-61749dbcc019';
+    const missingEventId = '018f9d4e-7c2a-7b91-8dc0-61749dbcc020';
+    createBrain(database, memoryBrainId);
+    createBrain(database, otherBrainId);
+    insertEvent(database, sameBrainEventId, memoryBrainId);
+    insertEvent(database, otherBrainEventId, otherBrainId);
+
+    const draft = {
+      kind: 'fact' as const,
+      canonicalText: 'The source event is scoped to this brain.',
+      structuredData: { subject: 'source', predicate: 'brain', object: 'same', confidence: 1 },
+      scope: { level: 'global' as const },
+      brainId: memoryBrainId,
+    };
+    const saved = store.save({ ...draft, sourceEventId: sameBrainEventId });
+    expect(store.get(saved.id, [memoryBrainId])).toEqual(saved);
+
+    let mismatch: unknown;
+    try {
+      store.save({ ...draft, sourceEventId: otherBrainEventId });
+    } catch (error) {
+      mismatch = error;
+    }
+    expect(mismatch).toBeInstanceOf(SourceEventBrainMismatchError);
+    expect((mismatch as Error).message).not.toContain(otherBrainEventId);
+    expect(() => store.save({ ...draft, sourceEventId: missingEventId })).toThrow(SourceEventBrainMismatchError);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM memory_items').get()).toEqual({ count: 1 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM memory_brains').get()).toEqual({ count: 1 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM memory_search').get()).toEqual({ count: 1 });
   });
 });

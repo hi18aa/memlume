@@ -1,10 +1,12 @@
 import {
   ContextPackSchema,
+  DEFAULT_PERSONAL_BRAIN_ID,
   MemoryScopeSchema,
   NonEmptyTextSchema,
   PolicyDataSchema,
   PreferenceDataSchema,
   ProcedureDataSchema,
+  UuidV7Schema,
   createUuidV7,
   type ContextPack,
   type ContextDecision,
@@ -28,12 +30,15 @@ export interface ResolveContextInput {
   readonly task: string | null;
   /** Maximum estimatedTextUnits, calculated as ceil(character count / ESTIMATED_TEXT_UNIT_CHARS). */
   readonly contextBudget: number;
+  /** Server-trusted mounted brains in descending priority; omitted means Personal only. */
+  readonly brainIds?: readonly string[];
   readonly entities?: readonly string[];
   readonly availableTools?: readonly string[];
 }
 
 type Candidate = {
   readonly memoryId: string;
+  readonly memoryRank: number;
   readonly estimatedTextUnits: number;
   readonly mandatory: boolean;
   readonly reason: string;
@@ -57,6 +62,10 @@ export class ContextResolver {
   resolve(input: ResolveContextInput): ContextPack {
     const intent = NonEmptyTextSchema.parse(input.intent);
     const scope = MemoryScopeSchema.parse(input.scope);
+    const brainIds = [...new Set(
+      (input.brainIds === undefined ? [DEFAULT_PERSONAL_BRAIN_ID] : input.brainIds)
+        .map((brainId) => UuidV7Schema.parse(brainId)),
+    )];
     if (!Number.isSafeInteger(input.contextBudget) || input.contextBudget < 0) {
       throw new Error('Context budget must be a non-negative integer.');
     }
@@ -68,14 +77,18 @@ export class ContextResolver {
     };
     const today = new Date().toISOString().slice(0, 10);
 
-    const applicable = this.store.findApplicable(scope, { status: 'active' }).filter((memory) => isCurrentlyValid(memory, today));
+    const compareContextMemory = compareByBrainThenSpecificity(brainIds);
+    const applicable = this.store
+      .findApplicable(scope, { status: 'active', brainIds })
+      .filter((memory) => isCurrentlyValid(memory, today))
+      .sort(compareContextMemory);
     const policies = applicable
       .filter((memory) => memory.kind === 'policy')
       .map((memory) => ({ memory, data: PolicyDataSchema.parse(memory.structuredData) }))
       .filter((policy) => matchesTrigger(policy.data.trigger, triggerContext));
     const routePolicies = policies
       .filter((policy) => policy.data.action.type === 'route_tool')
-      .sort((left, right) => compareMemorySpecificity(left.memory, right.memory));
+      .sort((left, right) => compareContextMemory(left.memory, right.memory));
     const routeWinner = routePolicies[0];
     const requiresSingleRoute = routePolicies.some((policy) => policy.data.constraints.exclusive === true);
     const exclusions = !requiresSingleRoute || routeWinner === undefined
@@ -98,7 +111,7 @@ export class ContextResolver {
         return data.success && (data.data.contexts === undefined || data.data.contexts.includes(intent));
       })
       .map(toPreference);
-    const facts = findFacts(this.store, input.task, scope, today);
+    const facts = findFacts(this.store, input.task, scope, today, brainIds, compareContextMemory);
     const decisions = applicable.filter((memory) => memory.kind === 'decision').map(toDecision);
 
     const pack = {
@@ -114,7 +127,7 @@ export class ContextResolver {
         toolSelection:
           routeWinner === undefined
             ? undefined
-            : `Route winner ${routeWinner.data.action.target} from memory ${routeWinner.memory.id} by scope_then_priority.`,
+            : `Route winner ${routeWinner.data.action.target} from memory ${routeWinner.memory.id} by brain_then_scope_then_priority.`,
         sourceMemoryIds: [] as string[],
         exclusions: exclusions.map((policy) => ({ memoryId: policy.memory.id, reason: 'exclusive_conflict' as const })),
         budget: {
@@ -127,18 +140,19 @@ export class ContextResolver {
       },
     };
 
+    const memoryRanks = new Map(applicable.map((memory, index) => [memory.id, index]));
     const candidates: Candidate[] = [
       ...directives
         .filter((directive) => directive.mandatory)
-        .map((directive) => candidate(directive, directive.text, true, 'mandatory', () => pack.directives.push(directive))),
+        .map((directive) => candidate(directive, memoryRanks.get(directive.memoryId)!, directive.text, true, 'mandatory', () => pack.directives.push(directive))),
       ...directives
         .filter((directive) => !directive.mandatory)
-        .map((directive) => candidate(directive, directive.text, false, 'policy', () => pack.directives.push(directive))),
-      ...procedures.map((procedure) => candidate(procedure, `${procedure.name}${procedure.steps.join('')}`, false, 'procedure', () => pack.procedures.push(procedure))),
-      ...preferences.map((preference) => candidate(preference, preference.text, false, 'preference', () => pack.preferences.push(preference))),
-      ...facts.map((fact) => candidate(fact, `${fact.title}${fact.summary}`, false, 'fact', () => pack.knowledge.push(fact))),
-      ...decisions.map((decision) => candidate(decision, decision.text, false, 'decision', () => pack.decisions.push(decision))),
-    ];
+        .map((directive) => candidate(directive, memoryRanks.get(directive.memoryId)!, directive.text, false, 'policy', () => pack.directives.push(directive))),
+      ...procedures.map((procedure) => candidate(procedure, memoryRanks.get(procedure.memoryId)!, `${procedure.name}${procedure.steps.join('')}`, false, 'procedure', () => pack.procedures.push(procedure))),
+      ...preferences.map((preference) => candidate(preference, memoryRanks.get(preference.memoryId)!, preference.text, false, 'preference', () => pack.preferences.push(preference))),
+      ...facts.map((fact) => candidate(fact, memoryRanks.get(fact.memoryId)!, `${fact.title}${fact.summary}`, false, 'fact', () => pack.knowledge.push(fact))),
+      ...decisions.map((decision) => candidate(decision, memoryRanks.get(decision.memoryId)!, decision.text, false, 'decision', () => pack.decisions.push(decision))),
+    ].sort((left, right) => left.memoryRank - right.memoryRank);
 
     for (const item of candidates) {
       if (item.mandatory || pack.explanation.budget.usedUnits + item.estimatedTextUnits <= input.contextBudget) {
@@ -160,16 +174,23 @@ export class ContextResolver {
   }
 }
 
-function findFacts(store: MemoryStore, task: string | null, scope: MemoryScope, today: string): ContextKnowledge[] {
+function findFacts(
+  store: MemoryStore,
+  task: string | null,
+  scope: MemoryScope,
+  today: string,
+  brainIds: readonly string[],
+  compare: (left: MemoryItem, right: MemoryItem) => number,
+): ContextKnowledge[] {
   if (task === null || !/[\p{L}\p{N}_]/u.test(task)) {
     return [];
   }
 
   return store
-    .search(task, { status: 'active', kinds: ['fact'] })
+    .search(task, { status: 'active', kinds: ['fact'], brainIds })
     .filter((memory) => isScopeApplicable(memory.scope, scope))
     .filter((memory) => isCurrentlyValid(memory, today))
-    .sort(compareMemorySpecificity)
+    .sort(compare)
     .map(toKnowledge);
 }
 
@@ -177,6 +198,7 @@ function toDirective(policy: ApplicablePolicy, forceMandatory = false): ContextD
   const { memory, data } = policy;
   return {
     memoryId: memory.id,
+    brainId: memory.brainId,
     sourceEventId: memory.sourceEventId,
     text: memory.canonicalText,
     actionTarget: data.action.target,
@@ -192,25 +214,33 @@ function toProcedure(memory: MemoryItem, triggerContext: TriggerContext): Contex
   }
   return {
     memoryId: memory.id,
+    brainId: memory.brainId,
     name: memory.title ?? memory.canonicalText,
     steps: [...data.data.steps].sort((left, right) => left.order - right.order).map((step) => step.action),
   };
 }
 
 function toPreference(memory: MemoryItem): ContextPreference {
-  return { memoryId: memory.id, text: memory.canonicalText };
+  return { memoryId: memory.id, brainId: memory.brainId, text: memory.canonicalText };
 }
 
 function toKnowledge(memory: MemoryItem): ContextKnowledge {
-  return { memoryId: memory.id, title: memory.title ?? memory.canonicalText, summary: memory.canonicalText };
+  return { memoryId: memory.id, brainId: memory.brainId, title: memory.title ?? memory.canonicalText, summary: memory.canonicalText };
 }
 
 function toDecision(memory: MemoryItem): ContextDecision {
-  return { memoryId: memory.id, text: memory.canonicalText };
+  return { memoryId: memory.id, brainId: memory.brainId, text: memory.canonicalText };
+}
+
+function compareByBrainThenSpecificity(brainIds: readonly string[]): (left: MemoryItem, right: MemoryItem) => number {
+  const priority = new Map(brainIds.map((brainId, index) => [brainId, index]));
+  return (left, right) =>
+    priority.get(left.brainId)! - priority.get(right.brainId)! || compareMemorySpecificity(left, right);
 }
 
 function candidate(
   item: { readonly memoryId: string },
+  memoryRank: number,
   text: string,
   mandatory: boolean,
   reason: string,
@@ -218,6 +248,7 @@ function candidate(
 ): Candidate {
   return {
     memoryId: item.memoryId,
+    memoryRank,
     estimatedTextUnits: Math.ceil(text.length / ESTIMATED_TEXT_UNIT_CHARS),
     mandatory,
     reason,

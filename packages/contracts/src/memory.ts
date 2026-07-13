@@ -7,6 +7,7 @@ export const IsoUtcDateTimeSchema = z.iso
 export const IsoDateSchema = z.iso.date();
 export const NonEmptyTextSchema = z.string().trim().min(1);
 const PreservedTextSchema = z.string().refine((value) => value.trim().length > 0, 'Expected non-empty text.');
+const DefaultPersonalBrainIdSchema = UuidV7Schema.default('00000000-0000-7000-8000-000000000001');
 
 export const JsonValueSchema = z.json();
 export type JsonValue = z.infer<typeof JsonValueSchema>;
@@ -156,6 +157,7 @@ export type CapabilityData = z.infer<typeof CapabilityDataSchema>;
 
 const MemoryItemMetadataSchema = z.object({
   id: UuidV7Schema,
+  brainId: DefaultPersonalBrainIdSchema,
   title: NonEmptyTextSchema.optional(),
   canonicalText: NonEmptyTextSchema,
   scope: MemoryScopeSchema,
@@ -238,6 +240,7 @@ export type EventSource = z.infer<typeof EventSourceSchema>;
 
 export const EventSchema = z.object({
   id: UuidV7Schema,
+  brainId: DefaultPersonalBrainIdSchema,
   eventType: NonEmptyTextSchema,
   rawContent: PreservedTextSchema,
   structuredData: JsonValueSchema.optional(),
@@ -248,6 +251,7 @@ export type Event = z.infer<typeof EventSchema>;
 
 export const ContextDirectiveSchema = z.object({
   memoryId: UuidV7Schema,
+  brainId: DefaultPersonalBrainIdSchema,
   sourceEventId: UuidV7Schema.optional(),
   text: NonEmptyTextSchema,
   actionTarget: NonEmptyTextSchema.optional(),
@@ -258,6 +262,7 @@ export type ContextDirective = z.infer<typeof ContextDirectiveSchema>;
 
 export const ContextProcedureSchema = z.object({
   memoryId: UuidV7Schema,
+  brainId: DefaultPersonalBrainIdSchema,
   name: NonEmptyTextSchema,
   steps: z.array(NonEmptyTextSchema).min(1),
 });
@@ -265,12 +270,14 @@ export type ContextProcedure = z.infer<typeof ContextProcedureSchema>;
 
 export const ContextPreferenceSchema = z.object({
   memoryId: UuidV7Schema,
+  brainId: DefaultPersonalBrainIdSchema,
   text: NonEmptyTextSchema,
 });
 export type ContextPreference = z.infer<typeof ContextPreferenceSchema>;
 
 export const ContextKnowledgeSchema = z.object({
   memoryId: UuidV7Schema,
+  brainId: DefaultPersonalBrainIdSchema,
   title: NonEmptyTextSchema,
   summary: NonEmptyTextSchema,
 });
@@ -278,6 +285,7 @@ export type ContextKnowledge = z.infer<typeof ContextKnowledgeSchema>;
 
 export const ContextDecisionSchema = z.object({
   memoryId: UuidV7Schema,
+  brainId: DefaultPersonalBrainIdSchema,
   text: NonEmptyTextSchema,
 });
 export type ContextDecision = z.infer<typeof ContextDecisionSchema>;
