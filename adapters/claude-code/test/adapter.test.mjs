@@ -220,6 +220,7 @@ describe('Claude Code plugin adapter', () => {
     assert.deepEqual(JSON.parse(readFileSync(catalogPath, 'utf8')), {
       name: 'memlume',
       owner: { name: 'hi18aa' },
+      metadata: { description: 'Local Shared Brain plugins for Claude Code and Memlume.' },
       plugins: [{
         name: 'memlume-claude-code',
         source: './adapters/claude-code',

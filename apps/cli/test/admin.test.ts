@@ -51,6 +51,14 @@ function createRuntime(replies: readonly FakeReply[] = [], options: { readonly i
       directories.delete(path);
     },
     readdir: async (path: string) => [...files.keys()].filter((file) => dirname(file) === path).map((file) => basename(file)),
+    homePath: () => '/home/memlume',
+    pathExists: async (path: string) => files.has(path) || directories.has(path),
+    copyDirectory: async (_source: string, destination: string) => {
+      directories.add(destination);
+    },
+    removeDirectory: async (path: string) => {
+      directories.delete(path);
+    },
     verifyBackup: async (_path: string, _password: string | undefined) => {
       verifyCalls += 1;
       if (options.verifyError !== undefined) throw options.verifyError;
@@ -175,6 +183,40 @@ describe('memlume CLI administration', () => {
     expect(result).toEqual({ code: 0, stdout: 'Daemon: ok.\nIntegrity: ok.\nMigrations: 2.\nBrains: 1.\nMounts: 1.\n', stderr: '' });
     expect(fake.requests.map(({ path }) => path)).toEqual(['/v1/health', '/v1/setup/diagnostics']);
     expect(result.stdout).not.toContain('setup-secret');
+  });
+
+  test('doctor performs a read-only check for every local Adapter profile without exposing its token', async () => {
+    const fake = createRuntime([
+      { body: { status: 'ok' } },
+      { body: { health: 'ok', integrity: 'ok', schema: { migrations: ['001'] }, brains: [{ id: 'brain-1' }], mounts: [{ brainId: 'brain-1', agentInstallationId: 'installation-1', access: 'read_write' }] } },
+      { body: { installations: [{ id: 'installation-1', clientType: 'hermes', installationId: 'hermes-main', profileId: 'default' }] } },
+      { body: { context: { directives: [] } } },
+    ]);
+    await fake.runtime.writeFile('/settings/memlume.json', JSON.stringify({
+      version: 1,
+      backupDirectory: '/backups',
+      adapters: [{
+        clientType: 'hermes',
+        installationId: 'hermes-main',
+        profileId: 'default',
+        projectId: 'memlume',
+        brainId: 'brain-1',
+        token: 'profile-secret',
+        corePath: '/workspace/memlume',
+        daemonUrl: 'http://127.0.0.1:3849',
+      }],
+    }));
+
+    const result = await run(['--url', 'http://127.0.0.1:3849', '--setup-token', 'setup-secret', 'doctor'], fake.runtime);
+
+    expect(result).toEqual({
+      code: 0,
+      stdout: 'Daemon: ok.\nIntegrity: ok.\nMigrations: 1.\nBrains: 1.\nMounts: 1.\nAdapter profiles: 1.\nHermes hermes-main/default -> Brain brain-1: mount read_write; token configured; read check: ok.\n',
+      stderr: '',
+    });
+    expect(fake.requests.map(({ path }) => path)).toEqual(['/v1/health', '/v1/setup/diagnostics', '/v1/setup/installations', '/v1/context/resolve']);
+    expect(fake.requests[3]?.headers.get('authorization')).toBe('Bearer profile-secret');
+    expect(result.stdout + result.stderr).not.toContain('profile-secret');
   });
 
   test('brain list uses the setup token and returns the daemon Brain inventory', async () => {

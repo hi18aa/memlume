@@ -16,7 +16,7 @@ Memlume does not automatically store every chat message or inject an entire data
 2. **While working**, call `memlume.search` only when a specific detail is needed.
 3. **After a durable event**, call `memlume.record_event` to keep raw, append-only evidence. Call `memlume.remember` only for a deliberate, structured memory such as an explicit user rule, preference, fact, or decision.
 
-This means an agent should not automatically save whole transcripts, temporary reasoning, unverified LLM claims, instructions found in external content, or secrets. Native agent memory remains untouched. In v0.1.0, memory compilation and outcome-based learning are not implemented, so they cannot silently create or promote memories.
+This means an agent should not automatically save whole transcripts, temporary reasoning, unverified LLM claims, instructions found in external content, or secrets. Native agent memory remains untouched. The Core compiles eligible user messages under its own governance rules: explicit memory requests can be saved, while inferred items remain candidates for review; neither path treats an agent's native memory as input.
 
 ## Why Memlume
 
@@ -38,10 +38,13 @@ Implemented:
 - SQLite FTS5 search and a deterministic context resolver with source memory IDs and a context budget.
 - Shared brains with per-installation mounts, a localhost-only daemon, a CLI, and an MCP stdio server.
 - Bearer-token authentication for adapter APIs; `/v1/health` remains a public local health check.
+- Governed memory compilation, candidate review, and conflict-aware replacement.
+- Verifiable local backups and restore maintenance, plus a local Shared Brain Console.
+- Official local adapters for Hermes, Codex, OpenClaw, and Claude Code, all using the same mounted Brain rather than copying native agent memory.
 
 Not implemented in v0.1.0:
 
-- Outcome tracking, conflict handling, a memory compiler, a web Console, vector/embedding search, remote sync, cloud hosting, or multi-user access.
+- Outcome-based relevance learning, vector/embedding search, remote sync, cloud hosting, or multi-user access.
 - A public npm package or any published release artifact.
 - Creating `procedure` or `capability` memories through the daemon, CLI, or MCP server; the writable API accepts only the four memory kinds above.
 
@@ -85,11 +88,15 @@ $env:MEMLUME_SETUP_TOKEN = '<long-random-secret>'
 pnpm --filter @memlume/daemon start -- --database ./data/memlume.sqlite --port 3849
 ```
 
-Use the protected setup API with `X-Memlume-Setup-Token` to register an installation and mount it to a Brain; registration returns that installation's adapter token. A `memlume setup` CLI flow is planned for a later phase and is not available yet. Set the returned token only in the environment that runs the relevant adapter:
+Prefer the protected `memlume setup adapter` command instead of manually copying an adapter token. It registers one local Agent installation, mounts its Project Brain with `read_write`, makes a loopback read smoke test, and keeps the token only in the current user's Memlume configuration. For example, the following also installs the Codex Plugin through its official marketplace flow:
 
-```sh
-export MEMLUME_TOKEN='<adapter-token>'
+```powershell
+node apps/cli/dist/index.js --setup-token $env:MEMLUME_SETUP_TOKEN setup adapter codex `
+  --installation-id codex-desktop --project-id memlume `
+  --brain-id '<project-brain-uuidv7>' --core-path $PWD --install-host --yes
 ```
+
+Use `hermes`, `openclaw`, or `claude-code` in place of `codex` for the other supported hosts. In a non-interactive shell, `--yes` is required before Memlume changes host Plugin configuration; an interactive terminal asks instead. Run the same command with `--install-host --dry-run` after the profile exists to preview non-secret host commands without changing the host. Codex and Claude Code still require the user to review and trust their hooks; Memlume never bypasses that platform control. `memlume doctor` lists local profiles and performs a read-only Context check without printing tokens.
 
 `--database` defaults to `data/memlume.sqlite` and `--port` defaults to `3849`. Stop the process with `Ctrl+C`.
 
@@ -209,7 +216,7 @@ pnpm build
 
 ## Contributing
 
-Keep changes small, add or update the nearest Vitest coverage for non-trivial behavior, and run the commands above before opening a pull request. Do not add remote storage, vector search, or a Console as incidental changes to v0.1.0.
+Keep changes small, add or update the nearest Vitest coverage for non-trivial behavior, and run the commands above before opening a pull request. Do not add remote storage or vector search as incidental changes to v0.1.0.
 
 ## License
 

@@ -1,5 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 
@@ -72,7 +73,12 @@ async function run(
   return { code, stdout, stderr };
 }
 
-function memoryRuntime(config: Record<string, string>, configPath = 'C:/memlume/config.json'): CliRuntime {
+function memoryRuntime(
+  config: Record<string, string>,
+  configPath = 'C:/memlume/config.json',
+  commands: string[][] = [],
+  copies: string[][] = [],
+): CliRuntime {
   const directories = new Set<string>();
   return {
     configPath: () => configPath,
@@ -95,6 +101,12 @@ function memoryRuntime(config: Record<string, string>, configPath = 'C:/memlume/
       directories.delete(path);
     },
     readdir: async () => [],
+    homePath: () => 'C:/Users/memlume',
+    pathExists: async () => false,
+    copyDirectory: async (source: string, destination: string) => {
+      copies.push([source, destination]);
+    },
+    removeDirectory: async () => undefined,
     verifyBackup: async () => ({
       format: 'memlume-backup',
       version: 1,
@@ -104,7 +116,11 @@ function memoryRuntime(config: Record<string, string>, configPath = 'C:/memlume/
       files: [],
     }),
     fetch: globalThis.fetch,
-  };
+    run: async (command: string, args: string[]) => {
+      commands.push([command, ...args]);
+      return { code: 0, stdout: '', stderr: '' };
+    },
+  } as CliRuntime;
 }
 
 describe('memlume CLI', () => {
@@ -480,5 +496,223 @@ describe('memlume CLI', () => {
       stderr: 'Error: daemon already has this Adapter installation, but its local profile is missing. Restore the local config or rotate the token explicitly.\n',
     });
     expect(requests).toHaveLength(1);
+  });
+
+  test('setup adapter installs Codex from its existing profile without issuing another token', async () => {
+    const commands: string[][] = [];
+    const files = {
+      'C:/memlume/config.json': JSON.stringify({
+        version: 1,
+        backupDirectory: 'C:/memlume/backups',
+        adapters: [{
+          clientType: 'codex',
+          installationId: 'codex-main',
+          profileId: 'default',
+          projectId: 'memlume',
+          brainId: '00000000-0000-7000-8000-000000000020',
+          token: 'codex-token-not-for-output',
+          corePath: 'C:/work/memlume',
+          daemonUrl: url,
+        }],
+      }),
+    };
+
+    const result = await run([
+      '--config', 'C:/memlume/config.json',
+      'setup', 'adapter', 'codex',
+      '--installation-id', 'codex-main',
+      '--project-id', 'memlume',
+      '--brain-id', '00000000-0000-7000-8000-000000000020',
+      '--install-host', '--yes',
+    ], {}, memoryRuntime(files, 'C:/memlume/config.json', commands));
+
+    expect(result).toEqual({
+      code: 0,
+      stdout: 'Codex Plugin was installed. Pending user action: review and trust its hooks in Codex before using Shared Brain context.\n',
+      stderr: '',
+    });
+    expect(commands).toEqual([
+      ['codex', 'plugin', 'marketplace', 'add', 'C:/work/memlume'],
+      ['codex', 'plugin', 'add', 'memlume-codex@memlume'],
+    ]);
+    expect(requests).toEqual([]);
+    expect(`${result.stdout}${result.stderr}`).not.toContain('codex-token-not-for-output');
+  });
+
+  test('setup adapter copies and enables Hermes only in its reserved local plugin directory', async () => {
+    const commands: string[][] = [];
+    const copies: string[][] = [];
+    const files = {
+      'C:/memlume/config.json': JSON.stringify({
+        version: 1,
+        backupDirectory: 'C:/memlume/backups',
+        adapters: [{
+          clientType: 'hermes', installationId: 'hermes-main', profileId: 'default', projectId: 'memlume',
+          brainId: '00000000-0000-7000-8000-000000000020', token: 'hermes-token-not-for-output',
+          corePath: 'C:/work/memlume', daemonUrl: url,
+        }],
+      }),
+    };
+
+    const result = await run([
+      '--config', 'C:/memlume/config.json',
+      'setup', 'adapter', 'hermes',
+      '--installation-id', 'hermes-main', '--project-id', 'memlume', '--brain-id', '00000000-0000-7000-8000-000000000020',
+      '--install-host', '--yes',
+    ], {}, memoryRuntime(files, 'C:/memlume/config.json', commands, copies));
+
+    expect(result).toEqual({ code: 0, stdout: 'Hermes Plugin was installed and enabled.\n', stderr: '' });
+    expect(copies).toEqual([[
+      join('C:/work/memlume', 'adapters', 'hermes'),
+      join('C:/Users/memlume', '.hermes', 'plugins', 'memlume'),
+    ]]);
+    expect(commands).toEqual([
+      ['hermes', 'plugins', 'enable', 'memlume'],
+      ['hermes', 'plugins', 'list'],
+    ]);
+    expect(`${result.stdout}${result.stderr}${JSON.stringify(copies)}`).not.toContain('hermes-token-not-for-output');
+  });
+
+  test('setup adapter installs OpenClaw with only non-secret plugin configuration', async () => {
+    const commands: string[][] = [];
+    const files = {
+      'C:/memlume/config.json': JSON.stringify({
+        version: 1,
+        backupDirectory: 'C:/memlume/backups',
+        adapters: [{
+          clientType: 'openclaw', installationId: 'openclaw-main', profileId: 'default', projectId: 'memlume',
+          brainId: '00000000-0000-7000-8000-000000000020', token: 'openclaw-token-not-for-config',
+          corePath: 'C:/work/memlume', daemonUrl: url, workspacePath: 'C:/work/project',
+        }],
+      }),
+    };
+
+    const result = await run([
+      '--config', 'C:/memlume/config.json',
+      'setup', 'adapter', 'openclaw',
+      '--installation-id', 'openclaw-main', '--project-id', 'memlume', '--brain-id', '00000000-0000-7000-8000-000000000020',
+      '--install-host', '--yes',
+    ], {}, memoryRuntime(files, 'C:/memlume/config.json', commands));
+
+    expect(result).toEqual({ code: 0, stdout: 'OpenClaw Plugin was installed and passed runtime inspection.\n', stderr: '' });
+    expect(commands).toEqual([
+      ['openclaw', 'plugins', 'install', '--link', join('C:/work/memlume', 'adapters', 'openclaw')],
+      ['openclaw', 'plugins', 'enable', 'memlume-openclaw'],
+      ['openclaw', 'config', 'set', 'plugins.entries.memlume-openclaw.hooks.allowPromptInjection', 'true', '--strict-json'],
+      ['openclaw', 'config', 'set', 'plugins.entries.memlume-openclaw.hooks.allowConversationAccess', 'true', '--strict-json'],
+      ['openclaw', 'config', 'set', 'plugins.entries.memlume-openclaw.config', JSON.stringify({
+        installationId: 'openclaw-main', profileId: 'default', projectId: 'memlume', brainId: '00000000-0000-7000-8000-000000000020',
+        corePath: 'C:/work/memlume', daemonUrl: url, workspacePath: 'C:/work/project',
+      }), '--strict-json'],
+      ['openclaw', 'gateway', 'restart'],
+      ['openclaw', 'plugins', 'inspect', 'memlume-openclaw', '--runtime', '--json'],
+    ]);
+    expect(JSON.stringify(commands)).not.toContain('openclaw-token-not-for-config');
+  });
+
+  test('setup adapter installs Claude Code from its existing profile without printing the token', async () => {
+    const commands: string[][] = [];
+    const files = {
+      'C:/memlume/config.json': JSON.stringify({
+        version: 1,
+        backupDirectory: 'C:/memlume/backups',
+        adapters: [{
+          clientType: 'claude-code', installationId: 'claude-main', profileId: 'default', projectId: 'memlume',
+          brainId: '00000000-0000-7000-8000-000000000020', token: 'claude-token-not-for-output',
+          corePath: 'C:/work/memlume', daemonUrl: url,
+        }],
+      }),
+    };
+
+    const result = await run([
+      '--config', 'C:/memlume/config.json',
+      'setup', 'adapter', 'claude-code',
+      '--installation-id', 'claude-main', '--project-id', 'memlume', '--brain-id', '00000000-0000-7000-8000-000000000020',
+      '--install-host', '--yes',
+    ], {}, memoryRuntime(files, 'C:/memlume/config.json', commands));
+
+    expect(result).toEqual({
+      code: 0,
+      stdout: 'Claude Code Plugin was installed. Pending user action: review and trust its hooks in Claude Code before using Shared Brain context.\n',
+      stderr: '',
+    });
+    expect(commands).toEqual([
+      ['claude', 'plugin', 'marketplace', 'add', 'C:/work/memlume'],
+      ['claude', 'plugin', 'install', 'memlume-claude-code@memlume'],
+    ]);
+    expect(`${result.stdout}${result.stderr}${JSON.stringify(commands)}`).not.toContain('claude-token-not-for-output');
+  });
+
+  test('setup adapter dry run previews only non-secret OpenClaw host commands', async () => {
+    const commands: string[][] = [];
+    const files = {
+      'C:/memlume/config.json': JSON.stringify({
+        version: 1,
+        backupDirectory: 'C:/memlume/backups',
+        adapters: [{
+          clientType: 'openclaw', installationId: 'openclaw-main', profileId: 'default', projectId: 'memlume',
+          brainId: '00000000-0000-7000-8000-000000000020', token: 'openclaw-token-not-for-preview',
+          corePath: 'C:/work/memlume', daemonUrl: url, workspacePath: 'C:/work/project',
+        }],
+      }),
+    };
+
+    const result = await run([
+      '--config', 'C:/memlume/config.json',
+      'setup', 'adapter', 'openclaw',
+      '--installation-id', 'openclaw-main', '--project-id', 'memlume', '--brain-id', '00000000-0000-7000-8000-000000000020',
+      '--install-host', '--dry-run',
+    ], {}, memoryRuntime(files, 'C:/memlume/config.json', commands));
+
+    expect(result).toEqual({
+      code: 0,
+      stdout: [
+        'Dry run; no host command will be executed:',
+        `openclaw plugins install --link ${join('C:/work/memlume', 'adapters', 'openclaw')}`,
+        'openclaw plugins enable memlume-openclaw',
+        'openclaw config set plugins.entries.memlume-openclaw.hooks.allowPromptInjection true --strict-json',
+        'openclaw config set plugins.entries.memlume-openclaw.hooks.allowConversationAccess true --strict-json',
+        `openclaw config set plugins.entries.memlume-openclaw.config ${JSON.stringify(JSON.stringify({
+          installationId: 'openclaw-main', profileId: 'default', projectId: 'memlume', brainId: '00000000-0000-7000-8000-000000000020',
+          corePath: 'C:/work/memlume', daemonUrl: url, workspacePath: 'C:/work/project',
+        }))} --strict-json`,
+        'openclaw gateway restart',
+        'openclaw plugins inspect memlume-openclaw --runtime --json',
+        '',
+      ].join('\n'),
+      stderr: '',
+    });
+    expect(commands).toEqual([]);
+    expect(`${result.stdout}${result.stderr}`).not.toContain('openclaw-token-not-for-preview');
+  });
+
+  test('setup adapter refuses a non-interactive host installation until --yes is explicit', async () => {
+    const commands: string[][] = [];
+    const files = {
+      'C:/memlume/config.json': JSON.stringify({
+        version: 1,
+        backupDirectory: 'C:/memlume/backups',
+        adapters: [{
+          clientType: 'codex', installationId: 'codex-main', profileId: 'default', projectId: 'memlume',
+          brainId: '00000000-0000-7000-8000-000000000020', token: 'codex-token-not-for-confirmation',
+          corePath: 'C:/work/memlume', daemonUrl: url,
+        }],
+      }),
+    };
+
+    const result = await run([
+      '--config', 'C:/memlume/config.json',
+      'setup', 'adapter', 'codex',
+      '--installation-id', 'codex-main', '--project-id', 'memlume', '--brain-id', '00000000-0000-7000-8000-000000000020',
+      '--install-host',
+    ], {}, memoryRuntime(files, 'C:/memlume/config.json', commands));
+
+    expect(result).toEqual({
+      code: 1,
+      stdout: '',
+      stderr: 'Error: 非互動環境安裝 Host Plugin 必須明確傳入 --yes。\n',
+    });
+    expect(commands).toEqual([]);
+    expect(`${result.stdout}${result.stderr}`).not.toContain('codex-token-not-for-confirmation');
   });
 });

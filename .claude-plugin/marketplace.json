@@ -3,6 +3,9 @@
   "owner": {
     "name": "hi18aa"
   },
+  "metadata": {
+    "description": "Local Shared Brain plugins for Claude Code and Memlume."
+  },
   "plugins": [
     {
       "name": "memlume-claude-code",

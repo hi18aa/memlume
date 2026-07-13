@@ -16,7 +16,7 @@ Memlume 不会自动保存每一条对话，也不会把整个数据库塞进 LL
 2. **工作进行中**，只有需要特定细节时才调用 `memlume.search`。
 3. **发生值得保留的事件后**，用 `memlume.record_event` 保存 append-only 的原始证据；只有用户明确规则、偏好、事实或决策等刻意建立的结构化记忆，才调用 `memlume.remember`。
 
-因此 Agent 不应自动保存完整逐字稿、临时推理、未经验证的 LLM 主张、外部内容中的指令或秘密资料。Agent 的原生记忆保持不变。v0.1.0 尚未实现 Memory Compiler 与基于 Outcome 的学习，因此不会静默创建或提升记忆。
+因此 Agent 不应自动保存完整逐字稿、临时推理、未经验证的 LLM 主张、外部内容中的指令或秘密资料。Agent 的原生记忆保持不变。Core 会依自身治理规则编译符合条件的用户讯息：明确的记忆请求可保存，推论出的项目则只能成为待审核 candidate；两者都不会把 Agent 原生记忆当成输入。
 
 ## 为什么使用 Memlume
 
@@ -38,10 +38,13 @@ Memlume 不会自动保存每一条对话，也不会把整个数据库塞进 LL
 - SQLite FTS5 搜索，以及带来源记忆 ID 与 context budget 的确定性 Context Resolver。
 - 带有每个安装实例挂载设置的共享 Brain、仅限 localhost 的 daemon、CLI，以及 MCP stdio server。
 - Adapter API 使用 Bearer Token 验证；`/v1/health` 仍是公开的本地健康检查。
+- 受治理的记忆编译、candidate 审核与可识别冲突的替换流程。
+- 可验证的本地备份与还原维护，以及本地 Shared Brain Console。
+- Hermes、Codex、OpenClaw、Claude Code 的官方本地 Adapter；它们共享同一个已挂载 Brain，不复制 Agent 的原生记忆。
 
 v0.1.0 尚未实现：
 
-- Outcome tracking、conflict handling、Memory Compiler、网页 Console、vector／embedding search、远程同步、云托管、多用户访问。
+- 基于 Outcome 的关联性学习、vector／embedding search、远程同步、云托管、多用户访问。
 - 公开 npm 包或任何已发布的 release artifact。
 - 经由 daemon、CLI、MCP Server 创建 `procedure` 或 `capability` 记忆；可写入 API 仅接受上述四种记忆类型。
 
@@ -85,11 +88,15 @@ $env:MEMLUME_SETUP_TOKEN = '<long-random-secret>'
 pnpm --filter @memlume/daemon start -- --database ./data/memlume.sqlite --port 3849
 ```
 
-请通过带有 `X-Memlume-Setup-Token` 的受保护 setup API 注册安装实例并挂载到 Brain；注册 response 会返回该安装实例的 adapter token。`memlume setup` CLI 流程安排在后续 Phase，目前尚未提供。请只在运行相关 Adapter 的环境中设置取得的 token：
+建议使用受保护的 `memlume setup adapter`，而不是手动复制 adapter token。它会注册一个本地 Agent installation、以 `read_write` 挂载 Project Brain、进行 loopback 只读 smoke test，并只把 token 留在当前用户的 Memlume 配置中。以下示例也会通过 Codex 官方 Marketplace 流程安装 Plugin：
 
-```sh
-export MEMLUME_TOKEN='<adapter-token>'
+```powershell
+node apps/cli/dist/index.js --setup-token $env:MEMLUME_SETUP_TOKEN setup adapter codex `
+  --installation-id codex-desktop --project-id memlume `
+  --brain-id '<project-brain-uuidv7>' --core-path $PWD --install-host --yes
 ```
+
+其他支持的 Host 将 `codex` 换成 `hermes`、`openclaw` 或 `claude-code` 即可。非交互终端必须带 `--yes`，Memlume 才会变更 Host Plugin 配置；交互终端则会先询问。profile 已存在时，可在相同命令加上 `--install-host --dry-run`，只预览不含秘密的 Host 命令而不变更 Host。Codex 与 Claude Code 仍要求用户审阅并信任 hook；Memlume 不会绕过这项平台控制。`memlume doctor` 会列出本地 profile，并进行不输出 token 的只读 Context 检查。
 
 `--database` 默认值为 `data/memlume.sqlite`，`--port` 默认值为 `3849`。使用 `Ctrl+C` 停止进程。
 
@@ -209,7 +216,7 @@ pnpm build
 
 ## 贡献
 
-请保持变更精简；非平凡行为请新增或更新最近的 Vitest coverage，并在创建 pull request 前执行上述命令。请勿将远程存储、vector search 或 Console 作为 v0.1.0 的附带变更加入。
+请保持变更精简；非平凡行为请新增或更新最近的 Vitest coverage，并在创建 pull request 前执行上述命令。请勿将远程存储或 vector search 作为 v0.1.0 的附带变更加入。
 
 ## 许可
 

@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { Command, CommanderError } from 'commander';
+import { execFile } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
-import { mkdir, readFile, readdir, rmdir, unlink, writeFile } from 'node:fs/promises';
+import { access, cp, mkdir, readFile, readdir, rmdir, rm, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 
 import { verifyBackup, type BackupManifest } from '@memlume/backup';
 
@@ -11,6 +13,7 @@ type Writer = (text: string) => void;
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const DAEMON_URL_ERROR = 'daemon URL must be an http://127.0.0.1 or http://[::1] origin.';
+const execFileAsync = promisify(execFile);
 
 interface Io {
   readonly stdout: Writer;
@@ -60,6 +63,11 @@ export interface CliRuntime {
   removeFile(path: string): Promise<void>;
   removeEmptyDirectory(path: string): Promise<void>;
   readdir(path: string): Promise<readonly string[]>;
+  homePath(): string;
+  pathExists(path: string): Promise<boolean>;
+  copyDirectory(source: string, destination: string): Promise<void>;
+  removeDirectory(path: string): Promise<void>;
+  run(command: string, args: readonly string[]): Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }>;
   verifyBackup(path: string, password: string | undefined): Promise<BackupManifest>;
   fetch: typeof fetch;
 }
@@ -209,7 +217,7 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
       if (existing.raw !== undefined) {
         await runtime.writeFile(existingBackup === undefined ? `${path}.backup` : await configSnapshotPath(path, runtime), existing.raw);
       }
-      await runtime.writeFile(path, JSON.stringify(desired));
+      await runtime.writeFile(path, JSON.stringify(serializableConfig(desired)));
       try {
         await requestSetupJson(global.url, setupToken(global.setupToken, environment), '/v1/setup/diagnostics', 'GET', undefined, runtime);
       } catch {
@@ -239,8 +247,17 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
     .requiredOption('--brain-id <id>', '要掛載的 Project Brain UUIDv7')
     .option('--workspace-path <path>', '選填：Agent workspace 路徑')
     .option('--core-path <path>', 'Memlume Core repository 路徑')
+    .option('--install-host', '使用 Agent 官方 Plugin 流程安裝此 profile')
+    .option('--dry-run', '僅預覽 --install-host 將執行的命令')
+    .option('--yes', '確認變更 Host Plugin 設定，供非互動環境使用')
     .action(async (agent: string, options: AdapterSetupOptions, command: Command) => {
+      if (options.dryRun && !options.installHost) {
+        throw new Error('--dry-run must be used with --install-host.');
+      }
       const clientType = supportedAdapter(agent);
+      if (options.installHost && !options.dryRun) {
+        await confirmHostInstallation(options, runtime);
+      }
       const global = command.optsWithGlobals<GlobalOptions>();
       const path = configPath(global, runtime);
       const existing = await readConfig(path, runtime);
@@ -250,7 +267,16 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
         && profile.profileId === options.profileId
       ));
       if (duplicate !== undefined) {
+        if (options.installHost) {
+          io.stdout(options.dryRun
+            ? `${hostInstallationPreview(duplicate, runtime)}\n`
+            : `${await installAdapterHost(duplicate, runtime)}\n`);
+          return;
+        }
         throw new Error('此 Adapter profile 已存在。請使用既有設定，或先明確移除／輪替它。');
+      }
+      if (options.dryRun) {
+        throw new Error('--dry-run requires an existing Adapter profile. Register it first without --dry-run.');
       }
 
       const setupSecret = setupToken(global.setupToken, environment);
@@ -302,7 +328,7 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
         const backupPath = await runtime.readFile(`${path}.backup`) === undefined ? `${path}.backup` : await configSnapshotPath(path, runtime);
         await runtime.writeFile(backupPath, existing.raw);
       }
-      await runtime.writeFile(path, JSON.stringify(desired));
+      await runtime.writeFile(path, JSON.stringify(serializableConfig(desired)));
       try {
         await request(global.url, token, '/v1/context/resolve', 'POST', {
           intent: 'shared_memory',
@@ -320,7 +346,9 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
         }
         throw new Error('Adapter profile 已還原，daemon smoke test 失敗。');
       }
-      io.stdout(`${adapterDisplayName(clientType)} adapter profile is registered, mounted, and passed the daemon smoke test.\n`);
+      io.stdout(options.installHost
+        ? `${await installAdapterHost(desired.adapters.at(-1)!, runtime)}\n`
+        : `${adapterDisplayName(clientType)} adapter profile is registered, mounted, and passed the daemon smoke test.\n`);
     });
 
   program
@@ -332,11 +360,20 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
       const diagnostics = global.setupToken === undefined && environment.MEMLUME_SETUP_TOKEN === undefined
         ? undefined
         : await requestSetupJson(global.url, setupToken(global.setupToken, environment), '/v1/setup/diagnostics', 'GET', undefined, runtime);
+      const configuredProfiles = (await readConfig(configPath(global, runtime), runtime)).config.adapters;
+      const installations = diagnostics === undefined || configuredProfiles.length === 0
+        ? undefined
+        : await requestSetupJson(global.url, setupToken(global.setupToken, environment), '/v1/setup/installations', 'GET', undefined, runtime);
+      const profiles = await doctorAdapterProfiles(
+        configuredProfiles,
+        diagnostics === undefined || installations === undefined ? undefined : configuredMounts(configuredProfiles, installations, diagnostics),
+        runtime,
+      );
       if (global.json) {
-        io.stdout(`${JSON.stringify(compact({ health, diagnostics }))}\n`);
+        io.stdout(`${JSON.stringify(compact({ health, diagnostics, profiles }))}\n`);
         return;
       }
-      io.stdout(doctorSummary(health, diagnostics));
+      io.stdout(doctorSummary(health, diagnostics, profiles));
     });
 
   const brain = program.command('brain').description('管理 Shared Brain 匯出與匯入。');
@@ -526,6 +563,15 @@ interface AdapterProfile {
   readonly daemonUrl: string;
 }
 
+interface DoctorAdapterProfile {
+  readonly clientType: SupportedAdapter;
+  readonly installationId: string;
+  readonly profileId: string;
+  readonly brainId: string;
+  readonly mount: 'read' | 'read_write' | 'not_mounted' | 'not_checked';
+  readonly readCheck: 'ok' | 'failed';
+}
+
 interface AdapterSetupOptions {
   readonly installationId: string;
   readonly profileId: string;
@@ -533,6 +579,9 @@ interface AdapterSetupOptions {
   readonly brainId: string;
   readonly workspacePath?: string;
   readonly corePath?: string;
+  readonly installHost?: boolean;
+  readonly dryRun?: boolean;
+  readonly yes?: boolean;
 }
 
 const supportedAdapters = ['hermes', 'codex', 'openclaw', 'claude-code'] as const;
@@ -907,6 +956,12 @@ function configDiff(current: CliConfig, desired: CliConfig): string {
   return `設定變更：\nbackupDirectory: ${current.backupDirectory} -> ${desired.backupDirectory}\n`;
 }
 
+function serializableConfig(config: CliConfig): Omit<CliConfig, 'adapters'> & { readonly adapters?: readonly AdapterProfile[] } {
+  return config.adapters.length === 0
+    ? { version: config.version, backupDirectory: config.backupDirectory }
+    : config;
+}
+
 function supportedAdapter(value: string): SupportedAdapter {
   if ((supportedAdapters as readonly string[]).includes(value)) {
     return value as SupportedAdapter;
@@ -924,6 +979,123 @@ function adapterDisplayName(adapter: SupportedAdapter): string {
       return 'Codex';
     case 'hermes':
       return 'Hermes';
+  }
+}
+
+async function installAdapterHost(profile: AdapterProfile, runtime: CliRuntime): Promise<string> {
+  switch (profile.clientType) {
+    case 'codex': {
+      await runHostCommands(hostInstallationCommands(profile), runtime);
+      return 'Codex Plugin was installed. Pending user action: review and trust its hooks in Codex before using Shared Brain context.';
+    }
+    case 'openclaw': {
+      await runHostCommands(hostInstallationCommands(profile), runtime);
+      return 'OpenClaw Plugin was installed and passed runtime inspection.';
+    }
+    case 'claude-code': {
+      await runHostCommands(hostInstallationCommands(profile), runtime);
+      return 'Claude Code Plugin was installed. Pending user action: review and trust its hooks in Claude Code before using Shared Brain context.';
+    }
+    case 'hermes': {
+      const destination = join(runtime.homePath(), '.hermes', 'plugins', 'memlume');
+      if (await runtime.pathExists(destination)) {
+        throw new Error('Hermes Memlume plugin directory already exists. Refusing to overwrite it.');
+      }
+      let copied = false;
+      try {
+        await runtime.mkdir(dirname(destination));
+        await runtime.copyDirectory(join(profile.corePath, 'adapters', 'hermes'), destination);
+        copied = true;
+        await runHostCommands(hostInstallationCommands(profile), runtime);
+      } catch (error) {
+        if (copied) await runtime.removeDirectory(destination);
+        throw error;
+      }
+      return 'Hermes Plugin was installed and enabled.';
+    }
+  }
+}
+
+interface HostCommand {
+  readonly command: string;
+  readonly args: readonly string[];
+}
+
+function hostInstallationCommands(profile: AdapterProfile): readonly HostCommand[] {
+  switch (profile.clientType) {
+    case 'codex':
+      return [
+        { command: 'codex', args: ['plugin', 'marketplace', 'add', profile.corePath] },
+        { command: 'codex', args: ['plugin', 'add', 'memlume-codex@memlume'] },
+      ];
+    case 'openclaw':
+      return [
+        { command: 'openclaw', args: ['plugins', 'install', '--link', join(profile.corePath, 'adapters', 'openclaw')] },
+        { command: 'openclaw', args: ['plugins', 'enable', 'memlume-openclaw'] },
+        { command: 'openclaw', args: ['config', 'set', 'plugins.entries.memlume-openclaw.hooks.allowPromptInjection', 'true', '--strict-json'] },
+        { command: 'openclaw', args: ['config', 'set', 'plugins.entries.memlume-openclaw.hooks.allowConversationAccess', 'true', '--strict-json'] },
+        { command: 'openclaw', args: ['config', 'set', 'plugins.entries.memlume-openclaw.config', JSON.stringify(openClawConfiguration(profile)), '--strict-json'] },
+        { command: 'openclaw', args: ['gateway', 'restart'] },
+        { command: 'openclaw', args: ['plugins', 'inspect', 'memlume-openclaw', '--runtime', '--json'] },
+      ];
+    case 'claude-code':
+      return [
+        { command: 'claude', args: ['plugin', 'marketplace', 'add', profile.corePath] },
+        { command: 'claude', args: ['plugin', 'install', 'memlume-claude-code@memlume'] },
+      ];
+    case 'hermes':
+      return [
+        { command: 'hermes', args: ['plugins', 'enable', 'memlume'] },
+        { command: 'hermes', args: ['plugins', 'list'] },
+      ];
+  }
+}
+
+function hostInstallationPreview(profile: AdapterProfile, runtime: CliRuntime): string {
+  const lines = ['Dry run; no host command will be executed:'];
+  if (profile.clientType === 'hermes') {
+    lines.push(`copy directory ${join(profile.corePath, 'adapters', 'hermes')} -> ${join(runtime.homePath(), '.hermes', 'plugins', 'memlume')}`);
+  }
+  lines.push(...hostInstallationCommands(profile).map(formatHostCommand));
+  return lines.join('\n');
+}
+
+function formatHostCommand(command: HostCommand): string {
+  return [command.command, ...command.args].map((value) => /[\s"]/u.test(value) ? JSON.stringify(value) : value).join(' ');
+}
+
+async function confirmHostInstallation(options: AdapterSetupOptions, runtime: CliRuntime): Promise<void> {
+  if (options.yes) return;
+  if (!runtime.isInteractive()) {
+    throw new Error('非互動環境安裝 Host Plugin 必須明確傳入 --yes。');
+  }
+  if (!await runtime.confirm('這會變更目前使用者的 Agent Plugin 設定，是否繼續？')) {
+    throw new Error('已取消 Host Plugin 安裝。');
+  }
+}
+
+function openClawConfiguration(profile: AdapterProfile): Record<string, string> {
+  return compact({
+    installationId: profile.installationId,
+    profileId: profile.profileId,
+    projectId: profile.projectId,
+    brainId: profile.brainId,
+    corePath: profile.corePath,
+    daemonUrl: profile.daemonUrl,
+    workspacePath: profile.workspacePath,
+  }) as Record<string, string>;
+}
+
+async function runHostCommand(runtime: CliRuntime, command: string, args: readonly string[]): Promise<void> {
+  const result = await runtime.run(command, args);
+  if (result.code !== 0) {
+    throw new Error(`${command} host installation command failed.`);
+  }
+}
+
+async function runHostCommands(commands: readonly HostCommand[], runtime: CliRuntime): Promise<void> {
+  for (const command of commands) {
+    await runHostCommand(runtime, command.command, command.args);
   }
 }
 
@@ -960,19 +1132,94 @@ async function requiredFile(path: string, runtime: CliRuntime): Promise<Uint8Arr
   return file;
 }
 
-function doctorSummary(health: unknown, diagnostics: unknown): string {
-  const healthStatus = objectString(health, 'status') ?? objectString(health, 'health') ?? 'unknown';
-  if (diagnostics === undefined) {
-    return `Daemon: ${healthStatus}.\n未提供 setup token，略過受保護診斷。\n`;
+function configuredMounts(profiles: readonly AdapterProfile[], installations: unknown, diagnostics: unknown): ReadonlyMap<string, 'read' | 'read_write' | 'not_mounted'> {
+  const installationIds = new Map<string, string>();
+  for (const installation of arrayValue(installations, 'installations')) {
+    const id = objectString(installation, 'id');
+    const clientType = objectString(installation, 'clientType');
+    const installationId = objectString(installation, 'installationId');
+    const profileId = objectString(installation, 'profileId');
+    if (id !== undefined && clientType !== undefined && installationId !== undefined && profileId !== undefined) {
+      installationIds.set(adapterInstallationKey(clientType, installationId, profileId), id);
+    }
   }
-  const schema = objectValue(diagnostics, 'schema');
-  return [
-    `Daemon: ${healthStatus}.`,
-    `Integrity: ${objectString(diagnostics, 'integrity') ?? 'unknown'}.`,
-    `Migrations: ${arrayValue(schema, 'migrations').length}.`,
-    `Brains: ${arrayValue(diagnostics, 'brains').length}.`,
-    `Mounts: ${arrayValue(diagnostics, 'mounts').length}.`,
-  ].join('\n').concat('\n');
+  const mountAccess = new Map<string, 'read' | 'read_write'>();
+  for (const mount of arrayValue(diagnostics, 'mounts')) {
+    const brainId = objectString(mount, 'brainId');
+    const agentInstallationId = objectString(mount, 'agentInstallationId');
+    const access = objectString(mount, 'access');
+    if (brainId !== undefined && agentInstallationId !== undefined && (access === 'read' || access === 'read_write')) {
+      mountAccess.set(`${agentInstallationId}\u0000${brainId}`, access);
+    }
+  }
+  return new Map(profiles.map((profile) => {
+    const installationId = installationIds.get(adapterInstallationKey(profile.clientType, profile.installationId, profile.profileId));
+    const access = installationId === undefined ? undefined : mountAccess.get(`${installationId}\u0000${profile.brainId}`);
+    return [adapterProfileKey(profile), access ?? 'not_mounted'];
+  }));
+}
+
+function adapterInstallationKey(clientType: string, installationId: string, profileId: string): string {
+  return `${clientType}\u0000${installationId}\u0000${profileId}`;
+}
+
+function adapterProfileKey(profile: AdapterProfile): string {
+  return `${adapterInstallationKey(profile.clientType, profile.installationId, profile.profileId)}\u0000${profile.brainId}`;
+}
+
+async function doctorAdapterProfiles(
+  profiles: readonly AdapterProfile[],
+  mounts: ReadonlyMap<string, 'read' | 'read_write' | 'not_mounted'> | undefined,
+  runtime: CliRuntime,
+): Promise<readonly DoctorAdapterProfile[]> {
+  const results: DoctorAdapterProfile[] = [];
+  for (const profile of profiles) {
+    let readCheck: DoctorAdapterProfile['readCheck'] = 'ok';
+    try {
+      await request(profile.daemonUrl, profile.token, '/v1/context/resolve', 'POST', {
+        intent: 'shared_memory',
+        scope: { level: 'project', projectId: profile.projectId },
+        task: 'Memlume doctor read check.',
+        contextBudget: 1,
+        availableTools: [],
+        entities: [],
+      }, runtime);
+    } catch {
+      readCheck = 'failed';
+    }
+    results.push({
+      clientType: profile.clientType,
+      installationId: profile.installationId,
+      profileId: profile.profileId,
+      brainId: profile.brainId,
+      mount: mounts?.get(adapterProfileKey(profile)) ?? 'not_checked',
+      readCheck,
+    });
+  }
+  return results;
+}
+
+function doctorSummary(health: unknown, diagnostics: unknown, profiles: readonly DoctorAdapterProfile[]): string {
+  const healthStatus = objectString(health, 'status') ?? objectString(health, 'health') ?? 'unknown';
+  const lines = [`Daemon: ${healthStatus}.`];
+  if (diagnostics === undefined) {
+    lines.push('未提供 setup token，略過受保護診斷。');
+  } else {
+    const schema = objectValue(diagnostics, 'schema');
+    lines.push(
+      `Integrity: ${objectString(diagnostics, 'integrity') ?? 'unknown'}.`,
+      `Migrations: ${arrayValue(schema, 'migrations').length}.`,
+      `Brains: ${arrayValue(diagnostics, 'brains').length}.`,
+      `Mounts: ${arrayValue(diagnostics, 'mounts').length}.`,
+    );
+  }
+  if (profiles.length > 0) {
+    lines.push(`Adapter profiles: ${profiles.length}.`);
+    lines.push(...profiles.map((profile) => (
+      `${adapterDisplayName(profile.clientType)} ${profile.installationId}/${profile.profileId} -> Brain ${profile.brainId}: mount ${profile.mount}; token configured; read check: ${profile.readCheck}.`
+    )));
+  }
+  return lines.join('\n').concat('\n');
 }
 
 function brainsSummary(result: unknown): string {
@@ -1128,6 +1375,31 @@ const defaultRuntime: CliRuntime = {
         return [];
       }
       throw error;
+    }
+  },
+  homePath: () => homedir(),
+  async pathExists(path: string): Promise<boolean> {
+    try {
+      await access(path);
+      return true;
+    } catch (error) {
+      if (isMissingFile(error)) return false;
+      throw error;
+    }
+  },
+  copyDirectory: async (source, destination) => cp(source, destination, { recursive: true, force: false, errorOnExist: true }),
+  removeDirectory: async (path) => rm(path, { force: true, recursive: true }),
+  async run(command: string, args: readonly string[]): Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }> {
+    try {
+      const output = await execFileAsync(command, args, { windowsHide: true });
+      return { code: 0, stdout: output.stdout, stderr: output.stderr };
+    } catch (error) {
+      const failed = error as { readonly code?: number; readonly stdout?: string; readonly stderr?: string };
+      return {
+        code: typeof failed.code === 'number' ? failed.code : 1,
+        stdout: typeof failed.stdout === 'string' ? failed.stdout : '',
+        stderr: typeof failed.stderr === 'string' ? failed.stderr : '',
+      };
     }
   },
   verifyBackup: (path, password) => verifyBackup({ backupPath: path, ...(password === undefined ? {} : { password }) }),
