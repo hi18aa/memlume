@@ -8,12 +8,12 @@ import Database from 'better-sqlite3';
 import { strFromU8, unzipSync } from 'fflate';
 
 import { DEFAULT_PERSONAL_BRAIN_ID } from '@memlume/contracts';
-import { migrations, openDatabase } from '@memlume/database/internal';
+import { configureDatabase, migrations } from '@memlume/database/internal';
 import { encryptedPrefix, FullBackupAuthenticationRequiredError, readMappings, sha256, type BackupManifest, type BackupMappings, type EncryptionHeader } from './create-backup.js';
 
 const MAX_BACKUP_BYTES = 64 * 1024 * 1024;
 const backupEntryNames = new Set(['manifest.json', 'snapshot.sqlite']);
-let expectedSchema: readonly SchemaObject[] | undefined;
+const expectedSchemas = new Map<string, readonly SchemaObject[]>();
 
 export type VerifyBackupOptions = {
   readonly backupPath: string;
@@ -81,11 +81,11 @@ export function inspectSnapshotPath(snapshotPath: string, manifest: BackupManife
   const database = new Database(snapshotPath, { readonly: true, fileMustExist: true });
   try {
     const migrationsInSnapshot = database.prepare('SELECT id FROM schema_migrations ORDER BY id').pluck().all() as string[];
-    const expectedMigrationIds = migrations.map(({ id }) => id);
-    if (JSON.stringify(migrationsInSnapshot) !== JSON.stringify(expectedMigrationIds) || JSON.stringify(migrationsInSnapshot) !== JSON.stringify(manifest.schema.migrations)) {
+    migrationPrefixLength(migrationsInSnapshot);
+    if (JSON.stringify(migrationsInSnapshot) !== JSON.stringify(manifest.schema.migrations)) {
       throw new Error('Backup schema verification failed.');
     }
-    if (JSON.stringify(readSchema(database)) !== JSON.stringify(expectedSchemaObjects())) {
+    if (JSON.stringify(readSchema(database)) !== JSON.stringify(expectedSchemaObjects(migrationsInSnapshot))) {
       throw new Error('Backup schema verification failed.');
     }
     if (database.pragma('integrity_check', { simple: true }) !== 'ok') {
@@ -128,14 +128,42 @@ function verifyScope(manifest: BackupManifest, mappings: BackupMappings, authent
 
 type SchemaObject = { readonly type: string; readonly name: string; readonly sql: string };
 
-function expectedSchemaObjects(): readonly SchemaObject[] {
-  if (expectedSchema !== undefined) {
-    return expectedSchema;
+function migrationPrefixLength(migrationIds: readonly string[]): number {
+  const expectedMigrationIds = migrations.map(({ id }) => id);
+  if (migrationIds.length === 0 || migrationIds.length > expectedMigrationIds.length) {
+    throw new Error('Backup schema verification failed.');
   }
-  const database = openDatabase(':memory:');
+  for (let index = 0; index < migrationIds.length; index += 1) {
+    if (migrationIds[index] !== expectedMigrationIds[index]) {
+      throw new Error('Backup schema verification failed.');
+    }
+  }
+  return migrationIds.length;
+}
+
+function expectedSchemaObjects(migrationIds: readonly string[]): readonly SchemaObject[] {
+  const key = migrationIds.join('|');
+  const cached = expectedSchemas.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const database = new Database(':memory:');
   try {
-    expectedSchema = readSchema(database);
-    return expectedSchema;
+    configureDatabase(database);
+    database.exec(`
+  CREATE TABLE IF NOT EXISTS schema_migrations (
+    id TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+  );
+    `);
+    const recordMigration = database.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)');
+    for (let index = 0; index < migrationIds.length; index += 1) {
+      migrations[index]!.up(database);
+      recordMigration.run(migrationIds[index], '1970-01-01T00:00:00.000Z');
+    }
+    const schema = readSchema(database);
+    expectedSchemas.set(key, schema);
+    return schema;
   } finally {
     database.close();
   }

@@ -99,6 +99,18 @@ function seedImportTarget(filename) {
   return database;
 }
 
+function downgradeToReceiptMigration005(database) {
+  database.exec(`
+    DROP INDEX IF EXISTS idx_feedback_signal_claims_agent_memory_at;
+    DROP TABLE IF EXISTS feedback_signal_claims;
+    DROP INDEX IF EXISTS idx_user_confirmations_expires_at;
+    DROP TABLE IF EXISTS user_confirmations;
+    DROP INDEX IF EXISTS idx_memory_usage_trace_memory_outcome;
+    ALTER TABLE context_receipts DROP COLUMN source_memory_ids;
+    DELETE FROM schema_migrations WHERE id = '006_receipt_hardening';
+  `);
+}
+
 describe('Memlume backup bundle', () => {
   test('requires a password when creating a full backup', async () => {
     const directory = temporaryDirectory();
@@ -137,6 +149,33 @@ describe('Memlume backup bundle', () => {
     assert.equal(readFileSync(bundlePath).includes(Buffer.from('adapter-secret-not-in-backup')), false);
     assert.equal(existsSync(restored.rollbackPath), false);
     target.close();
+  });
+
+  test('verifies and restores a legacy 005 backup before the daemon upgrades it to 006', async () => {
+    const directory = temporaryDirectory();
+    const sourcePath = join(directory, 'legacy-source.sqlite');
+    const targetPath = join(directory, 'legacy-target.sqlite');
+    const bundlePath = join(directory, 'legacy-full.memlume');
+    const source = seedDatabase(sourcePath);
+    downgradeToReceiptMigration005(source);
+
+    const manifest = await backup.createBackup({ database: source, outputPath: bundlePath, password: fullBackupPassword });
+    source.close();
+    assert.deepEqual(manifest.schema.migrations, [
+      '001_initial',
+      '002_event_reference_dedup',
+      '003_shared_brains',
+      '004_memory_outcomes',
+      '005_feedback_receipts',
+    ]);
+    assert.deepEqual((await backup.verifyBackup({ backupPath: bundlePath, password: fullBackupPassword })).schema.migrations, manifest.schema.migrations);
+
+    await backup.restoreBackup({ backupPath: bundlePath, databasePath: targetPath, password: fullBackupPassword, pauseWrites });
+    const upgraded = openDatabase(targetPath);
+    assert.ok(upgraded.prepare('SELECT 1 FROM schema_migrations WHERE id = ?').get('006_receipt_hardening'));
+    assert.ok(upgraded.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'user_confirmations'").get());
+    assert.ok(upgraded.prepare('SELECT 1 FROM pragma_table_info(\'context_receipts\') WHERE name = \'source_memory_ids\'').get());
+    upgraded.close();
   });
 
   test('imports one exported brain as a new unmounted brain without changing existing data', async () => {
