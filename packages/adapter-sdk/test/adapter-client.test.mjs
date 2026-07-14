@@ -157,6 +157,528 @@ describe('AdapterClient', () => {
     assert.equal(loadLocalAdapterProfile('claude-code', { configPath, environment: {} }), undefined);
   });
 
+  test('forwards a requested context Brain subset without the local envelope', async () => {
+    const fake = fakeFetch({ status: 200, body: { context: context() } });
+    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxDirectory: temporaryOutboxDirectory(), fetch: fake.fetch });
+    const requestedBrainIds = [brainId, '00000000-0000-7000-8000-000000000005'];
+
+    await client.beforeTask({ ...beforeTask, envelope, requestedBrainIds });
+    assert.deepEqual(JSON.parse(fake.calls[0].init.body), { ...beforeTask, requestedBrainIds });
+  });
+
+  test('reads context for a subagent without sending host-only metadata or writing memory', async () => {
+    const fake = fakeFetch({ status: 200, body: { context: context() } });
+    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxDirectory: temporaryOutboxDirectory(), fetch: fake.fetch });
+
+    assert.deepEqual(await client.onSubagentStart({
+      ...beforeTask,
+      envelope,
+      requestedBrainIds: [brainId],
+      parentTaskId: 'parent-task',
+      subagentId: 'child-agent',
+    }), context());
+    assert.equal(fake.calls.length, 1);
+    assert.equal(fake.calls[0].url.endsWith('/v1/context/resolve'), true);
+    assert.deepEqual(JSON.parse(fake.calls[0].init.body), { ...beforeTask, requestedBrainIds: [brainId] });
+  });
+
+  test('reads subagent context without flushing an existing outbox capture', async () => {
+    const outboxPath = temporaryOutbox();
+    const pending = {
+      state: 'pending',
+      retryCount: 0,
+      messageId: 'pending-parent-memory',
+      request: {
+        endpoint: '/v1/memories/capture',
+        rawContent: 'Remember Vue.',
+        eventType: 'user_message',
+        source: {
+          type: 'codex',
+          agent: 'codex',
+          conversationId: 'session-1',
+          messageId: 'pending-parent-memory',
+          reference: 'pending-parent-memory',
+        },
+        brainId,
+        scope: { level: 'project', projectId: 'memlume' },
+        structuredData: { envelope },
+      },
+    };
+    const original = `${JSON.stringify(pending)}\n`;
+    writeFileSync(outboxPath, original, 'utf8');
+    const paths = [];
+    const client = new AdapterClient({
+      daemonUrl: 'http://127.0.0.1:3849',
+      token,
+      outboxPath,
+      fetch: async (input) => {
+        const path = new URL(String(input)).pathname;
+        paths.push(path);
+        return new Response(JSON.stringify(path === '/v1/context/resolve' ? { context: context() } : savedCapture()), { status: 200 });
+      },
+    });
+
+    await client.onSubagentStart({ ...beforeTask, envelope, parentTaskId: 'parent-task' });
+    assert.deepEqual(paths, ['/v1/context/resolve']);
+    assert.equal(readFileSync(outboxPath, 'utf8'), original);
+  });
+
+  test('uses the configured default Brain for a new user-memory capture', async () => {
+    const fake = fakeFetch({ status: 201, body: savedCapture() });
+    const client = new AdapterClient({
+      daemonUrl: 'http://127.0.0.1:3849',
+      token,
+      defaultWriteBrainId: brainId,
+      outboxDirectory: temporaryOutboxDirectory(),
+      fetch: fake.fetch,
+    });
+
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'default-target', content: 'Remember Vue.' }), { status: 'saved', memoryStatus: 'active' });
+    assert.equal(JSON.parse(fake.calls[0].init.body).brainId, brainId);
+  });
+
+  test('uses an explicit message Brain instead of the configured default', async () => {
+    const explicitBrainId = '00000000-0000-7000-8000-000000000006';
+    const fake = fakeFetch({ status: 201, body: savedCapture() });
+    const client = new AdapterClient({
+      daemonUrl: 'http://127.0.0.1:3849',
+      token,
+      defaultWriteBrainId: brainId,
+      outboxDirectory: temporaryOutboxDirectory(),
+      fetch: fake.fetch,
+    });
+
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'explicit-target', content: 'Remember Vue.', brainId: explicitBrainId }), { status: 'saved', memoryStatus: 'active' });
+    assert.equal(JSON.parse(fake.calls[0].init.body).brainId, explicitBrainId);
+  });
+
+  test('rejects a new user-memory capture without a target Brain before any network or outbox work', async () => {
+    const outboxPath = temporaryOutbox();
+    const fake = fakeFetch({ status: 201, body: savedCapture() });
+    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: fake.fetch });
+
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'missing-target', content: 'Remember Vue.' }), { status: 'rejected' });
+    assert.equal(fake.calls.length, 0);
+    assert.equal(existsSync(outboxPath), false);
+  });
+
+  test('rejects a targetless capture before creating an outbox parent directory', async () => {
+    const directory = temporaryOutboxDirectory();
+    const outboxPath = join(directory, 'missing', 'nested', 'outbox.jsonl');
+    const fake = fakeFetch({ status: 201, body: savedCapture() });
+    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: fake.fetch });
+
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'missing-target-directory', content: 'Remember Vue.' }), { status: 'rejected' });
+    assert.equal(fake.calls.length, 0);
+    assert.equal(existsSync(join(directory, 'missing')), false);
+  });
+
+  test('rejects a targetless capture without flushing an existing outbox entry', async () => {
+    const outboxPath = temporaryOutbox();
+    const pending = {
+      state: 'pending',
+      retryCount: 0,
+      messageId: 'pending-no-target',
+      request: {
+        endpoint: '/v1/memories/capture',
+        rawContent: 'Remember Vue.',
+        eventType: 'user_message',
+        source: {
+          type: 'codex',
+          agent: 'codex',
+          conversationId: 'session-1',
+          messageId: 'pending-no-target',
+          reference: 'pending-no-target',
+        },
+        brainId,
+        scope: { level: 'project', projectId: 'memlume' },
+        structuredData: { envelope },
+      },
+    };
+    const original = `${JSON.stringify(pending)}\n`;
+    writeFileSync(outboxPath, original, 'utf8');
+    const fake = fakeFetch({ status: 201, body: savedCapture() });
+    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: fake.fetch });
+
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'missing-target-pending', content: 'Remember Vue.' }), { status: 'rejected' });
+    assert.equal(fake.calls.length, 0);
+    assert.equal(readFileSync(outboxPath, 'utf8'), original);
+  });
+
+  test('upgrades a legacy capture outbox entry with the configured default Brain before retrying it', async () => {
+    const outboxPath = temporaryOutbox();
+    const legacy = {
+      state: 'pending',
+      retryCount: 0,
+      messageId: 'legacy-default-target',
+      request: {
+        endpoint: '/v1/memories/capture',
+        rawContent: 'Remember Vue.',
+        eventType: 'user_message',
+        source: {
+          type: 'codex',
+          agent: 'codex',
+          conversationId: 'session-1',
+          messageId: 'legacy-default-target',
+          reference: 'legacy-default-target',
+        },
+        scope: { level: 'project', projectId: 'memlume' },
+        structuredData: { envelope },
+      },
+    };
+    writeFileSync(outboxPath, `${JSON.stringify(legacy)}\n`, 'utf8');
+    const fake = fakeFetch({ status: 503, body: { error: 'unavailable' } });
+    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, defaultWriteBrainId: brainId, fetch: fake.fetch });
+
+    assert.deepEqual(await client.onSessionEnd(), [{ status: 'queued' }]);
+    assert.equal(JSON.parse(fake.calls[0].init.body).brainId, brainId);
+    assert.equal(JSON.parse(readFileSync(outboxPath, 'utf8')).request.brainId, brainId);
+  });
+
+  test('keeps a legacy capture outbox entry pending when this client has no target Brain', async () => {
+    const outboxPath = temporaryOutbox();
+    const legacy = {
+      state: 'pending',
+      retryCount: 0,
+      messageId: 'legacy-missing-target',
+      request: {
+        endpoint: '/v1/memories/capture',
+        rawContent: 'Remember Vue.',
+        eventType: 'user_message',
+        source: {
+          type: 'codex',
+          agent: 'codex',
+          conversationId: 'session-1',
+          messageId: 'legacy-missing-target',
+          reference: 'legacy-missing-target',
+        },
+        scope: { level: 'project', projectId: 'memlume' },
+        structuredData: { envelope },
+      },
+    };
+    writeFileSync(outboxPath, `${JSON.stringify(legacy)}\n`, 'utf8');
+    const warnings = [];
+    const fake = fakeFetch({ status: 400, body: { error: 'brain_required' } });
+    const client = new AdapterClient({
+      daemonUrl: 'http://127.0.0.1:3849',
+      token,
+      outboxPath,
+      fetch: fake.fetch,
+      warn: (message) => warnings.push(message),
+    });
+
+    assert.deepEqual(await client.onSessionEnd(), [{ status: 'queued' }]);
+    assert.equal(fake.calls.length, 0);
+    assert.deepEqual(await client.outboxStatus(), { state: 'pending', pending: 1, retry: 1, discarded: 0 });
+    assert.equal(JSON.parse(readFileSync(outboxPath, 'utf8')).request.brainId, undefined);
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0].includes('Remember Vue.'), false);
+
+    const retryWarnings = [];
+    const retrying = new AdapterClient({
+      daemonUrl: 'http://127.0.0.1:3849',
+      token,
+      outboxPath,
+      fetch: fake.fetch,
+      warn: (message) => retryWarnings.push(message),
+    });
+    assert.deepEqual(await retrying.onSessionEnd(), [{ status: 'queued' }]);
+    assert.deepEqual(retryWarnings, []);
+  });
+
+  test('replaces a matching targetless legacy capture with the safe incoming request during queue deduplication', async () => {
+    const outboxPath = temporaryOutbox();
+    const messageId = 'legacy-collision-message';
+    const legacySecret = 'legacy-structured-secret';
+    const legacy = {
+      state: 'retry',
+      retryCount: 7,
+      messageId: 'legacy-queue-metadata',
+      request: {
+        endpoint: '/v1/memories/capture',
+        rawContent: 'Remember Vue.',
+        eventType: 'user_message',
+        source: {
+          type: 'codex',
+          agent: 'codex',
+          conversationId: 'session-1',
+          messageId,
+          reference: JSON.stringify(['codex', 'desktop', 'default', 'session-1', messageId]),
+        },
+        scope: { level: 'project', projectId: 'memlume' },
+        structuredData: { envelope, data: { apiKey: legacySecret } },
+      },
+    };
+    writeFileSync(outboxPath, `${JSON.stringify(legacy)}\n`, 'utf8');
+    const unavailable = fakeFetch({ status: 503, body: { error: 'unavailable' } });
+    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: unavailable.fetch });
+
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId, content: 'Remember Vue.', brainId }), { status: 'queued' });
+    const entries = readFileSync(outboxPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].state, 'retry');
+    assert.equal(entries[0].retryCount, 8);
+    assert.equal(entries[0].messageId, 'legacy-queue-metadata');
+    assert.equal(entries[0].request.brainId, brainId);
+    assert.equal(entries[0].request.source.reference, legacy.request.source.reference);
+    assert.deepEqual(entries[0].request.structuredData, { envelope });
+    assert.equal(readFileSync(outboxPath, 'utf8').includes(legacySecret), false);
+
+    const recoveredFetch = fakeFetch({ status: 201, body: savedCapture() });
+    const recovered = new AdapterClient({
+      daemonUrl: 'http://127.0.0.1:3849',
+      token,
+      outboxPath,
+      fetch: recoveredFetch.fetch,
+    });
+    assert.deepEqual(await recovered.onSessionEnd(), [{ status: 'saved', memoryStatus: 'active' }]);
+    assert.equal(recoveredFetch.calls.length, 1);
+    assert.equal(readFileSync(outboxPath, 'utf8'), '');
+  });
+
+  test('upgrades and clears a matching targetless legacy capture after direct delivery succeeds', async () => {
+    const outboxPath = temporaryOutbox();
+    const messageId = 'legacy-direct-success';
+    const legacy = {
+      state: 'retry',
+      retryCount: 7,
+      messageId: 'legacy-direct-metadata',
+      request: {
+        endpoint: '/v1/memories/capture',
+        rawContent: 'Remember Vue.',
+        eventType: 'user_message',
+        source: {
+          type: 'codex',
+          agent: 'codex',
+          conversationId: 'session-1',
+          messageId,
+          reference: JSON.stringify(['codex', 'desktop', 'default', 'session-1', messageId]),
+        },
+        scope: { level: 'project', projectId: 'memlume' },
+        structuredData: { envelope },
+      },
+    };
+    writeFileSync(outboxPath, `${JSON.stringify(legacy)}\n`, 'utf8');
+    const paths = [];
+    let entryDuringDelivery;
+    const client = new AdapterClient({
+      daemonUrl: 'http://127.0.0.1:3849',
+      token,
+      outboxPath,
+      fetch: async (input) => {
+        paths.push(new URL(String(input)).pathname);
+        entryDuringDelivery = JSON.parse(readFileSync(outboxPath, 'utf8'));
+        return new Response(JSON.stringify(savedCapture()), { status: 201 });
+      },
+    });
+
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId, content: 'Remember Vue.', brainId }), { status: 'saved', memoryStatus: 'active' });
+    assert.deepEqual(paths, ['/v1/memories/capture']);
+    assert.equal(entryDuringDelivery.state, 'retry');
+    assert.equal(entryDuringDelivery.retryCount, 8);
+    assert.equal(entryDuringDelivery.messageId, 'legacy-direct-metadata');
+    assert.equal(entryDuringDelivery.request.brainId, brainId);
+    assert.equal(readFileSync(outboxPath, 'utf8'), '');
+
+    const nextPaths = [];
+    const nextClient = new AdapterClient({
+      daemonUrl: 'http://127.0.0.1:3849',
+      token,
+      outboxPath,
+      fetch: async (input) => {
+        nextPaths.push(new URL(String(input)).pathname);
+        return new Response(JSON.stringify(savedCapture()), { status: 201 });
+      },
+    });
+    assert.deepEqual(await nextClient.onSessionEnd(), []);
+    assert.deepEqual(nextPaths, []);
+  });
+
+  test('uses an explicit incoming Brain before flushing a matching legacy capture with a default Brain', async () => {
+    const defaultBrainId = '00000000-0000-7000-8000-000000000007';
+    const explicitBrainId = '00000000-0000-7000-8000-000000000008';
+    const outboxPath = temporaryOutbox();
+    const messageId = 'legacy-default-conflict';
+    const legacy = {
+      state: 'retry',
+      retryCount: 7,
+      messageId: 'legacy-default-metadata',
+      request: {
+        endpoint: '/v1/memories/capture',
+        rawContent: 'Remember Vue.',
+        eventType: 'user_message',
+        source: {
+          type: 'codex',
+          agent: 'codex',
+          conversationId: 'session-1',
+          messageId,
+          reference: JSON.stringify(['codex', 'desktop', 'default', 'session-1', messageId]),
+        },
+        scope: { level: 'project', projectId: 'memlume' },
+        structuredData: { envelope },
+      },
+    };
+    writeFileSync(outboxPath, `${JSON.stringify(legacy)}\n`, 'utf8');
+    const bodies = [];
+    const client = new AdapterClient({
+      daemonUrl: 'http://127.0.0.1:3849',
+      token,
+      defaultWriteBrainId: defaultBrainId,
+      outboxPath,
+      fetch: async (_input, init) => {
+        bodies.push(JSON.parse(String(init.body)));
+        return new Response(JSON.stringify(savedCapture()), { status: 201 });
+      },
+    });
+
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId, content: 'Remember Vue.', brainId: explicitBrainId }), { status: 'saved', memoryStatus: 'active' });
+    assert.equal(bodies.length, 1);
+    assert.equal(bodies[0].brainId, explicitBrainId);
+    assert.equal(bodies.some((body) => body.brainId === defaultBrainId), false);
+    assert.equal(readFileSync(outboxPath, 'utf8'), '');
+  });
+
+  test('fails closed when a matching legacy target cannot be persisted before default-brain flushing', async () => {
+    const defaultBrainId = '00000000-0000-7000-8000-000000000007';
+    const explicitBrainId = '00000000-0000-7000-8000-000000000008';
+    const outboxPath = temporaryOutbox();
+    const messageId = 'legacy-upgrade-unavailable';
+    const legacy = {
+      state: 'retry',
+      retryCount: 7,
+      messageId: 'legacy-unavailable-metadata',
+      request: {
+        endpoint: '/v1/memories/capture',
+        rawContent: 'Remember Vue.',
+        eventType: 'user_message',
+        source: {
+          type: 'codex',
+          agent: 'codex',
+          conversationId: 'session-1',
+          messageId,
+          reference: JSON.stringify(['codex', 'desktop', 'default', 'session-1', messageId]),
+        },
+        scope: { level: 'project', projectId: 'memlume' },
+        structuredData: { envelope },
+      },
+    };
+    const original = `${JSON.stringify(legacy)}\n`;
+    writeFileSync(outboxPath, original, 'utf8');
+    mkdirSync(`${outboxPath}.${process.pid}.tmp`, { recursive: true });
+    const bodies = [];
+    const client = new AdapterClient({
+      daemonUrl: 'http://127.0.0.1:3849',
+      token,
+      defaultWriteBrainId: defaultBrainId,
+      outboxPath,
+      fetch: async (_input, init) => {
+        bodies.push(JSON.parse(String(init.body)));
+        return new Response(JSON.stringify(savedCapture()), { status: 201 });
+      },
+      warn: () => undefined,
+    });
+
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId, content: 'Remember Vue.', brainId: explicitBrainId }), { status: 'rejected' });
+    assert.deepEqual(bodies, []);
+    assert.equal(readFileSync(outboxPath, 'utf8'), original);
+  });
+
+  test('fails closed when a matching legacy capture lock times out before the default Brain can flush it', async () => {
+    const defaultBrainId = '00000000-0000-7000-8000-000000000007';
+    const explicitBrainId = '00000000-0000-7000-8000-000000000008';
+    const outboxPath = temporaryOutbox();
+    const messageId = 'legacy-lock-timeout';
+    const legacy = {
+      state: 'retry',
+      retryCount: 7,
+      messageId: 'legacy-lock-timeout-metadata',
+      request: {
+        endpoint: '/v1/memories/capture',
+        rawContent: 'Remember Vue.',
+        eventType: 'user_message',
+        source: {
+          type: 'codex',
+          agent: 'codex',
+          conversationId: 'session-1',
+          messageId,
+          reference: JSON.stringify(['codex', 'desktop', 'default', 'session-1', messageId]),
+        },
+        scope: { level: 'project', projectId: 'memlume' },
+        structuredData: { envelope },
+      },
+    };
+    const original = `${JSON.stringify(legacy)}\n`;
+    writeFileSync(outboxPath, original, 'utf8');
+    const lockPath = `${outboxPath}.lock`;
+    mkdirSync(lockPath);
+    const releaseLock = setTimeout(() => rmSync(lockPath, { force: true, recursive: true }), 15_100);
+    const fake = fakeFetch(
+      { status: 201, body: savedCapture() },
+      { status: 201, body: savedCapture() },
+    );
+    const client = new AdapterClient({
+      daemonUrl: 'http://127.0.0.1:3849',
+      token,
+      defaultWriteBrainId: defaultBrainId,
+      outboxPath,
+      fetch: fake.fetch,
+      warn: () => undefined,
+    });
+
+    let result;
+    try {
+      result = await client.onUserMessage(envelope, { messageId, content: 'Remember Vue.', brainId: explicitBrainId });
+    } finally {
+      clearTimeout(releaseLock);
+      rmSync(lockPath, { force: true, recursive: true });
+    }
+    assert.deepEqual(fake.calls.map(({ init }) => JSON.parse(init.body).brainId), []);
+    assert.deepEqual(result, { status: 'rejected' });
+    assert.equal(readFileSync(outboxPath, 'utf8'), original);
+  });
+
+  test('fails closed when an existing outbox cannot be read before capture delivery', async () => {
+    const outboxPath = temporaryOutbox();
+    mkdirSync(outboxPath);
+    const fake = fakeFetch({ status: 201, body: savedCapture() });
+    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: fake.fetch, warn: () => undefined });
+
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'unreadable-outbox', content: 'Remember Vue.', brainId }), { status: 'rejected' });
+    assert.equal(fake.calls.length, 0);
+  });
+
+  test('discards a matching legacy capture when its explicit direct delivery is rejected', async () => {
+    const explicitBrainId = '00000000-0000-7000-8000-000000000008';
+    const outboxPath = temporaryOutbox();
+    const messageId = 'legacy-direct-forbidden';
+    const legacy = {
+      state: 'retry',
+      retryCount: 7,
+      messageId: 'legacy-forbidden-metadata',
+      request: {
+        endpoint: '/v1/memories/capture',
+        rawContent: 'Remember Vue.',
+        eventType: 'user_message',
+        source: {
+          type: 'codex',
+          agent: 'codex',
+          conversationId: 'session-1',
+          messageId,
+          reference: JSON.stringify(['codex', 'desktop', 'default', 'session-1', messageId]),
+        },
+        scope: { level: 'project', projectId: 'memlume' },
+        structuredData: { envelope },
+      },
+    };
+    writeFileSync(outboxPath, `${JSON.stringify(legacy)}\n`, 'utf8');
+    const fake = fakeFetch({ status: 403, body: { error: 'mount_denied' } });
+    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: fake.fetch });
+
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId, content: 'Remember Vue.', brainId: explicitBrainId }), { status: 'rejected' });
+    assert.equal(JSON.parse(fake.calls[0].init.body).brainId, explicitBrainId);
+    assert.deepEqual(await client.outboxStatus(), { state: 'discarded', pending: 0, retry: 0, discarded: 1 });
+  });
+
   test('reports rejected and ignored capture outcomes without claiming a saved memory', async () => {
     const fake = fakeFetch(
       { status: 200, body: savedCapture('rejected') },
@@ -164,8 +686,8 @@ describe('AdapterClient', () => {
     );
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxDirectory: temporaryOutboxDirectory(), fetch: fake.fetch });
 
-    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'rejected-memory', content: 'Remember rejected.' }), { status: 'rejected' });
-    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'ignored-memory', content: 'Remember ignored.' }), { status: 'ignored', memoryStatus: 'ignore' });
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'rejected-memory', content: 'Remember rejected.', brainId }), { status: 'rejected' });
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'ignored-memory', content: 'Remember ignored.', brainId }), { status: 'ignored', memoryStatus: 'ignore' });
   });
 
   test('captures a user message through the governed memory endpoint and reports the memory outcome', async () => {
@@ -176,7 +698,7 @@ describe('AdapterClient', () => {
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxDirectory: temporaryOutboxDirectory(), fetch: fake.fetch });
 
     assert.deepEqual(
-      await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember this project uses pnpm.' }),
+      await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember this project uses pnpm.', brainId }),
       { status: 'saved', memoryStatus: 'active' },
     );
     assert.equal(fake.calls[0].url.endsWith('/v1/memories/capture'), true);
@@ -192,7 +714,7 @@ describe('AdapterClient', () => {
       fetch: fakeFetch({ status: 503, body: { error: 'unavailable' } }).fetch,
     });
 
-    await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.' });
+    await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.', brainId });
     assert.deepEqual(await client.outboxStatus(), { state: 'pending', pending: 1, retry: 0, discarded: 0 });
 
     const retrying = new AdapterClient({
@@ -230,7 +752,7 @@ describe('AdapterClient', () => {
       },
     });
 
-    const writing = client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.' });
+    const writing = client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.', brainId });
     await started.promise;
     const status = client.outboxStatus();
     release.resolve();
@@ -249,7 +771,7 @@ describe('AdapterClient', () => {
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', outboxDirectory: temporaryOutboxDirectory(), fetch: fake.fetch });
 
     assert.deepEqual(await client.beforeTask(beforeTask), context());
-    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.' }), { status: 'saved', memoryStatus: 'active' });
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.', brainId }), { status: 'saved', memoryStatus: 'active' });
     assert.deepEqual(await client.afterTask(envelope, { messageId: 'message-2', content: 'Implemented SDK.' }), { status: 'saved' });
     assert.deepEqual(await client.onSessionEnd(), []);
 
@@ -268,7 +790,8 @@ describe('AdapterClient', () => {
         messageId: 'message-1',
         reference: JSON.stringify(['codex', 'desktop', 'default', 'session-1', 'message-1']),
       },
-      scope: { level: 'project', projectId: 'memlume' },
+       brainId,
+       scope: { level: 'project', projectId: 'memlume' },
       structuredData: { envelope },
     });
     assert.equal(JSON.parse(fake.calls[2].init.body).eventType, 'task_completed');
@@ -311,9 +834,9 @@ describe('AdapterClient', () => {
     };
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxDirectory: temporaryOutboxDirectory(), fetch: fake.fetch });
 
-    await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Same content.' });
-    await client.onUserMessage(envelope, { messageId: 'message-2', content: 'Same content.' });
-    await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Same content.' });
+    await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Same content.', brainId });
+    await client.onUserMessage(envelope, { messageId: 'message-2', content: 'Same content.', brainId });
+    await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Same content.', brainId });
 
     assert.deepEqual([...references], [
       JSON.stringify(['codex', 'desktop', 'default', 'session-1', 'message-1']),
@@ -330,7 +853,7 @@ describe('AdapterClient', () => {
 
     for (const [index, response] of [malformed, missingBody, invalidBrain].entries()) {
       const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: fakeFetch(response).fetch });
-      assert.deepEqual(await client.onUserMessage(envelope, { messageId: `invalid-${index}`, content: 'Remember only confirmed memories are saved.' }), { status: 'queued' });
+      assert.deepEqual(await client.onUserMessage(envelope, { messageId: `invalid-${index}`, content: 'Remember only confirmed memories are saved.', brainId }), { status: 'queued' });
     }
 
     assert.equal(readFileSync(outboxPath, 'utf8').trim().split('\n').length, 3);
@@ -343,7 +866,7 @@ describe('AdapterClient', () => {
     const failing = fakeFetch({ status: 503, body: { error: 'unavailable' } });
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token: defaultToken, outboxDirectory, fetch: failing.fetch });
 
-    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.' }), { status: 'queued' });
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.', brainId }), { status: 'queued' });
     const stored = readFileSync(outboxPath, 'utf8');
     assert.equal(stored.includes(defaultToken), false);
     assert.equal(outboxPath.includes(defaultToken), false);
@@ -358,9 +881,9 @@ describe('AdapterClient', () => {
     );
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: unavailable.fetch });
 
-    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'ordinary', content: 'Vue is used for the frontend.' }), { status: 'rejected' });
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'ordinary', content: 'Vue is used for the frontend.', brainId }), { status: 'rejected' });
     assert.equal(existsSync(outboxPath), false);
-    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'explicit', content: 'Remember Vue is used for the frontend.' }), { status: 'queued' });
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'explicit', content: 'Remember Vue is used for the frontend.', brainId }), { status: 'queued' });
     assert.deepEqual(await client.afterTask(envelope, { messageId: 'task', content: 'Implemented the frontend.' }), { status: 'rejected' });
 
     const entries = readFileSync(outboxPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
@@ -440,8 +963,8 @@ describe('AdapterClient', () => {
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: failing.fetch });
     const nextSession = { ...envelope, sessionId: 'session-2' };
 
-    await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.' });
-    await client.onUserMessage(nextSession, { messageId: 'message-1', content: 'Remember Vue.' });
+    await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.', brainId });
+    await client.onUserMessage(nextSession, { messageId: 'message-1', content: 'Remember Vue.', brainId });
 
     const pending = readFileSync(outboxPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
     assert.equal(pending.length, 2);
@@ -459,7 +982,7 @@ describe('AdapterClient', () => {
     const unavailable = fakeFetch({ status: 503, body: { error: 'unavailable' } });
     const oldClient = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token: oldToken, outboxDirectory, fetch: unavailable.fetch });
 
-    assert.deepEqual(await oldClient.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.' }), { status: 'queued' });
+    assert.deepEqual(await oldClient.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.', brainId }), { status: 'queued' });
 
     const recovered = fakeFetch(
       { status: 201, body: savedCapture() },
@@ -488,7 +1011,7 @@ describe('AdapterClient', () => {
       outboxDirectory,
       fetch: fakeFetch({ status: 503, body: { error: 'unavailable' } }).fetch,
     });
-    await offline.onUserMessage(envelope, { messageId: 'ending-pending', content: 'Remember this project uses pnpm.' });
+    await offline.onUserMessage(envelope, { messageId: 'ending-pending', content: 'Remember this project uses pnpm.', brainId });
 
     const recovered = new AdapterClient({
       daemonUrl: 'http://127.0.0.1:3849',
@@ -507,7 +1030,7 @@ describe('AdapterClient', () => {
       outboxPath,
       fetch: fakeFetch({ status: 503, body: { error: 'unavailable' } }).fetch,
     });
-    await offline.onUserMessage(envelope, { messageId: 'old-turn', content: 'Remember Vue.' });
+    await offline.onUserMessage(envelope, { messageId: 'old-turn', content: 'Remember Vue.', brainId });
 
     const recovered = fakeFetch(
       { status: 201, body: savedCapture() },
@@ -515,7 +1038,7 @@ describe('AdapterClient', () => {
     );
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: recovered.fetch });
 
-    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'new-turn', content: 'Remember TypeScript.' }), { status: 'saved', memoryStatus: 'active' });
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'new-turn', content: 'Remember TypeScript.', brainId }), { status: 'saved', memoryStatus: 'active' });
     assert.equal(JSON.parse(recovered.calls[0].init.body).source.messageId, 'old-turn');
     assert.equal(readFileSync(outboxPath, 'utf8'), '');
   });
@@ -525,8 +1048,8 @@ describe('AdapterClient', () => {
     const failing = fakeFetch({ status: 503, body: { error: 'unavailable' } }, { status: 503, body: { error: 'unavailable' } });
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: failing.fetch });
 
-    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.' }), { status: 'queued' });
-    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.' }), { status: 'queued' });
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.', brainId }), { status: 'queued' });
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.', brainId }), { status: 'queued' });
     const lines = readFileSync(outboxPath, 'utf8').trim().split('\n');
     assert.equal(lines.length, 1);
     assert.equal(readFileSync(outboxPath, 'utf8').includes(token), false);
@@ -545,7 +1068,7 @@ describe('AdapterClient', () => {
       outboxPath,
       fetch: fakeFetch({ status: 503, body: { error: 'unavailable' } }).fetch,
     });
-    await offline.onUserMessage(envelope, { messageId: 'complete-line', content: 'Remember Vue.' });
+    await offline.onUserMessage(envelope, { messageId: 'complete-line', content: 'Remember Vue.', brainId });
     writeFileSync(outboxPath, `${readFileSync(outboxPath, 'utf8')}{"state":"pend`, 'utf8');
 
     const recovered = new AdapterClient({
@@ -565,7 +1088,7 @@ describe('AdapterClient', () => {
     const unavailable = fakeFetch({ status: 503, body: { error: 'unavailable' } });
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: unavailable.fetch });
 
-    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'recovered-line', content: 'Remember Vue.' }), { status: 'queued' });
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'recovered-line', content: 'Remember Vue.', brainId }), { status: 'queued' });
     const entries = readFileSync(outboxPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
     assert.equal(entries.length, 1);
     assert.equal(entries[0].messageId, 'recovered-line');
@@ -584,7 +1107,7 @@ describe('AdapterClient', () => {
     const outboxPath = temporaryOutbox();
     const unavailable = fakeFetch({ status: 503, body: { error: 'unavailable' } });
     const seedClient = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: unavailable.fetch });
-    await seedClient.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.' });
+    await seedClient.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.', brainId });
     const original = readFileSync(outboxPath, 'utf8');
     mkdirSync(`${outboxPath}.${process.pid}.tmp`, { recursive: true });
 
@@ -619,7 +1142,7 @@ describe('AdapterClient', () => {
       warn: (message) => warnings.push(message),
     });
 
-    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.' }), { status: 'rejected' });
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.', brainId }), { status: 'rejected' });
     assert.deepEqual(warnings, ['Memlume outbox unavailable; event was not persisted.']);
     assert.equal(warnings.join(' ').includes(token), false);
   });
@@ -628,7 +1151,7 @@ describe('AdapterClient', () => {
     const outboxPath = temporaryOutbox();
     const queued = fakeFetch({ status: 503, body: { error: 'unavailable' } });
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: queued.fetch });
-    await client.onUserMessage(envelope, { messageId: 'message-2', content: 'Remember the SDK implementation.' });
+    await client.onUserMessage(envelope, { messageId: 'message-2', content: 'Remember the SDK implementation.', brainId });
 
     const rejected = fakeFetch({ status: 401, body: { error: 'unauthorized' } });
     const retryingClient = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: rejected.fetch });
@@ -643,7 +1166,7 @@ describe('AdapterClient', () => {
     const outboxPath = temporaryOutbox();
     const offline = fakeFetch({ status: 503, body: { error: 'unavailable' } });
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: offline.fetch });
-    await client.onUserMessage(envelope, { messageId: 'rate-limited', content: 'Remember Vue.' });
+    await client.onUserMessage(envelope, { messageId: 'rate-limited', content: 'Remember Vue.', brainId });
 
     const rateLimited = new AdapterClient({
       daemonUrl: 'http://127.0.0.1:3849',
@@ -663,8 +1186,8 @@ describe('AdapterClient', () => {
       { status: 503, body: { error: 'unavailable' } },
     );
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: queued.fetch });
-    await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember the first setting.' });
-    await client.onUserMessage(envelope, { messageId: 'message-2', content: 'Remember the second setting.' });
+    await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember the first setting.', brainId });
+    await client.onUserMessage(envelope, { messageId: 'message-2', content: 'Remember the second setting.', brainId });
 
     const rejecting = fakeFetch(
       { status: 400, body: { error: 'invalid_request' } },
@@ -679,7 +1202,7 @@ describe('AdapterClient', () => {
     const outboxPath = temporaryOutbox();
     const seeding = fakeFetch({ status: 503, body: { error: 'unavailable' } });
     const seedClient = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: seeding.fetch });
-    await seedClient.onUserMessage(envelope, { messageId: 'message-old', content: 'Remember the old pending event.' });
+    await seedClient.onUserMessage(envelope, { messageId: 'message-old', content: 'Remember the old pending event.', brainId });
 
     const oldRequestStarted = deferred();
     const releaseOldRequest = deferred();
@@ -698,7 +1221,7 @@ describe('AdapterClient', () => {
 
     const ending = client.onSessionEnd();
     await oldRequestStarted.promise;
-    const writing = client.onUserMessage(envelope, { messageId: 'message-new', content: 'Remember the new pending event.' });
+    const writing = client.onUserMessage(envelope, { messageId: 'message-new', content: 'Remember the new pending event.', brainId });
     releaseOldRequest.resolve();
     assert.deepEqual(await ending, [{ status: 'saved', memoryStatus: 'active' }]);
     assert.deepEqual(await writing, { status: 'queued' });
@@ -715,7 +1238,7 @@ describe('AdapterClient', () => {
       outboxPath,
       fetch: fakeFetch({ status: 503, body: { error: 'unavailable' } }).fetch,
     });
-    await seeding.onUserMessage(envelope, { messageId: 'old-turn', content: 'Remember Vue.' });
+    await seeding.onUserMessage(envelope, { messageId: 'old-turn', content: 'Remember Vue.', brainId });
 
     const oldRequestStarted = deferred();
     const releaseOldRequest = deferred();
@@ -738,7 +1261,7 @@ describe('AdapterClient', () => {
       outboxPath,
       fetch: fakeFetch({ status: 503, body: { error: 'unavailable' } }, { status: 503, body: { error: 'unavailable' } }).fetch,
     });
-    const writing = concurrent.onUserMessage(envelope, { messageId: 'new-turn', content: 'Remember TypeScript.' });
+    const writing = concurrent.onUserMessage(envelope, { messageId: 'new-turn', content: 'Remember TypeScript.', brainId });
     let completed = false;
     void writing.then(() => { completed = true; });
     await new Promise((resolve) => setTimeout(resolve, 20));

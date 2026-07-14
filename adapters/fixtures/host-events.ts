@@ -3,10 +3,11 @@ import {
   type AdapterClient,
   type AdapterMessage,
   type BeforeTaskInput,
+  type SubagentStartInput,
   type WriteResult,
 } from '../../packages/adapter-sdk/src/index.js';
 
-type AdapterOperations = Pick<AdapterClient, 'beforeTask' | 'onUserMessage' | 'afterTask' | 'onSessionEnd'>;
+type AdapterOperations = Pick<AdapterClient, 'beforeTask' | 'onUserMessage' | 'onSubagentStart'>;
 
 export type AdapterInitialization = {
   readonly envelope: AdapterEnvelope;
@@ -16,8 +17,7 @@ export type AdapterHostCallbacks = {
   readonly initialize: (event: AdapterInitialization) => void;
   readonly beforeTask: (event: Omit<BeforeTaskInput, 'envelope'>) => ReturnType<AdapterOperations['beforeTask']>;
   readonly onUserMessage: (event: AdapterMessage) => Promise<WriteResult>;
-  readonly afterTask: (event: AdapterMessage) => Promise<WriteResult>;
-  readonly onSessionEnd: () => ReturnType<AdapterOperations['onSessionEnd']>;
+  readonly onSubagentStart: (event: Omit<SubagentStartInput, 'envelope'>) => ReturnType<AdapterOperations['onSubagentStart']>;
 };
 
 /**
@@ -42,11 +42,7 @@ export function createAdapterHostCallbacks(client: AdapterOperations): AdapterHo
     },
     beforeTask: (event) => client.beforeTask({ ...event, envelope: initializedEnvelope() }),
     onUserMessage: (event) => client.onUserMessage(initializedEnvelope(), event),
-    afterTask: (event) => client.afterTask(initializedEnvelope(), event),
-    onSessionEnd: () => {
-      initializedEnvelope();
-      return client.onSessionEnd();
-    },
+    onSubagentStart: (event) => client.onSubagentStart({ ...event, envelope: initializedEnvelope() }),
   };
 }
 

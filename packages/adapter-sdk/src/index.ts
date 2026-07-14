@@ -23,7 +23,9 @@ const CONTEXT_REQUEST_TIMEOUT_MS = 250;
 const OUTBOX_FLUSH_GRACE_MS = 50;
 const OUTBOX_LOCK_RETRY_MS = 10;
 const OUTBOX_LOCK_TIMEOUT_MS = 15_000;
+const OUTBOX_UNAVAILABLE_WARNING = 'Memlume outbox unavailable; event was not persisted.';
 const SECRET_OUTBOX_WARNING = 'Memlume outbox skipped a message containing a secret.';
+const LEGACY_CAPTURE_TARGET_WARNING = 'Memlume outbox needs a target Brain before it can retry a legacy memory capture.';
 const explicitMemoryRequestPattern = /^\s*(?:(?:請|請你)\s*)?(?:記住|記下|記錄|remember|memorize|save(?:\s+this)?)\s*[,，:：]?\s*/iu;
 
 export interface LocalAdapterProfile {
@@ -85,6 +87,7 @@ export function loadLocalAdapterProfile(clientType: string, { configPath, enviro
 export interface AdapterClientOptions {
   readonly daemonUrl: string;
   readonly token?: string;
+  readonly defaultWriteBrainId?: string;
   readonly outboxPath?: string;
   readonly outboxDirectory?: string;
   /** Bounded write deadline for short-lived host hooks. Defaults to the normal daemon deadline. */
@@ -101,6 +104,12 @@ export interface BeforeTaskInput {
   readonly contextBudget: number;
   readonly entities?: readonly string[];
   readonly availableTools?: readonly string[];
+  readonly requestedBrainIds?: readonly string[];
+}
+
+export interface SubagentStartInput extends BeforeTaskInput {
+  readonly parentTaskId: string;
+  readonly subagentId?: string;
 }
 
 export interface AdapterMessage {
@@ -150,6 +159,8 @@ interface CaptureMemoryRequest extends BaseWriteRequest {
 }
 
 type WriteRequest = AppendEventRequest | CaptureMemoryRequest;
+type DeliveredCaptureMemoryRequest = CaptureMemoryRequest & { readonly brainId: string };
+type DeliveredWriteRequest = AppendEventRequest | DeliveredCaptureMemoryRequest;
 
 interface PendingWrite {
   readonly state: 'pending' | 'retry';
@@ -166,6 +177,7 @@ interface DiscardedWrite {
 }
 
 type OutboxEntry = PendingWrite | DiscardedWrite;
+type LegacyCaptureUpgrade = 'none' | 'upgraded' | 'unavailable';
 
 export class AdapterClient {
   private readonly daemonUrl: string;
@@ -175,12 +187,15 @@ export class AdapterClient {
   private readonly outboxDirectory: string;
   private readonly writeTimeoutMs: number;
   private readonly warn: (message: string) => void;
+  private readonly defaultWriteBrainId: string | undefined;
   private warnedAboutContext = false;
+  private warnedAboutLegacyCaptureTarget = false;
   private writeChain: Promise<void> = Promise.resolve();
 
-  constructor({ daemonUrl, token, outboxPath, outboxDirectory = join(homedir(), '.memlume'), writeTimeoutMs = REQUEST_TIMEOUT_MS, fetch = globalThis.fetch, warn = console.warn }: AdapterClientOptions) {
+  constructor({ daemonUrl, token, defaultWriteBrainId, outboxPath, outboxDirectory = join(homedir(), '.memlume'), writeTimeoutMs = REQUEST_TIMEOUT_MS, fetch = globalThis.fetch, warn = console.warn }: AdapterClientOptions) {
     this.daemonUrl = daemonOrigin(daemonUrl);
     this.token = token ?? process.env.MEMLUME_TOKEN;
+    this.defaultWriteBrainId = nonEmptyText(defaultWriteBrainId);
     this.fetch = fetch;
     this.outboxPath = outboxPath;
     this.outboxDirectory = outboxDirectory;
@@ -190,37 +205,44 @@ export class AdapterClient {
 
   async beforeTask(input: BeforeTaskInput): Promise<ContextPack> {
     if (redactSensitiveJson(input.scope).detected) {
-      if (!this.warnedAboutContext) {
-        this.warnedAboutContext = true;
-        this.warn('Memlume context unavailable; continuing without shared context.');
-      }
-      return emptyContext(input);
+      return this.unavailableContext(input);
     }
-    const { envelope, ...requestInput } = input;
-    this.bindOutbox(envelope);
+    this.bindOutbox(input.envelope);
     await withTimeout(this.flush(), OUTBOX_FLUSH_GRACE_MS).catch(() => undefined);
-    try {
-      const response = await this.request('/v1/context/resolve', 'POST', requestInput, CONTEXT_REQUEST_TIMEOUT_MS);
-      if (!response.ok) {
-        throw new Error('Context request failed.');
-      }
-      const result = await response.json();
-      return ContextPackSchema.parse(isRecord(result) ? result.context : undefined);
-    } catch {
-      if (!this.warnedAboutContext) {
-        this.warnedAboutContext = true;
-        this.warn('Memlume context unavailable; continuing without shared context.');
-      }
-      return emptyContext(input);
-    }
+    return this.resolveContext(input);
   }
 
   async onUserMessage(envelope: AdapterEnvelope, message: AdapterMessage): Promise<WriteResult> {
+    const request = captureRequest(envelope, message, this.defaultWriteBrainId);
+    if (request === undefined) {
+      return { status: 'rejected' };
+    }
     this.bindOutbox(envelope);
     return this.serialize(async () => {
-      await this.flush();
-      return this.write(captureRequest(envelope, message));
+      const legacyCaptureUpgrade = await this.upgradeMatchingLegacyCapture(request);
+      if (legacyCaptureUpgrade === 'unavailable') {
+        this.warn(OUTBOX_UNAVAILABLE_WARNING);
+        return { status: 'rejected' };
+      }
+      await this.flush(legacyCaptureUpgrade === 'upgraded' ? request : undefined);
+      const result = await this.write(request);
+      if (legacyCaptureUpgrade === 'upgraded') {
+        if (result.status === 'saved' || result.status === 'ignored') {
+          await this.removeMatchingPendingCapture(request);
+        } else if (result.status === 'rejected') {
+          await this.discardMatchingPendingCapture(request);
+        }
+      }
+      return result;
     });
+  }
+
+  async onSubagentStart(input: SubagentStartInput): Promise<ContextPack> {
+    const { parentTaskId: _parentTaskId, subagentId: _subagentId, ...beforeTaskInput } = input;
+    if (redactSensitiveJson(beforeTaskInput.scope).detected) {
+      return this.unavailableContext(beforeTaskInput);
+    }
+    return this.resolveContext(beforeTaskInput);
   }
 
   async afterTask(envelope: AdapterEnvelope, message: AdapterMessage): Promise<WriteResult> {
@@ -238,6 +260,28 @@ export class AdapterClient {
 
   outboxStatus(): Promise<OutboxStatus> {
     return this.serialize(() => this.readOutboxStatus());
+  }
+
+  private async resolveContext(input: BeforeTaskInput): Promise<ContextPack> {
+    const { envelope: _envelope, ...requestInput } = input;
+    try {
+      const response = await this.request('/v1/context/resolve', 'POST', requestInput, CONTEXT_REQUEST_TIMEOUT_MS);
+      if (!response.ok) {
+        throw new Error('Context request failed.');
+      }
+      const result = await response.json();
+      return ContextPackSchema.parse(isRecord(result) ? result.context : undefined);
+    } catch {
+      return this.unavailableContext(input);
+    }
+  }
+
+  private unavailableContext(input: BeforeTaskInput): ContextPack {
+    if (!this.warnedAboutContext) {
+      this.warnedAboutContext = true;
+      this.warn('Memlume context unavailable; continuing without shared context.');
+    }
+    return emptyContext(input);
   }
 
   private async readOutboxStatus(): Promise<OutboxStatus> {
@@ -260,19 +304,19 @@ export class AdapterClient {
     }
   }
 
-  private async flush(): Promise<readonly WriteResult[]> {
+  private async flush(skipRequest?: DeliveredCaptureMemoryRequest): Promise<readonly WriteResult[]> {
     const outboxPath = this.outboxPath;
     if (outboxPath === undefined) {
       return [];
     }
     try {
-      return await withOutboxLock(outboxPath, () => this.flushLocked(outboxPath));
+      return await withOutboxLock(outboxPath, () => this.flushLocked(outboxPath, skipRequest));
     } catch {
       return [];
     }
   }
 
-  private async flushLocked(outboxPath: string): Promise<readonly WriteResult[]> {
+  private async flushLocked(outboxPath: string, skipRequest?: DeliveredCaptureMemoryRequest): Promise<readonly WriteResult[]> {
     let entries: OutboxEntry[];
     try {
       entries = await readOutbox(outboxPath);
@@ -283,15 +327,25 @@ export class AdapterClient {
     const results: WriteResult[] = [];
     const remaining: OutboxEntry[] = entries.filter(isDiscardedWrite);
     for (const entry of entries.filter(isPendingWrite)) {
+      if (skipRequest !== undefined && isMatchingPendingCapture(entry, skipRequest)) {
+        remaining.push(entry);
+        continue;
+      }
       if (containsSecret(entry.request)) {
         this.warn(SECRET_OUTBOX_WARNING);
         results.push({ status: 'rejected' });
         continue;
       }
-      const result = await this.deliver(entry.request);
+      const request = this.deliveryRequest(entry.request, entry.retryCount);
+      if (request === undefined) {
+        results.push({ status: 'queued' });
+        remaining.push({ ...entry, state: 'retry', retryCount: entry.retryCount + 1 });
+        continue;
+      }
+      const result = await this.deliver(request);
       results.push(result);
       if (result.status === 'queued') {
-        remaining.push({ ...entry, state: 'retry', retryCount: entry.retryCount + 1 });
+        remaining.push({ ...entry, state: 'retry', retryCount: entry.retryCount + 1, request });
       } else if (result.status === 'rejected') {
         remaining.push({
           state: 'discarded',
@@ -320,7 +374,7 @@ export class AdapterClient {
     return next;
   }
 
-  private async write(request: WriteRequest | undefined): Promise<WriteResult> {
+  private async write(request: DeliveredWriteRequest | undefined): Promise<WriteResult> {
     if (request === undefined) {
       return { status: 'rejected' };
     }
@@ -329,7 +383,7 @@ export class AdapterClient {
     return result.status === 'queued' ? this.queue(request) : result;
   }
 
-  private async deliver(request: WriteRequest): Promise<WriteResult> {
+  private async deliver(request: DeliveredWriteRequest): Promise<WriteResult> {
     if (!hasToken(this.token)) {
       return { status: 'rejected' };
     }
@@ -360,7 +414,7 @@ export class AdapterClient {
     }
   }
 
-  private async queue(request: WriteRequest): Promise<WriteResult> {
+  private async queue(request: DeliveredWriteRequest): Promise<WriteResult> {
     if (containsSecret(request)) {
       this.warn(SECRET_OUTBOX_WARNING);
       return { status: 'rejected' };
@@ -370,20 +424,23 @@ export class AdapterClient {
     }
     const outboxPath = this.outboxPath;
     if (outboxPath === undefined) {
-      this.warn('Memlume outbox unavailable; event was not persisted.');
+      this.warn(OUTBOX_UNAVAILABLE_WARNING);
       return { status: 'rejected' };
     }
     try {
       return await withOutboxLock(outboxPath, async () => {
         const pending = await readOutbox(outboxPath);
-        if (!pending.filter(isPendingWrite).some((entry) => sameRequest(entry.request, request))) {
+        const existing = pending.find((entry): entry is PendingWrite => isPendingWrite(entry) && sameRequest(entry.request, request));
+        if (existing === undefined) {
           pending.push({ state: 'pending', retryCount: 0, messageId: request.source.messageId, request });
+        } else if (existing.request.endpoint === '/v1/memories/capture' && nonEmptyText(existing.request.brainId) === undefined) {
+          pending[pending.indexOf(existing)] = { ...existing, request: { ...existing.request, brainId: request.brainId } };
         }
         await writeOutbox(outboxPath, pending);
         return { status: 'queued' };
       });
     } catch {
-      this.warn('Memlume outbox unavailable; event was not persisted.');
+      this.warn(OUTBOX_UNAVAILABLE_WARNING);
       return { status: 'rejected' };
     }
   }
@@ -408,6 +465,105 @@ export class AdapterClient {
     const parsed = AdapterEnvelopeSchema.safeParse(envelope);
     if (parsed.success) {
       this.outboxPath = defaultOutboxPath(parsed.data, this.outboxDirectory);
+    }
+  }
+
+  private deliveryRequest(request: WriteRequest, retryCount: number): DeliveredWriteRequest | undefined {
+    if (request.endpoint === '/v1/events') {
+      return request;
+    }
+    const brainId = nonEmptyText(request.brainId) ?? this.defaultWriteBrainId;
+    if (brainId === undefined) {
+      if (retryCount === 0 && !this.warnedAboutLegacyCaptureTarget) {
+        this.warnedAboutLegacyCaptureTarget = true;
+        this.warn(LEGACY_CAPTURE_TARGET_WARNING);
+      }
+      return undefined;
+    }
+    return { ...request, brainId };
+  }
+
+  private async upgradeMatchingLegacyCapture(request: DeliveredCaptureMemoryRequest): Promise<LegacyCaptureUpgrade> {
+    const outboxPath = this.outboxPath;
+    if (outboxPath === undefined) {
+      return 'none';
+    }
+    try {
+      return await withOutboxLock(outboxPath, async () => {
+        let entries: OutboxEntry[];
+        try {
+          entries = await readOutbox(outboxPath);
+        } catch {
+          return 'unavailable';
+        }
+        let upgraded = false;
+        const next = entries.map((entry) => {
+          if (!isMatchingTargetlessLegacyCapture(entry, request)) {
+            return entry;
+          }
+          upgraded = true;
+          return { ...entry, state: 'retry' as const, retryCount: entry.retryCount + 1, request };
+        });
+        if (!upgraded) {
+          return 'none';
+        }
+        try {
+          await writeOutbox(outboxPath, next);
+        } catch {
+          return 'unavailable';
+        }
+        return 'upgraded';
+      });
+    } catch {
+      return 'unavailable';
+    }
+  }
+
+  private async removeMatchingPendingCapture(request: DeliveredCaptureMemoryRequest): Promise<void> {
+    const outboxPath = this.outboxPath;
+    if (outboxPath === undefined) {
+      return;
+    }
+    try {
+      await withOutboxLock(outboxPath, async () => {
+        const entries = await readOutbox(outboxPath);
+        const remaining = entries.filter((entry) => !isMatchingPendingCapture(entry, request));
+        if (remaining.length !== entries.length) {
+          await writeOutbox(outboxPath, remaining);
+        }
+      });
+    } catch {
+      this.warn('Memlume outbox update unavailable; queued events will retry later.');
+    }
+  }
+
+  private async discardMatchingPendingCapture(request: DeliveredCaptureMemoryRequest): Promise<void> {
+    const outboxPath = this.outboxPath;
+    if (outboxPath === undefined) {
+      return;
+    }
+    try {
+      await withOutboxLock(outboxPath, async () => {
+        const entries = await readOutbox(outboxPath);
+        let discarded = false;
+        const next = entries.map((entry) => {
+          if (!isMatchingPendingCapture(entry, request)) {
+            return entry;
+          }
+          discarded = true;
+          return {
+            state: 'discarded' as const,
+            messageId: entry.messageId,
+            endpoint: entry.request.endpoint,
+            discardedAt: new Date().toISOString(),
+          };
+        });
+        if (discarded) {
+          await writeOutbox(outboxPath, next);
+        }
+      });
+    } catch {
+      this.warn('Memlume outbox update unavailable; queued events will retry later.');
     }
   }
 }
@@ -463,10 +619,11 @@ function eventRequest(
   };
 }
 
-function captureRequest(envelope: AdapterEnvelope, message: AdapterMessage): CaptureMemoryRequest | undefined {
+function captureRequest(envelope: AdapterEnvelope, message: AdapterMessage, defaultWriteBrainId: string | undefined): DeliveredCaptureMemoryRequest | undefined {
   const request = eventRequest(envelope, message, 'user_message');
   const parsedEnvelope = AdapterEnvelopeSchema.safeParse(envelope);
-  if (request === undefined || !parsedEnvelope.success) {
+  const brainId = nonEmptyText(message.brainId) ?? defaultWriteBrainId;
+  if (request === undefined || !parsedEnvelope.success || brainId === undefined) {
     return undefined;
   }
   const scope = MemoryScopeSchema.safeParse(message.scope ?? { level: 'project', projectId: parsedEnvelope.data.projectId });
@@ -476,7 +633,7 @@ function captureRequest(envelope: AdapterEnvelope, message: AdapterMessage): Cap
   if (redactSensitiveJson(scope.data).detected) {
     return undefined;
   }
-  return { ...request, endpoint: '/v1/memories/capture', scope: scope.data };
+  return { ...request, endpoint: '/v1/memories/capture', brainId, scope: scope.data };
 }
 
 async function readOutbox(path: string): Promise<OutboxEntry[]> {
@@ -548,8 +705,22 @@ function containsSecret(request: WriteRequest): boolean {
     (request.endpoint === '/v1/memories/capture' && redactSensitiveJson(request.scope).detected);
 }
 
-function canQueueOffline(request: WriteRequest): request is CaptureMemoryRequest {
+function canQueueOffline(request: DeliveredWriteRequest): request is DeliveredCaptureMemoryRequest {
   return request.endpoint === '/v1/memories/capture' && explicitMemoryRequestPattern.test(request.rawContent);
+}
+
+function isMatchingPendingCapture(entry: OutboxEntry, request: DeliveredCaptureMemoryRequest): entry is PendingWrite {
+  return isPendingWrite(entry) &&
+    entry.request.endpoint === '/v1/memories/capture' &&
+    sameRequest(entry.request, request) &&
+    entry.request.brainId === request.brainId;
+}
+
+function isMatchingTargetlessLegacyCapture(entry: OutboxEntry, request: DeliveredCaptureMemoryRequest): entry is PendingWrite {
+  return isPendingWrite(entry) &&
+    entry.request.endpoint === '/v1/memories/capture' &&
+    sameRequest(entry.request, request) &&
+    nonEmptyText(entry.request.brainId) === undefined;
 }
 
 function parseOutboxEntry(value: unknown): OutboxEntry {

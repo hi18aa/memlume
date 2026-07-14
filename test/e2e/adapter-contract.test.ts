@@ -85,7 +85,7 @@ describe('Adapter compatibility contract', () => {
     expect(manifest.scripts['test:e2e']).toContain('test/e2e/adapter-contract.test.ts');
   });
 
-  test('rejects a session-end callback before initialization', () => {
+  test('exposes only the three shared callbacks and rejects a subagent callback before initialization', () => {
     const callbacks = createAdapterHostCallbacks(new AdapterClient({
       daemonUrl: 'http://127.0.0.1:3849',
       token,
@@ -93,7 +93,14 @@ describe('Adapter compatibility contract', () => {
       fetch: async () => new Response(),
     }));
 
-    expect(() => callbacks.onSessionEnd()).toThrow('Adapter callback must be initialized before receiving events.');
+    expect(Object.keys(callbacks).sort()).toEqual(['beforeTask', 'initialize', 'onSubagentStart', 'onUserMessage']);
+    expect(() => callbacks.onSubagentStart({
+      intent: 'implementation',
+      scope: { level: 'project', projectId: 'memlume' },
+      task: 'Start a child task.',
+      contextBudget: 120,
+      parentTaskId: 'parent-task',
+    })).toThrow('Adapter callback must be initialized before receiving events.');
   });
 
   test('allows a new session only for the initialized adapter identity', () => {
@@ -138,7 +145,7 @@ describe('Adapter compatibility contract', () => {
     }), 500)).resolves.toMatchObject({ directives: [], explanation: { budget: { limitUnits: 120 } } });
   });
 
-  test('uses one initialized envelope across context, user, and task-complete callbacks', async () => {
+  test('uses one initialized envelope across task, user, and subagent callbacks', async () => {
     const calls: Array<{ readonly path: string; readonly body: Record<string, unknown> }> = [];
     const client = new AdapterClient({
       daemonUrl: 'http://127.0.0.1:3849',
@@ -165,17 +172,29 @@ describe('Adapter compatibility contract', () => {
       scope: { level: 'project', projectId: 'memlume' },
       task: 'Add one adapter.',
       contextBudget: 120,
+      requestedBrainIds: [brainId],
     })).resolves.toMatchObject({ intent: 'implementation', directives: [] });
     await expect(callbacks.onUserMessage({ messageId: 'user-1', content: 'Remember this project uses Vue.', brainId })).resolves.toEqual({
       status: 'saved',
       memoryStatus: 'active',
     });
-    await expect(callbacks.afterTask({ messageId: 'task-1', content: 'Implemented the adapter.', brainId })).resolves.toEqual({ status: 'saved' });
-    await expect(callbacks.onSessionEnd()).resolves.toEqual([]);
+    await expect(callbacks.onSubagentStart({
+      intent: 'implementation',
+      scope: { level: 'project', projectId: 'memlume' },
+      task: 'Implement the adapter child task.',
+      contextBudget: 80,
+      requestedBrainIds: [brainId],
+      parentTaskId: 'task-1',
+      subagentId: 'child-1',
+    })).resolves.toMatchObject({ intent: 'implementation', directives: [] });
 
-    expect(calls.map(({ path }) => path)).toEqual(['/v1/context/resolve', '/v1/memories/capture', '/v1/events']);
-    const writeEnvelopes = calls.slice(1).map(({ body }) => (body.structuredData as { readonly envelope: unknown }).envelope);
-    expect(writeEnvelopes).toEqual([envelope, envelope]);
+    expect(calls.map(({ path }) => path)).toEqual(['/v1/context/resolve', '/v1/memories/capture', '/v1/context/resolve']);
+    expect((calls[1].body.structuredData as { readonly envelope: unknown }).envelope).toEqual(envelope);
+    expect(calls[0].body).toMatchObject({ requestedBrainIds: [brainId] });
+    expect(calls[2].body).toMatchObject({ requestedBrainIds: [brainId] });
+    expect(calls[2].body).not.toHaveProperty('parentTaskId');
+    expect(calls[2].body).not.toHaveProperty('subagentId');
+    expect(calls[2].body).not.toHaveProperty('envelope');
   });
 
   test('fails open when context read is unavailable', async () => {
@@ -199,25 +218,37 @@ describe('Adapter compatibility contract', () => {
     expect(warnings).toEqual(['Memlume context unavailable; continuing without shared context.']);
   });
 
-  test('reports queued work truthfully and retries it at session end', async () => {
+  test('reports queued work truthfully and retries it at the next task callback', async () => {
     let captures = 0;
     const client = new AdapterClient({
       daemonUrl: 'http://127.0.0.1:3849',
       token,
       outboxDirectory: temporaryDirectory(),
       fetch: async (input) => {
-        expect(new URL(String(input)).pathname).toBe('/v1/memories/capture');
-        captures += 1;
-        return captures === 1
-          ? new Response(JSON.stringify({ error: 'unavailable' }), { status: 503 })
-          : new Response(JSON.stringify(savedCapture()), { status: 201 });
+        const path = new URL(String(input)).pathname;
+        if (path === '/v1/memories/capture') {
+          captures += 1;
+          return captures === 1
+            ? new Response(JSON.stringify({ error: 'unavailable' }), { status: 503 })
+            : new Response(JSON.stringify(savedCapture()), { status: 201 });
+        }
+        return new Response(JSON.stringify({ context: context({
+          intent: 'implementation',
+          scope: { level: 'project', projectId: 'memlume' },
+          contextBudget: 120,
+        }) }), { status: 200 });
       },
     });
     const callbacks = createAdapterHostCallbacks(client);
     callbacks.initialize({ envelope });
 
     await expect(callbacks.onUserMessage({ messageId: 'retry-1', content: 'Remember this project uses Vue.', brainId })).resolves.toEqual({ status: 'queued' });
-    await expect(callbacks.onSessionEnd()).resolves.toEqual([{ status: 'saved', memoryStatus: 'active' }]);
+    await expect(callbacks.beforeTask({
+      intent: 'implementation',
+      scope: { level: 'project', projectId: 'memlume' },
+      task: 'Retry pending work.',
+      contextBudget: 120,
+    })).resolves.toMatchObject({ intent: 'implementation' });
     await expect(client.outboxStatus()).resolves.toEqual({ state: 'empty', pending: 0, retry: 0, discarded: 0 });
   });
 
