@@ -598,8 +598,8 @@ describe('memlume CLI', () => {
     expect(commands).toEqual([
       ['openclaw', 'plugins', 'install', '--link', join('C:/work/memlume', 'adapters', 'openclaw')],
       ['openclaw', 'plugins', 'enable', 'memlume-openclaw'],
+      ['openclaw', 'config', 'unset', 'plugins.entries.memlume-openclaw.hooks.allowConversationAccess'],
       ['openclaw', 'config', 'set', 'plugins.entries.memlume-openclaw.hooks.allowPromptInjection', 'true', '--strict-json'],
-      ['openclaw', 'config', 'set', 'plugins.entries.memlume-openclaw.hooks.allowConversationAccess', 'true', '--strict-json'],
       ['openclaw', 'config', 'set', 'plugins.entries.memlume-openclaw.config', JSON.stringify({
         installationId: 'openclaw-main', profileId: 'default', projectId: 'memlume', brainId: '00000000-0000-7000-8000-000000000020',
         corePath: 'C:/work/memlume', daemonUrl: url, workspacePath: 'C:/work/project',
@@ -670,8 +670,8 @@ describe('memlume CLI', () => {
         'Dry run; no host command will be executed:',
         `openclaw plugins install --link ${join('C:/work/memlume', 'adapters', 'openclaw')}`,
         'openclaw plugins enable memlume-openclaw',
+        'openclaw config unset plugins.entries.memlume-openclaw.hooks.allowConversationAccess',
         'openclaw config set plugins.entries.memlume-openclaw.hooks.allowPromptInjection true --strict-json',
-        'openclaw config set plugins.entries.memlume-openclaw.hooks.allowConversationAccess true --strict-json',
         `openclaw config set plugins.entries.memlume-openclaw.config ${JSON.stringify(JSON.stringify({
           installationId: 'openclaw-main', profileId: 'default', projectId: 'memlume', brainId: '00000000-0000-7000-8000-000000000020',
           corePath: 'C:/work/memlume', daemonUrl: url, workspacePath: 'C:/work/project',

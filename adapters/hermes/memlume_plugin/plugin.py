@@ -13,8 +13,7 @@ from uuid import uuid4
 
 
 BridgeRunner = Callable[[dict[str, Any], float | None], Any]
-COMPLETED_SESSION_LIMIT = 256
-TURN_LIMIT = 256
+CHILD_SESSION_LIMIT = 256
 
 
 class MemlumePlugin:
@@ -28,9 +27,7 @@ class MemlumePlugin:
         self._environment = _with_local_profile(dict(os.environ if environment is None else environment))
         self._runner = runner or _SubprocessBridge(self._environment)
         self._timeout_seconds = timeout_seconds
-        self._turns: OrderedDict[str, str] = OrderedDict()
-        self._finished_sessions: OrderedDict[str, None] = OrderedDict()
-        self._last_envelope: dict[str, str] | None = None
+        self._child_sessions: OrderedDict[str, dict[str, str | bool | None]] = OrderedDict()
         self._lock = threading.Lock()
 
     def pre_llm_call(self, *, session_id: str, user_message: str, **_kwargs: Any) -> dict[str, str] | None:
@@ -38,15 +35,11 @@ class MemlumePlugin:
         if envelope is None or not isinstance(user_message, str) or user_message.strip() == "":
             return None
 
-        message_id = f"hermes-{uuid4()}"
-        with self._lock:
-            self._turns[session_id] = message_id
-            self._turns.move_to_end(session_id)
-            while len(self._turns) > TURN_LIMIT:
-                self._turns.popitem(last=False)
-            self._finished_sessions.pop(session_id, None)
-            self._last_envelope = envelope
+        is_child, child_context = self._child_context(session_id, envelope, user_message)
+        if is_child:
+            return child_context
 
+        message_id = f"hermes-{uuid4()}"
         scope = {"level": "project", "projectId": envelope["projectId"]}
         self._background({
             "operation": "onUserMessage",
@@ -59,48 +52,54 @@ class MemlumePlugin:
         })
         return _ephemeral_context(context)
 
-    def post_llm_call(self, *, session_id: str, assistant_response: str, **_kwargs: Any) -> None:
-        envelope = self._envelope(session_id)
-        if envelope is None or not isinstance(assistant_response, str) or assistant_response.strip() == "":
+    def subagent_start(
+        self,
+        *,
+        parent_turn_id: str | None = None,
+        child_session_id: str | None = None,
+        child_subagent_id: str | None = None,
+        child_goal: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        session_id = _text(child_session_id) or _text(kwargs.get("child_session_key"))
+        if session_id is None or self._envelope(session_id) is None:
             return None
+        parent_task_id = _text(parent_turn_id) or _text(kwargs.get("parent_task_id")) or session_id
         with self._lock:
-            message_id = self._turns.get(session_id)
-        if message_id is None:
-            return None
-        self._background({
-            "operation": "afterTask",
-            "envelope": envelope,
-            "message": {"messageId": message_id, "content": assistant_response, "brainId": self._environment["MEMLUME_BRAIN_ID"]},
-        })
+            self._child_sessions.pop(session_id, None)
+            self._child_sessions[session_id] = {
+                "parentTaskId": parent_task_id,
+                "subagentId": _text(child_subagent_id) or _text(kwargs.get("subagent_id")),
+                "task": _text(child_goal) or _text(kwargs.get("task")),
+                "started": False,
+            }
+            while len(self._child_sessions) > CHILD_SESSION_LIMIT:
+                self._child_sessions.popitem(last=False)
         return None
 
-    def on_session_end(self, *, session_id: str | None, **_kwargs: Any) -> None:
-        envelope = self._envelope(session_id)
-        if envelope is None:
-            return None
-        return self._finish_session(envelope)
-
-    def on_session_finalize(self, *, session_id: str | None, **kwargs: Any) -> None:
-        if isinstance(session_id, str) and session_id.strip() != "":
-            return self.on_session_end(session_id=session_id, **kwargs)
+    def _child_context(self, session_id: str, envelope: dict[str, str], user_message: str) -> tuple[bool, dict[str, str] | None]:
         with self._lock:
-            envelope = self._last_envelope
-        return None if envelope is None else self._finish_session(envelope)
+            child = self._child_sessions.get(session_id)
+            if child is None:
+                return False, None
+            if child["started"] is True:
+                return True, None
+            child["started"] = True
 
-    def _finish_session(self, envelope: dict[str, str]) -> None:
-        session_id = envelope["sessionId"]
-        with self._lock:
-            if session_id in self._finished_sessions:
-                return None
-            self._finished_sessions[session_id] = None
-            while len(self._finished_sessions) > COMPLETED_SESSION_LIMIT:
-                self._finished_sessions.popitem(last=False)
-            self._turns.pop(session_id, None)
-        self._background({
-            "operation": "onSessionEnd",
+        scope = {"level": "project", "projectId": envelope["projectId"]}
+        task = child["task"] if isinstance(child["task"], str) else user_message
+        input: dict[str, Any] = {
             "envelope": envelope,
-        })
-        return None
+            "parentTaskId": child["parentTaskId"],
+            "intent": "shared_memory",
+            "scope": scope,
+            "task": task,
+            "contextBudget": 600,
+            "requestedBrainIds": [self._environment["MEMLUME_BRAIN_ID"]],
+        }
+        if isinstance(child["subagentId"], str):
+            input["subagentId"] = child["subagentId"]
+        return True, _ephemeral_context(self._bounded_invoke({"operation": "onSubagentStart", "input": input}))
 
     def _envelope(self, session_id: str | None) -> dict[str, str] | None:
         required = ("MEMLUME_INSTALLATION_ID", "MEMLUME_PROFILE_ID", "MEMLUME_PROJECT_ID", "MEMLUME_BRAIN_ID")
@@ -168,6 +167,10 @@ class _SubprocessBridge:
             return None
 
 
+def _text(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def _ephemeral_context(context: Any) -> dict[str, str] | None:
     if not isinstance(context, dict):
         return None
@@ -189,7 +192,7 @@ def _ephemeral_context(context: Any) -> dict[str, str] | None:
 
 def register(ctx: Any) -> MemlumePlugin:
     plugin = MemlumePlugin()
-    for hook in ("pre_llm_call", "post_llm_call", "on_session_end", "on_session_finalize"):
+    for hook in ("pre_llm_call", "subagent_start"):
         ctx.register_hook(hook, getattr(plugin, hook))
     return plugin
 

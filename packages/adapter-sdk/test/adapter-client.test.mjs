@@ -10,6 +10,7 @@ import { AdapterClient, loadLocalAdapterProfile } from '../dist/index.js';
 const directories = [];
 const token = 'adapter-token-that-must-not-be-persisted';
 const brainId = '00000000-0000-7000-8000-000000000002';
+const mountedBrainId = '00000000-0000-7000-8000-000000000005';
 const envelope = {
   clientType: 'codex',
   installationId: 'desktop',
@@ -65,8 +66,23 @@ function context() {
   };
 }
 
-function savedEvent(id) {
-  return { event: { id, brainId } };
+function assertEmptyContext(value, input = beforeTask) {
+  const { traceId, ...contextPack } = value;
+  assert.equal(typeof traceId, 'string');
+  assert.deepEqual(contextPack, {
+    intent: input.intent,
+    scope: input.scope,
+    directives: [],
+    procedures: [],
+    preferences: [],
+    knowledge: [],
+    decisions: [],
+    explanation: {
+      sourceMemoryIds: [],
+      exclusions: [],
+      budget: { limitUnits: input.contextBudget, usedUnits: 0, included: [], omitted: [], truncated: false },
+    },
+  });
 }
 
 function savedCapture(status = 'active') {
@@ -103,6 +119,21 @@ function fakeFetch(...responses) {
 function deferred() {
   let resolve;
   return { promise: new Promise((done) => { resolve = done; }), resolve };
+}
+
+async function eventually(assertion, timeoutMs = 500) {
+  const deadline = performance.now() + timeoutMs;
+  let lastError;
+  while (performance.now() < deadline) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw lastError;
 }
 
 describe('AdapterClient', () => {
@@ -166,20 +197,48 @@ describe('AdapterClient', () => {
     assert.deepEqual(JSON.parse(fake.calls[0].init.body), { ...beforeTask, requestedBrainIds });
   });
 
-  test('reads context for a subagent without sending host-only metadata or writing memory', async () => {
+  test('reads subagent context from exactly the configured Project Brain without host-only metadata or writes', async () => {
     const fake = fakeFetch({ status: 200, body: { context: context() } });
-    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxDirectory: temporaryOutboxDirectory(), fetch: fake.fetch });
+    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, defaultWriteBrainId: brainId, outboxDirectory: temporaryOutboxDirectory(), fetch: fake.fetch });
 
     assert.deepEqual(await client.onSubagentStart({
       ...beforeTask,
       envelope,
-      requestedBrainIds: [brainId],
       parentTaskId: 'parent-task',
       subagentId: 'child-agent',
     }), context());
     assert.equal(fake.calls.length, 1);
     assert.equal(fake.calls[0].url.endsWith('/v1/context/resolve'), true);
     assert.deepEqual(JSON.parse(fake.calls[0].init.body), { ...beforeTask, requestedBrainIds: [brainId] });
+  });
+
+  test('rejects subagent context outside the configured Project Brain before HTTP', async () => {
+    for (const requestedBrainIds of [[mountedBrainId], []]) {
+      const fake = fakeFetch({ status: 200, body: { context: context() } });
+      const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, defaultWriteBrainId: brainId, outboxDirectory: temporaryOutboxDirectory(), fetch: fake.fetch, warn: () => undefined });
+
+      const result = await client.onSubagentStart({ ...beforeTask, envelope, parentTaskId: 'parent-task', requestedBrainIds });
+      assertEmptyContext(result);
+      assert.equal(fake.calls.length, 0);
+    }
+  });
+
+  test('rejects subagent context without a configured Project Brain before HTTP', async () => {
+    const fake = fakeFetch({ status: 200, body: { context: context() } });
+    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxDirectory: temporaryOutboxDirectory(), fetch: fake.fetch, warn: () => undefined });
+
+    const result = await client.onSubagentStart({ ...beforeTask, envelope, parentTaskId: 'parent-task', requestedBrainIds: [brainId] });
+    assertEmptyContext(result);
+    assert.equal(fake.calls.length, 0);
+  });
+
+  test('exposes only the three shared lifecycle methods', () => {
+    const methods = Object.getOwnPropertyNames(AdapterClient.prototype);
+    assert.equal(methods.includes('beforeTask'), true);
+    assert.equal(methods.includes('onUserMessage'), true);
+    assert.equal(methods.includes('onSubagentStart'), true);
+    assert.equal(methods.includes('afterTask'), false);
+    assert.equal(methods.includes('onSessionEnd'), false);
   });
 
   test('reads subagent context without flushing an existing outbox capture', async () => {
@@ -210,6 +269,7 @@ describe('AdapterClient', () => {
     const client = new AdapterClient({
       daemonUrl: 'http://127.0.0.1:3849',
       token,
+      defaultWriteBrainId: brainId,
       outboxPath,
       fetch: async (input) => {
         const path = new URL(String(input)).pathname;
@@ -221,6 +281,44 @@ describe('AdapterClient', () => {
     await client.onSubagentStart({ ...beforeTask, envelope, parentTaskId: 'parent-task' });
     assert.deepEqual(paths, ['/v1/context/resolve']);
     assert.equal(readFileSync(outboxPath, 'utf8'), original);
+  });
+
+  test('discards a legacy task audit without sending it or blocking a new explicit capture', async () => {
+    const outboxPath = temporaryOutbox();
+    writeFileSync(outboxPath, `${JSON.stringify({
+      state: 'pending',
+      retryCount: 2,
+      messageId: 'legacy-task-audit',
+      request: {
+        endpoint: '/v1/events',
+        rawContent: 'Completed a task.',
+        eventType: 'task_completed',
+        source: {
+          type: 'codex', agent: 'codex', conversationId: 'session-1', messageId: 'legacy-task-audit', reference: 'legacy-task-audit',
+        },
+        brainId,
+        structuredData: { envelope },
+      },
+    })}\n`, 'utf8');
+    const paths = [];
+    const client = new AdapterClient({
+      daemonUrl: 'http://127.0.0.1:3849',
+      token,
+      outboxPath,
+      fetch: async (input) => {
+        const path = new URL(String(input)).pathname;
+        paths.push(path);
+        return new Response(JSON.stringify(path === '/v1/context/resolve' ? { context: context() } : savedCapture()), {
+          status: path === '/v1/context/resolve' ? 200 : 201,
+        });
+      },
+    });
+
+    await client.beforeTask({ ...beforeTask, envelope });
+    assert.deepEqual(await client.outboxStatus(), { state: 'discarded', pending: 0, retry: 0, discarded: 1 });
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'new-memory', content: 'Remember Vue.', brainId }), { status: 'saved', memoryStatus: 'active' });
+    assert.deepEqual(paths, ['/v1/context/resolve', '/v1/memories/capture']);
+    assert.equal(JSON.parse(readFileSync(outboxPath, 'utf8')).endpoint, '/v1/events');
   });
 
   test('uses the configured default Brain for a new user-memory capture', async () => {
@@ -330,9 +428,13 @@ describe('AdapterClient', () => {
     const fake = fakeFetch({ status: 503, body: { error: 'unavailable' } });
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, defaultWriteBrainId: brainId, fetch: fake.fetch });
 
-    assert.deepEqual(await client.onSessionEnd(), [{ status: 'queued' }]);
-    assert.equal(JSON.parse(fake.calls[0].init.body).brainId, brainId);
-    assert.equal(JSON.parse(readFileSync(outboxPath, 'utf8')).request.brainId, brainId);
+    await client.beforeTask({ ...beforeTask, envelope });
+    await eventually(() => {
+      const capture = fake.calls.find((call) => new URL(call.url).pathname === '/v1/memories/capture');
+      assert.ok(capture);
+      assert.equal(JSON.parse(capture.init.body).brainId, brainId);
+      assert.equal(JSON.parse(readFileSync(outboxPath, 'utf8')).request.brainId, brainId);
+    });
   });
 
   test('keeps a legacy capture outbox entry pending when this client has no target Brain', async () => {
@@ -358,7 +460,10 @@ describe('AdapterClient', () => {
     };
     writeFileSync(outboxPath, `${JSON.stringify(legacy)}\n`, 'utf8');
     const warnings = [];
-    const fake = fakeFetch({ status: 400, body: { error: 'brain_required' } });
+    const fake = fakeFetch(
+      { status: 200, body: { context: context() } },
+      { status: 200, body: { context: context() } },
+    );
     const client = new AdapterClient({
       daemonUrl: 'http://127.0.0.1:3849',
       token,
@@ -367,8 +472,8 @@ describe('AdapterClient', () => {
       warn: (message) => warnings.push(message),
     });
 
-    assert.deepEqual(await client.onSessionEnd(), [{ status: 'queued' }]);
-    assert.equal(fake.calls.length, 0);
+    await client.beforeTask({ ...beforeTask, envelope });
+    assert.deepEqual(fake.calls.map(({ url }) => new URL(url).pathname), ['/v1/context/resolve']);
     assert.deepEqual(await client.outboxStatus(), { state: 'pending', pending: 1, retry: 1, discarded: 0 });
     assert.equal(JSON.parse(readFileSync(outboxPath, 'utf8')).request.brainId, undefined);
     assert.equal(warnings.length, 1);
@@ -382,7 +487,7 @@ describe('AdapterClient', () => {
       fetch: fake.fetch,
       warn: (message) => retryWarnings.push(message),
     });
-    assert.deepEqual(await retrying.onSessionEnd(), [{ status: 'queued' }]);
+    await retrying.beforeTask({ ...beforeTask, envelope });
     assert.deepEqual(retryWarnings, []);
   });
 
@@ -431,8 +536,8 @@ describe('AdapterClient', () => {
       outboxPath,
       fetch: recoveredFetch.fetch,
     });
-    assert.deepEqual(await recovered.onSessionEnd(), [{ status: 'saved', memoryStatus: 'active' }]);
-    assert.equal(recoveredFetch.calls.length, 1);
+    await recovered.beforeTask({ ...beforeTask, envelope });
+    assert.equal(recoveredFetch.calls[0].url.endsWith('/v1/memories/capture'), true);
     assert.equal(readFileSync(outboxPath, 'utf8'), '');
   });
 
@@ -490,8 +595,8 @@ describe('AdapterClient', () => {
         return new Response(JSON.stringify(savedCapture()), { status: 201 });
       },
     });
-    assert.deepEqual(await nextClient.onSessionEnd(), []);
-    assert.deepEqual(nextPaths, []);
+    await nextClient.beforeTask({ ...beforeTask, envelope });
+    assert.deepEqual(nextPaths, ['/v1/context/resolve']);
   });
 
   test('uses an explicit incoming Brain before flushing a matching legacy capture with a default Brain', async () => {
@@ -723,7 +828,7 @@ describe('AdapterClient', () => {
       outboxPath,
       fetch: fakeFetch({ status: 503, body: { error: 'unavailable' } }).fetch,
     });
-    await retrying.onSessionEnd();
+    await retrying.beforeTask({ ...beforeTask, envelope });
     assert.deepEqual(await retrying.outboxStatus(), { state: 'pending', pending: 1, retry: 1, discarded: 0 });
 
     const rejecting = new AdapterClient({
@@ -732,7 +837,7 @@ describe('AdapterClient', () => {
       outboxPath,
       fetch: fakeFetch({ status: 403, body: { error: 'forbidden' } }).fetch,
     });
-    await rejecting.onSessionEnd();
+    await rejecting.beforeTask({ ...beforeTask, envelope });
     assert.deepEqual(await rejecting.outboxStatus(), { state: 'discarded', pending: 0, retry: 0, discarded: 1 });
     assert.equal(readFileSync(outboxPath, 'utf8').includes(token), false);
   });
@@ -761,25 +866,24 @@ describe('AdapterClient', () => {
     assert.deepEqual(await status, { state: 'pending', pending: 1, retry: 0, discarded: 0 });
   });
 
-  test('uses the environment token and maps all callbacks to authenticated daemon requests', async () => {
+  test('uses the environment token and maps all shared lifecycle callbacks to authenticated daemon requests', async () => {
     process.env.MEMLUME_TOKEN = token;
     const fake = fakeFetch(
       { status: 200, body: { context: context() } },
       { status: 201, body: savedCapture() },
-      { status: 201, body: savedEvent('event-task') },
+      { status: 200, body: { context: context() } },
     );
-    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', outboxDirectory: temporaryOutboxDirectory(), fetch: fake.fetch });
+    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', defaultWriteBrainId: brainId, outboxDirectory: temporaryOutboxDirectory(), fetch: fake.fetch });
 
     assert.deepEqual(await client.beforeTask(beforeTask), context());
     assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'message-1', content: 'Remember Vue.', brainId }), { status: 'saved', memoryStatus: 'active' });
-    assert.deepEqual(await client.afterTask(envelope, { messageId: 'message-2', content: 'Implemented SDK.' }), { status: 'saved' });
-    assert.deepEqual(await client.onSessionEnd(), []);
+    assert.deepEqual(await client.onSubagentStart({ ...beforeTask, envelope, parentTaskId: 'parent-task', requestedBrainIds: [brainId] }), context());
 
     assert.equal(fake.calls.length, 3);
     assert.equal(fake.calls.every(({ init }) => init.headers.authorization === `Bearer ${token}`), true);
     assert.equal(fake.calls[0].url.endsWith('/v1/context/resolve'), true);
     assert.equal(fake.calls[1].url.endsWith('/v1/memories/capture'), true);
-    assert.equal(fake.calls[2].url.endsWith('/v1/events'), true);
+    assert.equal(fake.calls[2].url.endsWith('/v1/context/resolve'), true);
     assert.deepEqual(JSON.parse(fake.calls[1].init.body), {
       rawContent: 'Remember Vue.',
       eventType: 'user_message',
@@ -794,7 +898,7 @@ describe('AdapterClient', () => {
        scope: { level: 'project', projectId: 'memlume' },
       structuredData: { envelope },
     });
-    assert.equal(JSON.parse(fake.calls[2].init.body).eventType, 'task_completed');
+    assert.deepEqual(JSON.parse(fake.calls[2].init.body).requestedBrainIds, [brainId]);
   });
 
   test('fails open with one warning when context cannot be read', async () => {
@@ -820,6 +924,21 @@ describe('AdapterClient', () => {
     const result = await client.beforeTask({ ...beforeTask, scope: { level: 'project', projectId: secret } });
 
     assert.equal(result.scope.projectId, secret);
+    assert.equal(fake.calls.length, 0);
+    assert.equal(warnings.join(' ').includes(secret), false);
+  });
+
+  test('does not send a credential-shaped task in main or subagent context requests', async () => {
+    const secret = 'OPENAI_API_KEY=sk-live-context-secret';
+    const warnings = [];
+    const fake = fakeFetch({ status: 200, body: { context: context() } });
+    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, defaultWriteBrainId: brainId, fetch: fake.fetch, warn: (message) => warnings.push(message) });
+
+    const main = await client.beforeTask({ ...beforeTask, task: `Use ${secret} to deploy.` });
+    const child = await client.onSubagentStart({ ...beforeTask, envelope, parentTaskId: 'parent-task', task: `Use ${secret} to test.` });
+
+    assertEmptyContext(main);
+    assertEmptyContext(child);
     assert.equal(fake.calls.length, 0);
     assert.equal(warnings.join(' ').includes(secret), false);
   });
@@ -884,8 +1003,6 @@ describe('AdapterClient', () => {
     assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'ordinary', content: 'Vue is used for the frontend.', brainId }), { status: 'rejected' });
     assert.equal(existsSync(outboxPath), false);
     assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'explicit', content: 'Remember Vue is used for the frontend.', brainId }), { status: 'queued' });
-    assert.deepEqual(await client.afterTask(envelope, { messageId: 'task', content: 'Implemented the frontend.' }), { status: 'rejected' });
-
     const entries = readFileSync(outboxPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
     assert.equal(entries.length, 1);
     assert.equal(entries[0].request.source.messageId, 'explicit');
@@ -898,10 +1015,12 @@ describe('AdapterClient', () => {
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: fake.fetch });
 
     assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'secret-online', content: secret }), { status: 'rejected' });
-    assert.deepEqual(
-      await client.afterTask(envelope, { messageId: 'secret-structured', content: 'Finished safely.', structuredData: { nested: { apiKey: 'adapter-structured-secret' } } }),
-      { status: 'rejected' },
-    );
+    assert.deepEqual(await client.onUserMessage(envelope, {
+      messageId: 'secret-structured',
+      content: 'Remember this safely.',
+      brainId,
+      structuredData: { nested: { apiKey: 'adapter-structured-secret' } },
+    }), { status: 'rejected' });
     assert.equal(fake.calls.length, 0);
     assert.equal(existsSync(outboxPath), false);
   });
@@ -991,19 +1110,18 @@ describe('AdapterClient', () => {
     const newClient = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token: newToken, outboxDirectory, fetch: recovered.fetch });
     assert.deepEqual(await newClient.beforeTask({ ...beforeTask, envelope }), context());
 
-    assert.deepEqual(await newClient.onSessionEnd(), []);
     assert.equal(readFileSync(outboxPath, 'utf8'), '');
     assert.equal(outboxPath.includes(oldToken) || outboxPath.includes(newToken), false);
     assert.equal(recovered.calls[0].init.headers.authorization, `Bearer ${newToken}`);
   });
 
-  test('does not flush a default outbox before an envelope establishes its identity', async () => {
+  test('does not bind a default outbox before an envelope establishes its identity', async () => {
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, fetch: fakeFetch().fetch });
 
-    assert.deepEqual(await client.onSessionEnd(), []);
+    assert.deepEqual(await client.outboxStatus(), { state: 'unbound', pending: 0, retry: 0, discarded: 0 });
   });
 
-  test('binds a default outbox from the ending envelope before flushing a fresh client', async () => {
+  test('binds a default outbox from the next task envelope before flushing a fresh client', async () => {
     const outboxDirectory = temporaryOutboxDirectory();
     const offline = new AdapterClient({
       daemonUrl: 'http://127.0.0.1:3849',
@@ -1019,7 +1137,8 @@ describe('AdapterClient', () => {
       outboxDirectory,
       fetch: fakeFetch({ status: 201, body: savedCapture() }).fetch,
     });
-    assert.deepEqual(await recovered.onSessionEnd(envelope), [{ status: 'saved', memoryStatus: 'active' }]);
+    await recovered.beforeTask({ ...beforeTask, envelope });
+    assert.deepEqual(await recovered.outboxStatus(), { state: 'empty', pending: 0, retry: 0, discarded: 0 });
   });
 
   test('flushes an existing outbox at the next user-turn callback without waiting for session end', async () => {
@@ -1056,7 +1175,7 @@ describe('AdapterClient', () => {
 
     const recovering = fakeFetch({ status: 201, body: savedCapture() });
     const retryingClient = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: recovering.fetch });
-    assert.deepEqual(await retryingClient.onSessionEnd(), [{ status: 'saved', memoryStatus: 'active' }]);
+    await retryingClient.beforeTask({ ...beforeTask, envelope });
     assert.equal(readFileSync(outboxPath, 'utf8'), '');
   });
 
@@ -1078,7 +1197,7 @@ describe('AdapterClient', () => {
       fetch: fakeFetch({ status: 201, body: savedCapture() }).fetch,
     });
 
-    assert.deepEqual(await recovered.onSessionEnd(), [{ status: 'saved', memoryStatus: 'active' }]);
+    await recovered.beforeTask({ ...beforeTask, envelope });
     assert.equal(readFileSync(outboxPath, 'utf8'), '');
   });
 
@@ -1099,7 +1218,7 @@ describe('AdapterClient', () => {
       outboxPath,
       fetch: fakeFetch({ status: 201, body: savedCapture() }).fetch,
     });
-    assert.deepEqual(await recovered.onSessionEnd(), [{ status: 'saved', memoryStatus: 'active' }]);
+    await recovered.beforeTask({ ...beforeTask, envelope });
     assert.equal(readFileSync(outboxPath, 'utf8'), '');
   });
 
@@ -1112,7 +1231,7 @@ describe('AdapterClient', () => {
     mkdirSync(`${outboxPath}.${process.pid}.tmp`, { recursive: true });
 
     const warnings = [];
-    const accepting = fakeFetch({ status: 201, body: savedCapture() });
+    const accepting = fakeFetch({ status: 201, body: savedCapture() }, { status: 200, body: { context: context() } });
     const client = new AdapterClient({
       daemonUrl: 'http://127.0.0.1:3849',
       token,
@@ -1121,7 +1240,7 @@ describe('AdapterClient', () => {
       warn: (message) => warnings.push(message),
     });
 
-    assert.deepEqual(await client.onSessionEnd(), [{ status: 'saved', memoryStatus: 'active' }]);
+    await client.beforeTask({ ...beforeTask, envelope });
     assert.deepEqual(warnings, ['Memlume outbox update unavailable; queued events will retry later.']);
     assert.equal(warnings.join(' ').includes(token), false);
     assert.equal(readFileSync(outboxPath, 'utf8'), original);
@@ -1155,11 +1274,10 @@ describe('AdapterClient', () => {
 
     const rejected = fakeFetch({ status: 401, body: { error: 'unauthorized' } });
     const retryingClient = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: rejected.fetch });
-    const result = await retryingClient.onSessionEnd();
-    assert.deepEqual(result, [{ status: 'rejected' }]);
+    await retryingClient.beforeTask({ ...beforeTask, envelope });
     assert.deepEqual(await retryingClient.outboxStatus(), { state: 'discarded', pending: 0, retry: 0, discarded: 1 });
     assert.equal(readFileSync(outboxPath, 'utf8').includes(token), false);
-    assert.equal(JSON.stringify(result).includes(token), false);
+    assert.equal(readFileSync(outboxPath, 'utf8').includes(token), false);
   });
 
   test('retains a rate-limited outbox entry for retry instead of discarding it', async () => {
@@ -1175,7 +1293,7 @@ describe('AdapterClient', () => {
       fetch: fakeFetch({ status: 429, body: { error: 'too_many_requests' } }).fetch,
     });
 
-    assert.deepEqual(await rateLimited.onSessionEnd(), [{ status: 'queued' }]);
+    await rateLimited.beforeTask({ ...beforeTask, envelope });
     assert.deepEqual(await rateLimited.outboxStatus(), { state: 'pending', pending: 1, retry: 1, discarded: 0 });
   });
 
@@ -1194,7 +1312,7 @@ describe('AdapterClient', () => {
       { status: 403, body: { error: 'forbidden' } },
     );
     const flushingClient = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: rejecting.fetch });
-    assert.deepEqual(await flushingClient.onSessionEnd(), [{ status: 'rejected' }, { status: 'rejected' }]);
+    await flushingClient.beforeTask({ ...beforeTask, envelope });
     assert.deepEqual(await flushingClient.outboxStatus(), { state: 'discarded', pending: 0, retry: 0, discarded: 2 });
   });
 
@@ -1219,11 +1337,11 @@ describe('AdapterClient', () => {
     };
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: racing.fetch });
 
-    const ending = client.onSessionEnd();
+    const ending = client.beforeTask({ ...beforeTask, envelope });
     await oldRequestStarted.promise;
     const writing = client.onUserMessage(envelope, { messageId: 'message-new', content: 'Remember the new pending event.', brainId });
     releaseOldRequest.resolve();
-    assert.deepEqual(await ending, [{ status: 'saved', memoryStatus: 'active' }]);
+    await ending;
     assert.deepEqual(await writing, { status: 'queued' });
 
     const pending = readFileSync(outboxPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
@@ -1252,7 +1370,7 @@ describe('AdapterClient', () => {
         return new Response(JSON.stringify(savedCapture()), { status: 201 });
       },
     });
-    const ending = flushing.onSessionEnd();
+    const ending = flushing.beforeTask({ ...beforeTask, envelope });
     await oldRequestStarted.promise;
 
     const concurrent = new AdapterClient({

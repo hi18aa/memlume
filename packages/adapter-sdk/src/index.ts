@@ -136,7 +136,7 @@ export interface OutboxStatus {
 
 interface BaseWriteRequest {
   readonly rawContent: string;
-  readonly eventType: 'user_message' | 'task_completed';
+  readonly eventType: 'user_message';
   readonly source: {
     readonly type: string;
     readonly agent: string;
@@ -149,18 +149,14 @@ interface BaseWriteRequest {
   readonly structuredData: JsonValue;
 }
 
-interface AppendEventRequest extends BaseWriteRequest {
-  readonly endpoint: '/v1/events';
-}
-
 interface CaptureMemoryRequest extends BaseWriteRequest {
   readonly endpoint: '/v1/memories/capture';
   readonly scope: MemoryScope;
 }
 
-type WriteRequest = AppendEventRequest | CaptureMemoryRequest;
+type WriteRequest = CaptureMemoryRequest;
 type DeliveredCaptureMemoryRequest = CaptureMemoryRequest & { readonly brainId: string };
-type DeliveredWriteRequest = AppendEventRequest | DeliveredCaptureMemoryRequest;
+type DeliveredWriteRequest = DeliveredCaptureMemoryRequest;
 
 interface PendingWrite {
   readonly state: 'pending' | 'retry';
@@ -172,7 +168,7 @@ interface PendingWrite {
 interface DiscardedWrite {
   readonly state: 'discarded';
   readonly messageId: string;
-  readonly endpoint: WriteRequest['endpoint'];
+  readonly endpoint: WriteRequest['endpoint'] | '/v1/events';
   readonly discardedAt: string;
 }
 
@@ -238,24 +234,20 @@ export class AdapterClient {
   }
 
   async onSubagentStart(input: SubagentStartInput): Promise<ContextPack> {
-    const { parentTaskId: _parentTaskId, subagentId: _subagentId, ...beforeTaskInput } = input;
-    if (redactSensitiveJson(beforeTaskInput.scope).detected) {
+    const { parentTaskId: _parentTaskId, subagentId: _subagentId, requestedBrainIds, ...beforeTaskInput } = input;
+    const projectBrainId = this.defaultWriteBrainId;
+    if (
+      projectBrainId === undefined ||
+      (requestedBrainIds !== undefined && (
+        !Array.isArray(requestedBrainIds) ||
+        requestedBrainIds.length === 0 ||
+        requestedBrainIds.some((brainId) => brainId !== projectBrainId)
+      )) ||
+      redactSensitiveJson(beforeTaskInput.scope).detected
+    ) {
       return this.unavailableContext(beforeTaskInput);
     }
-    return this.resolveContext(beforeTaskInput);
-  }
-
-  async afterTask(envelope: AdapterEnvelope, message: AdapterMessage): Promise<WriteResult> {
-    this.bindOutbox(envelope);
-    return this.serialize(async () => {
-      await this.flush();
-      return this.write(eventRequest(envelope, message, 'task_completed'));
-    });
-  }
-
-  async onSessionEnd(envelope?: AdapterEnvelope): Promise<readonly WriteResult[]> {
-    this.bindOutbox(envelope);
-    return this.serialize(() => this.flush());
+    return this.resolveContext({ ...beforeTaskInput, requestedBrainIds: [projectBrainId] });
   }
 
   outboxStatus(): Promise<OutboxStatus> {
@@ -264,6 +256,9 @@ export class AdapterClient {
 
   private async resolveContext(input: BeforeTaskInput): Promise<ContextPack> {
     const { envelope: _envelope, ...requestInput } = input;
+    if (redactSensitiveJson(requestInput as unknown as JsonValue).detected) {
+      return this.unavailableContext(input);
+    }
     try {
       const response = await this.request('/v1/context/resolve', 'POST', requestInput, CONTEXT_REQUEST_TIMEOUT_MS);
       if (!response.ok) {
@@ -393,9 +388,6 @@ export class AdapterClient {
       const response = await this.request(endpoint, 'POST', body, this.writeTimeoutMs);
       if (response.ok) {
         const result = await response.json();
-        if (request.endpoint === '/v1/events') {
-          return confirmedEvent(result) ? { status: 'saved' } : { status: 'queued' };
-        }
         const memoryStatus = confirmedCapture(result);
         if (memoryStatus === undefined) {
           return { status: 'queued' };
@@ -469,9 +461,6 @@ export class AdapterClient {
   }
 
   private deliveryRequest(request: WriteRequest, retryCount: number): DeliveredWriteRequest | undefined {
-    if (request.endpoint === '/v1/events') {
-      return request;
-    }
     const brainId = nonEmptyText(request.brainId) ?? this.defaultWriteBrainId;
     if (brainId === undefined) {
       if (retryCount === 0 && !this.warnedAboutLegacyCaptureTarget) {
@@ -584,16 +573,17 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise
   }
 }
 
-function eventRequest(
-  envelope: AdapterEnvelope,
-  message: AdapterMessage,
-  eventType: AppendEventRequest['eventType'],
-): AppendEventRequest | undefined {
+function captureRequest(envelope: AdapterEnvelope, message: AdapterMessage, defaultWriteBrainId: string | undefined): DeliveredCaptureMemoryRequest | undefined {
   const parsedEnvelope = AdapterEnvelopeSchema.safeParse(envelope);
-  if (!parsedEnvelope.success || message.messageId.trim() === '' || message.content.trim() === '') {
+  const brainId = nonEmptyText(message.brainId) ?? defaultWriteBrainId;
+  if (!parsedEnvelope.success || message.messageId.trim() === '' || message.content.trim() === '' || brainId === undefined) {
     return undefined;
   }
   const value = parsedEnvelope.data;
+  const scope = MemoryScopeSchema.safeParse(message.scope ?? { level: 'project', projectId: value.projectId });
+  if (!scope.success || redactSensitiveJson(scope.data).detected) {
+    return undefined;
+  }
   const structuredData: JsonValue = {
     envelope: value,
     ...(message.structuredData === undefined ? {} : { data: message.structuredData }),
@@ -609,31 +599,15 @@ function eventRequest(
     return undefined;
   }
   return {
-    endpoint: '/v1/events',
+    endpoint: '/v1/memories/capture',
     rawContent: message.content,
-    eventType,
+    eventType: 'user_message',
     source,
-    ...(message.brainId === undefined ? {} : { brainId: message.brainId }),
+    brainId,
+    scope: scope.data,
     ...(message.occurredAt === undefined ? {} : { occurredAt: message.occurredAt }),
     structuredData,
   };
-}
-
-function captureRequest(envelope: AdapterEnvelope, message: AdapterMessage, defaultWriteBrainId: string | undefined): DeliveredCaptureMemoryRequest | undefined {
-  const request = eventRequest(envelope, message, 'user_message');
-  const parsedEnvelope = AdapterEnvelopeSchema.safeParse(envelope);
-  const brainId = nonEmptyText(message.brainId) ?? defaultWriteBrainId;
-  if (request === undefined || !parsedEnvelope.success || brainId === undefined) {
-    return undefined;
-  }
-  const scope = MemoryScopeSchema.safeParse(message.scope ?? { level: 'project', projectId: parsedEnvelope.data.projectId });
-  if (!scope.success) {
-    return undefined;
-  }
-  if (redactSensitiveJson(scope.data).detected) {
-    return undefined;
-  }
-  return { ...request, endpoint: '/v1/memories/capture', brainId, scope: scope.data };
 }
 
 async function readOutbox(path: string): Promise<OutboxEntry[]> {
@@ -702,11 +676,11 @@ function containsSecret(request: WriteRequest): boolean {
   return redactSensitiveText(request.rawContent).detected ||
     redactSensitiveJson(request.structuredData).detected ||
     redactSensitiveJson(request.source).detected ||
-    (request.endpoint === '/v1/memories/capture' && redactSensitiveJson(request.scope).detected);
+    redactSensitiveJson(request.scope).detected;
 }
 
 function canQueueOffline(request: DeliveredWriteRequest): request is DeliveredCaptureMemoryRequest {
-  return request.endpoint === '/v1/memories/capture' && explicitMemoryRequestPattern.test(request.rawContent);
+  return explicitMemoryRequestPattern.test(request.rawContent);
 }
 
 function isMatchingPendingCapture(entry: OutboxEntry, request: DeliveredCaptureMemoryRequest): entry is PendingWrite {
@@ -728,7 +702,7 @@ function parseOutboxEntry(value: unknown): OutboxEntry {
     throw new Error('Outbox entry is invalid.');
   }
   if (value.state === 'discarded') {
-    if (!isWriteEndpoint(value.endpoint) || typeof value.discardedAt !== 'string') {
+    if (!isDiscardedEndpoint(value.endpoint) || typeof value.discardedAt !== 'string') {
       throw new Error('Discarded outbox entry is invalid.');
     }
     return { state: 'discarded', messageId: value.messageId, endpoint: value.endpoint, discardedAt: value.discardedAt };
@@ -740,16 +714,29 @@ function parseOutboxEntry(value: unknown): OutboxEntry {
   if (typeof retryCount !== 'number' || !Number.isSafeInteger(retryCount) || retryCount < 0) {
     throw new Error('Outbox retry count is invalid.');
   }
+  const request = parseWriteRequest(value.request);
+  if (request === undefined) {
+    return {
+      state: 'discarded',
+      messageId: value.messageId,
+      endpoint: '/v1/events',
+      discardedAt: new Date().toISOString(),
+    };
+  }
   return {
     state: value.state === 'retry' ? 'retry' : 'pending',
     retryCount,
     messageId: value.messageId,
-    request: parseWriteRequest(value.request),
+    request,
   };
 }
 
-function parseWriteRequest(value: unknown): WriteRequest {
-  if (!isRecord(value) || typeof value.rawContent !== 'string' || (value.eventType !== 'user_message' && value.eventType !== 'task_completed') || !isRecord(value.source)) {
+function parseWriteRequest(value: unknown): WriteRequest | undefined {
+  if (!isRecord(value) || typeof value.rawContent !== 'string' || !isRecord(value.source)) {
+    throw new Error('Outbox request is invalid.');
+  }
+  const legacyTaskAudit = value.endpoint === '/v1/events' && value.eventType === 'task_completed';
+  if (value.eventType !== 'user_message' && !legacyTaskAudit) {
     throw new Error('Outbox request is invalid.');
   }
   const source = value.source;
@@ -762,9 +749,12 @@ function parseWriteRequest(value: unknown): WriteRequest {
   ) {
     throw new Error('Outbox event source is invalid.');
   }
+  if (legacyTaskAudit) {
+    return undefined;
+  }
   const request: BaseWriteRequest = {
     rawContent: value.rawContent,
-    eventType: value.eventType,
+    eventType: 'user_message',
     source: {
       type: source.type,
       agent: source.agent,
@@ -776,9 +766,6 @@ function parseWriteRequest(value: unknown): WriteRequest {
     ...(typeof value.occurredAt === 'string' ? { occurredAt: value.occurredAt } : {}),
     structuredData: value.structuredData as JsonValue,
   };
-  if (value.endpoint === undefined || value.endpoint === '/v1/events') {
-    return { ...request, endpoint: '/v1/events' };
-  }
   const scope = MemoryScopeSchema.safeParse(value.scope);
   if (value.endpoint !== '/v1/memories/capture' || !scope.success) {
     throw new Error('Outbox endpoint is invalid.');
@@ -794,7 +781,7 @@ function isDiscardedWrite(entry: OutboxEntry): entry is DiscardedWrite {
   return entry.state === 'discarded';
 }
 
-function isWriteEndpoint(value: unknown): value is WriteRequest['endpoint'] {
+function isDiscardedEndpoint(value: unknown): value is DiscardedWrite['endpoint'] {
   return value === '/v1/events' || value === '/v1/memories/capture';
 }
 
@@ -884,10 +871,6 @@ function nonEmptyText(value: unknown): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function confirmedEvent(value: unknown): boolean {
-  return isRecord(value) && isRecord(value.event) && UuidV7Schema.safeParse(value.event.brainId).success;
 }
 
 function confirmedCapture(value: unknown): CapturedMemoryStatus | undefined {

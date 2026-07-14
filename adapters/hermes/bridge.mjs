@@ -2,6 +2,8 @@ import { realpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+const uuidV7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
 try {
   let raw = '';
   for await (const chunk of process.stdin) raw += chunk;
@@ -11,9 +13,11 @@ try {
   const entry = await realpath(resolve(safeRoot, 'packages', 'adapter-sdk', 'dist', 'index.js'));
   if (!isInside(safeRoot, entry)) throw new Error('Memlume Core is unavailable.');
   const { AdapterClient } = await import(pathToFileURL(entry).href);
+  const defaultWriteBrainId = validBrainId(process.env.MEMLUME_BRAIN_ID);
   const client = new AdapterClient({
     daemonUrl: process.env.MEMLUME_DAEMON_URL ?? 'http://127.0.0.1:3849',
     token: process.env.MEMLUME_TOKEN,
+    ...(defaultWriteBrainId === undefined ? {} : { defaultWriteBrainId }),
     ...(process.env.MEMLUME_OUTBOX_DIRECTORY ? { outboxDirectory: process.env.MEMLUME_OUTBOX_DIRECTORY } : {}),
     warn: () => undefined,
   });
@@ -31,13 +35,15 @@ async function invoke(client, request) {
       return client.beforeTask(request.input);
     case 'onUserMessage':
       return client.onUserMessage(request.envelope, request.message);
-    case 'afterTask':
-      return client.afterTask(request.envelope, request.message);
-    case 'onSessionEnd':
-      return client.onSessionEnd(request.envelope);
+    case 'onSubagentStart':
+      return client.onSubagentStart(request.input);
     default:
       throw new Error('Unsupported bridge operation.');
   }
+}
+
+function validBrainId(value) {
+  return typeof value === 'string' && uuidV7.test(value.trim()) ? value.trim() : undefined;
 }
 
 function isInside(root, file) {

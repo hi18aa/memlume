@@ -57,52 +57,52 @@ class HermesPluginTests(unittest.TestCase):
         self.assertEqual(capture["message"]["scope"], {"level": "project", "projectId": self.environment["MEMLUME_PROJECT_ID"]})
         self.assertNotIn(self.environment["MEMLUME_TOKEN"], repr(calls))
 
-    def test_post_and_finalization_use_recorded_turn_and_flush_once(self):
+    def test_subagent_observer_defers_restricted_context_until_the_child_first_prompt(self):
         plugin_module = importlib.import_module("memlume_plugin.plugin")
         calls = []
-        completed = threading.Event()
 
         def runner(payload, _timeout):
             calls.append(payload)
-            if payload["operation"] == "beforeTask":
-                return {}
-            if payload["operation"] == "onSessionEnd":
-                completed.set()
-            return {"status": "saved"}
+            return {"directives": [{"text": "只給 child 的專案內容。"}]}
 
         plugin = plugin_module.MemlumePlugin(environment=self.environment, runner=runner, timeout_seconds=0.2)
-        plugin.pre_llm_call(session_id="hermes-session", user_message="記住專案使用 pnpm")
-        plugin.post_llm_call(session_id="hermes-session", assistant_response="已記住。")
-        plugin.on_session_end(session_id="hermes-session")
-        plugin.on_session_finalize(session_id="hermes-session")
+        plugin.subagent_start(
+            parent_turn_id="parent-turn",
+            child_session_id="child-session",
+            child_subagent_id="child-1",
+            child_goal="Research the adapter.",
+        )
+        self.assertEqual(calls, [])
 
-        self.assertTrue(completed.wait(0.3))
-        audit = next(call for call in calls if call["operation"] == "afterTask")
-        capture = next(call for call in calls if call["operation"] == "onUserMessage")
-        self.assertEqual(audit["message"]["messageId"], capture["message"]["messageId"])
-        self.assertEqual(audit["message"]["content"], "已記住。")
-        self.assertEqual(len([call for call in calls if call["operation"] == "onSessionEnd"]), 1)
+        injected = plugin.pre_llm_call(session_id="child-session", user_message="請研究子代理路由。")
 
-    def test_unfinished_sessions_evict_old_turns_without_audit_writes(self):
-        plugin_module = importlib.import_module("memlume_plugin.plugin")
-        calls = []
-        audited = threading.Event()
+        self.assertEqual(injected, {"context": "Memlume shared context:\n- 只給 child 的專案內容。"})
+        self.assertEqual(calls, [{
+            "operation": "onSubagentStart",
+            "input": {
+                "envelope": {
+                    "clientType": "hermes",
+                    "installationId": self.environment["MEMLUME_INSTALLATION_ID"],
+                    "profileId": self.environment["MEMLUME_PROFILE_ID"],
+                    "sessionId": "child-session",
+                    "projectId": self.environment["MEMLUME_PROJECT_ID"],
+                    "workspacePath": self.environment["MEMLUME_WORKSPACE_PATH"],
+                },
+                "parentTaskId": "parent-turn",
+                "subagentId": "child-1",
+                "intent": "shared_memory",
+                "scope": {"level": "project", "projectId": self.environment["MEMLUME_PROJECT_ID"]},
+                "task": "Research the adapter.",
+                "contextBudget": 600,
+                "requestedBrainIds": [self.environment["MEMLUME_BRAIN_ID"]],
+            },
+        }])
+        self.assertNotIn(self.environment["MEMLUME_TOKEN"], repr(calls))
 
-        def runner(payload, _timeout):
-            calls.append(payload)
-            if payload["operation"] == "afterTask":
-                audited.set()
-            return {}
-
-        plugin = plugin_module.MemlumePlugin(environment=self.environment, runner=runner)
         for index in range(257):
-            plugin.pre_llm_call(session_id=f"unfinished-{index}", user_message="記住專案使用 pnpm")
-        plugin.post_llm_call(session_id="unfinished-0", assistant_response="這個已被淘汰。")
-        plugin.post_llm_call(session_id="unfinished-256", assistant_response="這個仍在快取內。")
+            plugin.subagent_start(parent_turn_id=f"parent-{index}", child_session_id=f"child-{index}")
+        self.assertLessEqual(len(plugin._child_sessions), 256)
 
-        self.assertTrue(audited.wait(0.3))
-        audits = [call for call in calls if call["operation"] == "afterTask"]
-        self.assertEqual([audit["envelope"]["sessionId"] for audit in audits], ["unfinished-256"])
 
     def test_pre_timeout_keeps_bridge_running_without_a_kill_timeout(self):
         plugin_module = importlib.import_module("memlume_plugin.plugin")
@@ -130,32 +130,6 @@ class HermesPluginTests(unittest.TestCase):
         release.set()
         self.assertTrue(completed.wait(0.3))
 
-    def test_finalization_without_session_flushes_last_envelope_once_and_bounds_completed_sessions(self):
-        plugin_module = importlib.import_module("memlume_plugin.plugin")
-        calls = []
-        flushed = threading.Event()
-
-        def runner(payload, _timeout):
-            calls.append(payload)
-            if payload["operation"] == "onSessionEnd":
-                flushed.set()
-            return {}
-
-        plugin = plugin_module.MemlumePlugin(environment=self.environment, runner=runner)
-        plugin.pre_llm_call(session_id="finalize-session", user_message="記住專案使用 pnpm")
-        plugin.on_session_finalize(session_id=None)
-
-        self.assertTrue(flushed.wait(0.3))
-        session_end = [call for call in calls if call["operation"] == "onSessionEnd"]
-        self.assertEqual(len(session_end), 1)
-        self.assertEqual(session_end[0]["envelope"]["sessionId"], "finalize-session")
-        plugin.on_session_end(session_id="finalize-session")
-        self.assertEqual(len([call for call in calls if call["operation"] == "onSessionEnd"]), 1)
-
-        for index in range(257):
-            plugin.on_session_end(session_id=f"finished-{index}")
-        self.assertLessEqual(len(plugin._finished_sessions), 256)
-
     def test_registers_general_plugin_hooks_without_touching_memory_provider(self):
         plugin_module = importlib.import_module("memlume_plugin.plugin")
         existing_provider = object()
@@ -171,7 +145,7 @@ class HermesPluginTests(unittest.TestCase):
         context = Context()
         plugin_module.register(context)
 
-        self.assertEqual(set(context.hooks), {"pre_llm_call", "post_llm_call", "on_session_end", "on_session_finalize"})
+        self.assertEqual(set(context.hooks), {"pre_llm_call", "subagent_start"})
         self.assertIs(context.memory_provider, existing_provider)
         manifest = (ADAPTER_ROOT / "plugin.yaml").read_text(encoding="utf-8")
         self.assertNotIn("memory_provider", manifest.lower())

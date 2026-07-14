@@ -150,6 +150,7 @@ describe('Adapter compatibility contract', () => {
     const client = new AdapterClient({
       daemonUrl: 'http://127.0.0.1:3849',
       token,
+      defaultWriteBrainId: brainId,
       outboxDirectory: temporaryDirectory(),
       fetch: async (input, init) => {
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;

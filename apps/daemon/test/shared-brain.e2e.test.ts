@@ -449,7 +449,7 @@ describe('shared brain adapter end-to-end flow', () => {
     })).resolves.toEqual({ ok: true, result: { status: 'rejected' } });
   });
 
-  test('flushes a queued Hermes bridge capture after a daemon restart without leaving an outbox lock', async () => {
+  test('flushes a queued Hermes bridge capture at the next task after a daemon restart without leaving an outbox lock', async () => {
     const { daemon, databasePath } = await start();
     const brainId = await createBrain(daemon);
     const hermes = await registerAdapter(daemon, 'hermes', 'hermes-offline-bridge');
@@ -475,9 +475,15 @@ describe('shared brain adapter end-to-end flow', () => {
     const restarted = await startDaemon({ databasePath, port: daemon.address.port, setupToken: SETUP_TOKEN });
     daemons.push(restarted);
     await expect(invokeHermesBridge(restarted, hermes.token, {
-      operation: 'onSessionEnd',
-      envelope: source,
-    }, outboxDirectory)).resolves.toEqual({ ok: true, result: [{ status: 'saved', memoryStatus: 'active' }] });
+      operation: 'beforeTask',
+      input: {
+        envelope: source,
+        intent: 'implementation',
+        scope: message.scope,
+        task: 'pnpm',
+        contextBudget: 100,
+      },
+    }, outboxDirectory)).resolves.toMatchObject({ ok: true, result: { intent: 'implementation' } });
     expect(existsSync(lockPath)).toBe(false);
 
     const reader = new AdapterClient({ daemonUrl: daemonUrl(restarted), token: hermes.token, outboxDirectory: temporaryDirectory() });
@@ -529,7 +535,13 @@ describe('shared brain adapter end-to-end flow', () => {
     const restarted = await startDaemon({ databasePath, port: 0, setupToken: SETUP_TOKEN });
     daemons.push(restarted);
     const retrying = new AdapterClient({ daemonUrl: daemonUrl(restarted), token: codex.token, outboxPath });
-    await expect(retrying.onSessionEnd()).resolves.toEqual([{ status: 'saved', memoryStatus: 'active' }]);
+    await expect(retrying.beforeTask({
+      envelope: source,
+      intent: 'implementation',
+      scope: { level: 'project', projectId: 'memlume' },
+      task: 'Retry pending work.',
+      contextBudget: 42,
+    })).resolves.toMatchObject({ intent: 'implementation' });
     await expect(retrying.outboxStatus()).resolves.toEqual({ state: 'empty', pending: 0, retry: 0, discarded: 0 });
   });
 });

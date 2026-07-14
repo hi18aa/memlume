@@ -35,10 +35,7 @@ async function handle(input) {
   if (configuration === undefined) return {};
 
   if (input.hook_event_name === 'UserPromptSubmit') return beforePrompt(input, configuration);
-  if (input.hook_event_name === 'Stop') return afterTurn(input, configuration);
-  if (input.hook_event_name === 'SessionEnd') {
-    backgroundWrite('session_end', configuration.envelope);
-  }
+  if (input.hook_event_name === 'SubagentStart') return beforeSubagent(input, configuration);
   return {};
 }
 
@@ -65,15 +62,23 @@ async function beforePrompt(input, configuration) {
     : { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext } };
 }
 
-async function afterTurn(input, configuration) {
-  const message = text(input.last_assistant_message);
-  if (message === undefined) return {};
-  backgroundWrite('audit', configuration.envelope, {
-    messageId: messageId('assistant', configuration.envelope.sessionId, message),
-    content: message,
-    brainId: configuration.brainId,
+async function beforeSubagent(input, configuration) {
+  const client = await createClient(configuration);
+  const subagentId = text(input.agent_id);
+  const context = await client.onSubagentStart({
+    envelope: configuration.envelope,
+    parentTaskId: configuration.envelope.sessionId,
+    ...(subagentId === undefined ? {} : { subagentId }),
+    intent: 'shared_memory',
+    scope: configuration.scope,
+    task: null,
+    contextBudget: CONTEXT_BUDGET,
+    requestedBrainIds: [configuration.brainId],
   });
-  return {};
+  const additionalContext = compactContext(context);
+  return additionalContext === undefined
+    ? {}
+    : { hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext } };
 }
 
 async function handleBackgroundWrite(input) {
@@ -83,10 +88,6 @@ async function handleBackgroundWrite(input) {
   const client = await createClient(configuration);
   if (input.operation === 'capture' && isRecord(input.message)) {
     await client.onUserMessage(configuration.envelope, input.message);
-  } else if (input.operation === 'audit' && isRecord(input.message)) {
-    await client.afterTask(configuration.envelope, input.message);
-  } else if (input.operation === 'session_end') {
-    await client.onSessionEnd(configuration.envelope);
   }
 }
 
@@ -152,6 +153,7 @@ async function createClient(configuration) {
   return new module.AdapterClient({
     daemonUrl: configuration.daemonUrl,
     token: configuration.token,
+    defaultWriteBrainId: configuration.brainId,
     ...(configuration.outboxDirectory === undefined ? {} : { outboxDirectory: configuration.outboxDirectory }),
     warn: () => undefined,
   });

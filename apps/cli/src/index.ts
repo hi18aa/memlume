@@ -1051,8 +1051,8 @@ function hostInstallationCommands(profile: AdapterProfile): readonly HostCommand
       return [
         { command: 'openclaw', args: ['plugins', 'install', '--link', join(profile.corePath, 'adapters', 'openclaw')] },
         { command: 'openclaw', args: ['plugins', 'enable', 'memlume-openclaw'] },
+        { command: 'openclaw', args: ['config', 'unset', 'plugins.entries.memlume-openclaw.hooks.allowConversationAccess'] },
         { command: 'openclaw', args: ['config', 'set', 'plugins.entries.memlume-openclaw.hooks.allowPromptInjection', 'true', '--strict-json'] },
-        { command: 'openclaw', args: ['config', 'set', 'plugins.entries.memlume-openclaw.hooks.allowConversationAccess', 'true', '--strict-json'] },
         { command: 'openclaw', args: ['config', 'set', 'plugins.entries.memlume-openclaw.config', JSON.stringify(openClawConfiguration(profile)), '--strict-json'] },
         { command: 'openclaw', args: ['gateway', 'restart'] },
         { command: 'openclaw', args: ['plugins', 'inspect', 'memlume-openclaw', '--runtime', '--json'] },

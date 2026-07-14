@@ -35,11 +35,10 @@ async function handle(input) {
   if (configuration === undefined) return {};
 
   if (input.hook_event_name === 'SessionStart') {
-    await createClient();
+    await createClient(configuration.brainId);
     return {};
   }
   if (input.hook_event_name === 'UserPromptSubmit') return beforePrompt(input, configuration);
-  if (input.hook_event_name === 'Stop') return afterTurn(input, configuration);
   return {};
 }
 
@@ -47,7 +46,7 @@ async function beforePrompt(input, configuration) {
   const prompt = text(input.prompt);
   const turnId = text(input.turn_id);
   if (prompt === undefined || turnId === undefined) return {};
-  const client = await createClient();
+  const client = await createClient(configuration.brainId);
   backgroundWrite('capture', configuration.envelope, {
     messageId: `codex:${configuration.envelope.sessionId}:${turnId}`,
     content: prompt,
@@ -66,25 +65,11 @@ async function beforePrompt(input, configuration) {
     : { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext } };
 }
 
-async function afterTurn(input, configuration) {
-  const turnId = text(input.turn_id);
-  const message = text(input.last_assistant_message);
-  if (turnId === undefined || message === undefined) return {};
-  backgroundWrite('audit', configuration.envelope, {
-    messageId: `codex:${configuration.envelope.sessionId}:${turnId}:assistant`,
-    content: message,
-    brainId: configuration.brainId,
-  });
-  return {};
-}
-
 async function handleBackgroundWrite(input) {
   if (!isRecord(input) || !isRecord(input.envelope) || !isRecord(input.message)) return;
-  const client = await createClient();
+  const client = await createClient(validBrainId(input.message.brainId));
   if (input.operation === 'capture') {
     await client.onUserMessage(input.envelope, input.message);
-  } else if (input.operation === 'audit') {
-    await client.afterTask(input.envelope, input.message);
   }
 }
 
@@ -119,12 +104,14 @@ function envelopeFor(input) {
   return { envelope, brainId, scope: { level: 'project', projectId } };
 }
 
-async function createClient() {
+async function createClient(brainId) {
   const { AdapterClient } = await loadAdapterSdk();
   const directory = outboxDirectory();
+  const defaultWriteBrainId = validBrainId(brainId);
   return new AdapterClient({
     daemonUrl: process.env.MEMLUME_DAEMON_URL ?? 'http://127.0.0.1:3849',
     token: process.env.MEMLUME_TOKEN,
+    ...(defaultWriteBrainId === undefined ? {} : { defaultWriteBrainId }),
     ...(directory === undefined ? {} : { outboxDirectory: directory }),
     writeTimeoutMs: WRITE_TIMEOUT_MS,
     warn: () => undefined,
@@ -174,6 +161,11 @@ function outboxDirectory() {
 
 function environmentText(name) {
   return text(process.env[name]);
+}
+
+function validBrainId(value) {
+  const candidate = text(value);
+  return candidate !== undefined && uuidV7.test(candidate) ? candidate : undefined;
 }
 
 function text(value) {

@@ -32,8 +32,7 @@ OpenClaw 設定中的 `corePath` 必須是完整 Memlume repository；Plugin 會
       "memlume-openclaw": {
         "enabled": true,
         "hooks": {
-          "allowPromptInjection": true,
-          "allowConversationAccess": true
+          "allowPromptInjection": true
         },
         "config": {
           "installationId": "your-installation-id",
@@ -49,7 +48,7 @@ OpenClaw 設定中的 `corePath` 必須是完整 Memlume repository；Plugin 會
 }
 ```
 
-`allowPromptInjection` 為 `false` 時，OpenClaw 會封鎖 `before_prompt_build` 的 Shared Context 注入。`agent_end` 需要 `allowConversationAccess: true` 才能讀取完成回合的 assistant output 並寫入 audit；未開啟時不會繞過 OpenClaw，也不會假裝已記錄 audit。設定後請重啟 Gateway。
+`allowPromptInjection` 為 `false` 時，OpenClaw 會封鎖 `before_prompt_build` 的 Shared Context 注入。設定後請重啟 Gateway。
 
 ## Hook 對應
 
@@ -57,12 +56,11 @@ OpenClaw 設定中的 `corePath` 必須是完整 Memlume repository；Plugin 會
 | --- | --- |
 | `before_prompt_build` | 呼叫 `beforeTask`，以 bounded Shared Context 回傳暫時 `prependContext`。內容明確是背景參考，系統、developer 與當前使用者指示永遠優先。 |
 | `message_received` | 呼叫 `onUserMessage`，將使用者訊息交給 Core 編譯與治理。 |
-| `agent_end` | 呼叫 `afterTask`，將最後 assistant 文字作為 task audit。 |
-| `session_end` | 呼叫 `onSessionEnd` 重送可安全重試的 outbox。 |
+| `subagent_spawned` | 只登錄子代理 session；子代理的第一個 `before_prompt_build` 會呼叫受 Project Brain 限制的 `onSubagentStart`。 |
 
 例如使用者說「`記住專案使用 pnpm`」時，Plugin 會以設定的 Project scope 與 Brain 交給 Memlume Core。Core 仍負責敏感資料過濾、候選審核、衝突處理與 mount 權限；Plugin 不能宣稱寫入已成功，也不會把 OpenClaw 私有記憶同步到 Memlume。
 
-若 daemon 暫時不可用，Shared Context 讀取會 fail-open，OpenClaw 照常執行。只有明確記憶請求會由 SDK 放進本機 outbox；一般 task audit 只作為觀測事件，絕不離線宣稱已保存。
+若 daemon 暫時不可用，Shared Context 讀取會 fail-open，OpenClaw 照常執行。只有明確記憶請求會由 SDK 放進本機 outbox。
 
 ## 驗證
 

@@ -157,7 +157,7 @@ describe('Codex plugin hook', () => {
     expect(plugin).toMatchObject({ name: 'memlume-codex', mcpServers: './.mcp.json', hooks: './hooks/hooks.json' });
     expect(mcp.mcpServers.memlume.args).toEqual(['./scripts/mcp.mjs']);
     expect(mcp.mcpServers.memlume.env_vars).toEqual(['MEMLUME_HOME', 'MEMLUME_TOKEN', 'MEMLUME_DAEMON_URL', 'MEMLUME_CONFIG_PATH']);
-    expect(Object.keys(hooks.hooks)).toEqual(['SessionStart', 'UserPromptSubmit', 'Stop']);
+    expect(Object.keys(hooks.hooks)).toEqual(['SessionStart', 'UserPromptSubmit']);
     expect(JSON.stringify(hooks)).toContain('PLUGIN_ROOT');
     expect(JSON.stringify(hooks)).toContain('commandWindows');
   });
@@ -289,15 +289,12 @@ describe('Codex plugin hook', () => {
     }
   });
 
-  test('records Stop as a turn audit and always returns an empty JSON object', async () => {
-    const events: Record<string, unknown>[] = [];
-    const server = createServer(async (request, response) => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of request) chunks.push(chunk as Buffer);
-      events.push(JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>);
+  test('does not register or send a Stop task audit', async () => {
+    const requests: string[] = [];
+    const server = createServer((request, response) => {
+      requests.push(request.url!);
       response.statusCode = 201;
-      response.setHeader('content-type', 'application/json');
-      response.end(JSON.stringify({ event: { id: '00000000-0000-7000-8000-000000000016', brainId } }));
+      response.end();
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     try {
@@ -308,13 +305,8 @@ describe('Codex plugin hook', () => {
       }, environment(`http://127.0.0.1:${address.port}`));
 
       expect(result).toEqual({ output: {}, stderr: '' });
-      await eventually(() => expect(events).toHaveLength(1));
-      expect(events[0]).toMatchObject({
-        eventType: 'task_completed',
-        rawContent: '已完成 pnpm 設定。',
-        brainId,
-        source: { messageId: 'codex:codex-session:turn-1:assistant' },
-      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(requests).toEqual([]);
     } finally {
       server.close();
     }
@@ -392,14 +384,16 @@ describe('Codex plugin hook', () => {
     }
   });
 
-  test('never uses a session-end callback and leaves missing configuration silent', async () => {
+  test('uses no unavailable child or legacy lifecycle callback and leaves missing configuration silent', async () => {
     const hook = copiedHook();
     const source = readFileSync(hook, 'utf8');
     const result = await invoke(hook, {
       hook_event_name: 'UserPromptSubmit', session_id: 'codex-session', turn_id: 'turn-1', prompt: '記住專案使用 pnpm',
     }, { ...process.env });
 
+    expect(source).not.toContain('afterTask');
     expect(source).not.toContain('onSessionEnd');
+    expect(source).not.toContain('SubagentStart');
     expect(result).toEqual({ output: {}, stderr: '' });
   });
 });
