@@ -412,6 +412,7 @@ describe('daemon local authentication and setup API', () => {
       method: 'POST',
       headers: adapterHeaders(writer.token),
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'This project uses pnpm.',
         eventType: 'user_statement',
         source: { type: 'test', reference: 'candidate-isolation' },

@@ -57,6 +57,30 @@ afterEach(async () => {
 });
 
 describe('localhost daemon API', () => {
+  test('rejects a capture without brainId before creating an event or memory', async () => {
+    const { daemon, headers, databasePath } = await startAdapterDaemon();
+
+    const capture = await requestJson(daemon, '/v1/memories/capture', {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        rawContent: 'remember this must name a brain',
+        eventType: 'user_statement',
+        source: { type: 'test', reference: 'capture:missing-brain' },
+        scope: { level: 'project', projectId: 'memlume' },
+      }),
+    });
+
+    expect(capture.response.status).toBe(400);
+    const database = openDatabase(databasePath);
+    try {
+      expect(database.prepare('SELECT COUNT(*) AS count FROM events').get()).toEqual({ count: 0 });
+      expect(database.prepare('SELECT COUNT(*) AS count FROM memory_items').get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
   test('redacts raw and nested structured credentials before direct event and capture writes reach SQLite', async () => {
     const { daemon, headers, databasePath } = await startAdapterDaemon();
     const secret = 'sk-live-never-persist-this';
@@ -75,6 +99,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'remember this project uses pnpm',
         eventType: 'user_statement',
         source: { type: 'test', reference: 'capture:redaction' },
@@ -113,6 +138,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'remember this project uses pnpm',
         eventType: 'user_statement',
         source: { type: 'test', messageId: secret },
@@ -142,6 +168,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: `remember API_KEY=${secret}`,
         eventType: 'user_statement',
         source: { type: 'test', reference: 'capture:secret' },
@@ -170,6 +197,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'remember this project uses pnpm',
         eventType: 'user_statement',
         source: { type: 'test', agent: 'daemon-test', reference: 'capture:pnpm' },
@@ -192,6 +220,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'Remember this   project uses pnpm.',
         eventType: 'user_statement',
         source: { type: 'test', agent: 'daemon-test', reference: 'capture:pnpm:retry' },
@@ -205,6 +234,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'remember this project uses npm',
         eventType: 'user_statement',
         source: { type: 'test', agent: 'daemon-test', reference: 'capture:npm' },
@@ -250,6 +280,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'This project uses pnpm.',
         eventType: 'user_statement',
         source: { type: 'test', reference: 'capture:candidate-pnpm' },
@@ -262,6 +293,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'remember this project uses pnpm.',
         eventType: 'user_statement',
         source: { type: 'test', reference: 'capture:confirmed-pnpm' },
@@ -294,6 +326,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'This project uses pnpm.',
         eventType: 'user_statement',
         source: { type: 'test', reference: 'capture:duplicate-candidate' },
@@ -343,6 +376,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'This project uses pnpm.',
         eventType: 'user_statement',
         source: { type: 'test', reference: 'capture:non-review' },
@@ -377,6 +411,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'This project uses bun.',
         eventType: 'user_statement',
         source: { type: 'test', reference: 'capture:reject-idempotent' },
@@ -467,6 +502,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'This project uses pnpm.',
         eventType: 'user_statement',
         source: { type: 'test', reference: 'console:reject' },
@@ -492,6 +528,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'This project uses bun.',
         eventType: 'user_statement',
         source: { type: 'test', reference: 'console:approve' },

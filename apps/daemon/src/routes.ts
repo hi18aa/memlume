@@ -44,6 +44,7 @@ const AppendEventRequestSchema = z
   .strict();
 
 const CaptureMemoryRequestSchema = AppendEventRequestSchema.extend({
+  brainId: UuidV7Schema,
   scope: MemoryScopeSchema,
 }).strict();
 
@@ -89,6 +90,7 @@ const ResolveContextRequestSchema = z
     contextBudget: z.number().int().nonnegative(),
     entities: z.array(NonEmptyTextSchema).optional(),
     availableTools: z.array(NonEmptyTextSchema).optional(),
+    requestedBrainIds: z.array(UuidV7Schema).min(1).optional(),
   })
   .strict();
 
@@ -396,7 +398,7 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
 
   app.post('/v1/memories/capture', requireAdapter, (request, response) => {
     const input = CaptureMemoryRequestSchema.parse(request.body);
-    const brainId = input.brainId ?? DEFAULT_PERSONAL_BRAIN_ID;
+    const brainId = input.brainId;
     if (!hasWriteAccess(response, services.brains, brainId)) {
       return;
     }
@@ -573,13 +575,14 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
       response.status(401).json({ error: 'unauthorized' });
       return;
     }
-    const input = ResolveContextRequestSchema.parse(request.body);
-    const brainIds = contextBrainIds(services.brains, installation.id);
-    if (brainIds.length === 0) {
+    const { requestedBrainIds, ...contextInput } = ResolveContextRequestSchema.parse(request.body);
+    const mountedBrainIds = contextBrainIds(services.brains, installation.id);
+    const brainIds = requestedBrainIds === undefined ? mountedBrainIds : [...new Set(requestedBrainIds)];
+    if (brainIds.length === 0 || brainIds.some((brainId) => !mountedBrainIds.includes(brainId))) {
       response.status(403).json({ error: 'forbidden' });
       return;
     }
-    const context = services.resolver.resolve({ ...input, brainIds });
+    const context = services.resolver.resolve({ ...contextInput, brainIds });
     try {
       services.outcomes.issueReceipt({
         traceId: context.traceId,

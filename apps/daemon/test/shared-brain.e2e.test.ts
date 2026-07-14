@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { AdapterClient } from '../../../packages/adapter-sdk/src/index.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { createUuidV7 } from '@memlume/contracts';
 import { openDatabase } from '@memlume/database/internal';
 import { afterEach, describe, expect, test } from 'vitest';
 
@@ -49,11 +50,15 @@ async function requestJson(
   return { response, body: (await response.json()) as Record<string, unknown> };
 }
 
-async function createBrain(daemon: RunningDaemon): Promise<string> {
+async function createBrain(
+  daemon: RunningDaemon,
+  kind: 'personal' | 'project' | 'domain' = 'project',
+  name = 'Shared project',
+): Promise<string> {
   const result = await requestJson(daemon, '/v1/setup/brains', {
     method: 'POST',
     headers: setupHeaders(),
-    body: JSON.stringify({ kind: 'project', name: 'Shared project' }),
+    body: JSON.stringify({ kind, name }),
   });
   expect(result.response.status).toBe(201);
   return (result.body.brain as { readonly id: string }).id;
@@ -87,6 +92,20 @@ async function mount(daemon: RunningDaemon, agentInstallationId: string, brainId
 
 function envelope(clientType: string, installationId: string) {
   return { clientType, installationId, profileId: 'default', sessionId: 'shared-session', projectId: 'memlume' };
+}
+
+function resolveContext(daemon: RunningDaemon, token: string, requestedBrainIds?: readonly string[]) {
+  return requestJson(daemon, '/v1/context/resolve', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      intent: 'implementation',
+      scope: { level: 'project', projectId: 'memlume' },
+      task: null,
+      contextBudget: 100,
+      ...(requestedBrainIds === undefined ? {} : { requestedBrainIds }),
+    }),
+  });
 }
 
 function invokeHermesBridge(daemon: RunningDaemon, token: string, payload: unknown, outboxDirectory?: string): Promise<unknown> {
@@ -125,7 +144,7 @@ function defaultOutboxLockPath(source: ReturnType<typeof envelope>, outboxDirect
   return join(outboxDirectory, 'outbox', `${createHash('sha256').update(identity).digest('hex')}.jsonl.lock`);
 }
 
-async function rememberThroughMcp(daemon: RunningDaemon, token: string, brainId: string): Promise<unknown> {
+async function rememberThroughMcp(daemon: RunningDaemon, token: string, brainId: string, canonicalText = 'Use pnpm for this shared project.'): Promise<unknown> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'memlume-shared-brain-e2e', version: '0.2.0' });
   const server = createMcpServer({ daemonUrl: daemonUrl(daemon), token });
@@ -136,7 +155,7 @@ async function rememberThroughMcp(daemon: RunningDaemon, token: string, brainId:
       arguments: {
         brainId,
         kind: 'policy',
-        canonicalText: 'Use pnpm for this shared project.',
+        canonicalText,
         structuredData: {
           trigger: { intents: ['implementation'] },
           action: { type: 'apply_process', target: 'pnpm' },
@@ -171,6 +190,116 @@ afterEach(async () => {
 });
 
 describe('shared brain adapter end-to-end flow', () => {
+  test('resolves default brain priority and exposes only the ordered requested brain subset', async () => {
+    const { daemon, databasePath } = await start();
+    const projectBrainId = await createBrain(daemon, 'project', 'Project');
+    const domainBrainId = await createBrain(daemon, 'domain', 'Company');
+    const personalBrainId = await createBrain(daemon, 'personal', 'Personal');
+    const adapter = await registerAdapter(daemon, 'codex', 'brain-routing');
+    await mount(daemon, adapter.id, personalBrainId, 'read_write');
+    await mount(daemon, adapter.id, domainBrainId, 'read_write');
+    await mount(daemon, adapter.id, projectBrainId, 'read_write');
+
+    const projectText = 'Use the project directive.';
+    const domainText = 'Use the domain directive.';
+    const personalText = 'Use the personal directive.';
+    const projectRemembered = await rememberThroughMcp(daemon, adapter.token, projectBrainId, projectText);
+    const domainRemembered = await rememberThroughMcp(daemon, adapter.token, domainBrainId, domainText);
+    const personalRemembered = await rememberThroughMcp(daemon, adapter.token, personalBrainId, personalText);
+    const projectMemoryId = (projectRemembered as { readonly structuredContent: { readonly memory: { readonly id: string } } }).structuredContent.memory.id;
+    const domainMemoryId = (domainRemembered as { readonly structuredContent: { readonly memory: { readonly id: string } } }).structuredContent.memory.id;
+    const personalMemoryId = (personalRemembered as { readonly structuredContent: { readonly memory: { readonly id: string } } }).structuredContent.memory.id;
+    await approveCandidate(daemon, projectMemoryId);
+    await approveCandidate(daemon, domainMemoryId);
+    await approveCandidate(daemon, personalMemoryId);
+
+    const defaultContext = await resolveContext(daemon, adapter.token);
+    const requestedContext = await resolveContext(daemon, adapter.token, [domainBrainId, projectBrainId, domainBrainId]);
+
+    expect(defaultContext.response.status).toBe(200);
+    expect(requestedContext.response.status).toBe(200);
+    expect(
+      (defaultContext.body.context as { readonly directives: readonly { readonly brainId: string; readonly text: string }[] }).directives
+        .map(({ brainId, text }) => ({ brainId, text })),
+    ).toEqual([
+      { brainId: projectBrainId, text: projectText },
+      { brainId: domainBrainId, text: domainText },
+      { brainId: personalBrainId, text: personalText },
+    ]);
+    expect(
+      (requestedContext.body.context as { readonly directives: readonly { readonly brainId: string; readonly text: string }[] }).directives
+        .map(({ brainId, text }) => ({ brainId, text })),
+    ).toEqual([
+      { brainId: domainBrainId, text: domainText },
+      { brainId: projectBrainId, text: projectText },
+    ]);
+    const defaultTraceId = (defaultContext.body.context as { readonly traceId: string }).traceId;
+    const requestedTraceId = (requestedContext.body.context as { readonly traceId: string }).traceId;
+
+    await daemon.stop();
+    const database = openDatabase(databasePath);
+    try {
+      const defaultReceipt = database
+        .prepare('SELECT brain_ids FROM context_receipts WHERE trace_id = ?')
+        .get(defaultTraceId) as { readonly brain_ids: string };
+      const requestedReceipt = database
+        .prepare('SELECT brain_ids FROM context_receipts WHERE trace_id = ?')
+        .get(requestedTraceId) as { readonly brain_ids: string };
+      expect(JSON.parse(defaultReceipt.brain_ids)).toEqual([projectBrainId, domainBrainId, personalBrainId]);
+      expect(JSON.parse(requestedReceipt.brain_ids)).toEqual([domainBrainId, projectBrainId]);
+    } finally {
+      database.close();
+    }
+  });
+
+  test('rejects a requested subset that includes an unmounted brain without issuing a receipt', async () => {
+    const { daemon, databasePath } = await start();
+    const mountedBrainId = await createBrain(daemon, 'project', 'Mounted');
+    const unmountedBrainId = await createBrain(daemon, 'domain', 'Unmounted');
+    const adapter = await registerAdapter(daemon, 'codex', 'restricted-routing');
+    await mount(daemon, adapter.id, mountedBrainId, 'read');
+
+    const context = await resolveContext(daemon, adapter.token, [mountedBrainId, unmountedBrainId]);
+
+    expect(context.response.status).toBe(403);
+    expect(context.body).toEqual({ error: 'forbidden' });
+    await daemon.stop();
+    const database = openDatabase(databasePath);
+    try {
+      expect(database.prepare('SELECT COUNT(*) AS count FROM context_receipts').get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  test('routes an unmounted requested brain collection to access control', async () => {
+    const { daemon } = await start();
+    const adapter = await registerAdapter(daemon, 'codex', 'unbounded-routing');
+
+    const context = await resolveContext(daemon, adapter.token, Array.from({ length: 65 }, () => createUuidV7()));
+
+    expect(context.response.status).toBe(403);
+    expect(context.body).toEqual({ error: 'forbidden' });
+  });
+
+  test('rejects an empty requested brain collection without issuing a receipt', async () => {
+    const { daemon, databasePath } = await start();
+    const brainId = await createBrain(daemon, 'project', 'Mounted');
+    const adapter = await registerAdapter(daemon, 'codex', 'empty-routing');
+    await mount(daemon, adapter.id, brainId, 'read');
+
+    const context = await resolveContext(daemon, adapter.token, []);
+
+    expect(context.response.status).toBe(400);
+    await daemon.stop();
+    const database = openDatabase(databasePath);
+    try {
+      expect(database.prepare('SELECT COUNT(*) AS count FROM context_receipts').get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
   test('shares a mounted project brain with another adapter but keeps an unmounted adapter isolated', async () => {
     const { daemon } = await start();
     const brainId = await createBrain(daemon);
