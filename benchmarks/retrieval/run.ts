@@ -30,7 +30,7 @@ const store = new MemoryStore(database);
 const resolver = new ContextResolver(store);
 
 database.prepare(`INSERT INTO brains (id, kind, name, created_at, updated_at) VALUES (?, 'project', ?, ?, ?)`).run(projectBrainId, 'Benchmark project', now, now);
-database.prepare(`INSERT INTO brains (id, kind, name, created_at, updated_at) VALUES (?, 'domain', ?, ?, ?)`).run(privateBrainId, 'Private domain', now, now);
+database.prepare(`INSERT INTO brains (id, kind, name, created_at, updated_at) VALUES (?, 'project', ?, ?, ?)`).run(privateBrainId, 'Private project', now, now);
 
 const memoryIds = new Map<string, string>();
 memoryIds.set('package-manager', store.save({

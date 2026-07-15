@@ -121,10 +121,10 @@ describe('Console API page states', () => {
   });
 
   test('creates a Brain with the in-memory setup token', async () => {
-    const fake = createFetch([{ status: 201, body: { brain: { id: 'brain-new', name: 'Frontend', kind: 'domain' } } }]);
+    const fake = createFetch([{ status: 201, body: { brain: { id: 'brain-new', name: 'Frontend', kind: 'project' } } }]);
     const api = createConsoleApi({ setupToken: 'local-setup-token', fetch: fake.fetch });
 
-    await expect(api.createBrain({ name: 'Frontend', kind: 'domain' })).resolves.toEqual({ id: 'brain-new', name: 'Frontend', kind: 'domain' });
+    await expect(api.createBrain({ name: 'Frontend', kind: 'project' })).resolves.toEqual({ id: 'brain-new', name: 'Frontend', kind: 'project' });
     expect(fake.requests[0]).toMatchObject({ path: '/v1/setup/brains' });
     expect(fake.requests[0]?.headers.get('content-type')).toBe('application/json');
     expect(fake.requests[0]?.headers.get('x-memlume-setup-token')).toBe('local-setup-token');

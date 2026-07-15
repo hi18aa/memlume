@@ -66,7 +66,7 @@ async function registerInstallation(
   return { id: installation.id, token: token as string };
 }
 
-async function createBrain(daemon: RunningDaemon, name: string, kind: 'personal' | 'project' | 'domain' = 'project'): Promise<string> {
+async function createBrain(daemon: RunningDaemon, name: string, kind: 'personal' | 'project' = 'project'): Promise<string> {
   const created = await requestJson(daemon, '/v1/setup/brains', {
     method: 'POST',
     headers: setupHeaders(),
@@ -518,7 +518,7 @@ describe('daemon local authentication and setup API', () => {
   test('resolves only a project mounted brain and excludes personal and domain brains', async () => {
     const daemon = await start({ setupToken: SETUP_TOKEN });
     const projectBrainId = await createBrain(daemon, 'Project');
-    const domainBrainId = await createBrain(daemon, 'Domain', 'domain');
+    const domainBrainId = await createBrain(daemon, 'Domain', 'project');
     const writer = await registerInstallation(daemon, 'all-brains-writer');
     const projectReader = await registerInstallation(daemon, 'project-reader');
     await mountBrain(daemon, writer.id, DEFAULT_PERSONAL_BRAIN_ID, 'read_write');
@@ -536,7 +536,7 @@ describe('daemon local authentication and setup API', () => {
   test('orders mounted context brains as project, domain, then personal', async () => {
     const daemon = await start({ setupToken: SETUP_TOKEN });
     const projectBrainId = await createBrain(daemon, 'Project');
-    const domainBrainId = await createBrain(daemon, 'Domain', 'domain');
+    const domainBrainId = await createBrain(daemon, 'Domain', 'project');
     const installation = await registerInstallation(daemon, 'ordered-reader');
     await mountBrain(daemon, installation.id, DEFAULT_PERSONAL_BRAIN_ID, 'read_write');
     await mountBrain(daemon, installation.id, domainBrainId, 'read_write');

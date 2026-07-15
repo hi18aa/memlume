@@ -18,7 +18,7 @@ import * as resolverModule from '../src/index.js';
 import * as retrieval from '../../retrieval/src/index.js';
 
 type MemoryDraft = {
-  readonly brainId?: string;
+  readonly brainId: string;
   readonly kind: 'policy' | 'preference' | 'fact' | 'decision';
   readonly canonicalText: string;
   readonly structuredData: Record<string, unknown>;
@@ -88,7 +88,7 @@ function insertProcedure(
   database: SqliteDatabase,
   trigger: Record<string, unknown>,
   scope: MemoryScope = { level: 'global' },
-  brainId = DEFAULT_PERSONAL_BRAIN_ID,
+  brainId: string,
 ): MemoryItem {
   const now = new Date().toISOString();
   const memory = MemoryItemSchema.parse({
@@ -138,7 +138,7 @@ function insertProcedure(
   return memory;
 }
 
-function insertBrain(database: SqliteDatabase, id: string, kind: 'project' | 'domain', name: string): void {
+function insertBrain(database: SqliteDatabase, id: string, kind: 'project', name: string): void {
   const now = new Date().toISOString();
   database
     .prepare('INSERT INTO brains (id, kind, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
@@ -158,6 +158,7 @@ describe('ContextResolver', () => {
   test('uses explainable outcome feedback as a tie-breaker without changing memory history', () => {
     const { store, outcomes, resolver } = createResolver();
     const lessUsed = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'Use the general image route.',
       structuredData: policy('general-image-route'),
@@ -165,6 +166,7 @@ describe('ContextResolver', () => {
       priority: 0,
     });
     const adopted = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'Use the tested image route.',
       structuredData: policy('tested-image-route'),
@@ -187,6 +189,7 @@ describe('ContextResolver', () => {
   test('places a project policy before a global policy and returns traceable context', () => {
     const { store, resolver } = createResolver();
     const global = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'Use the general image route.',
       structuredData: policy('general-image-route'),
@@ -194,6 +197,7 @@ describe('ContextResolver', () => {
       priority: 999,
     });
     const project = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'Use the Memlume image route.',
       structuredData: policy('memlume-image-route', { required: true }),
@@ -222,10 +226,11 @@ describe('ContextResolver', () => {
     const domainBrainId = createUuidV7();
     const excludedBrainId = createUuidV7();
     insertBrain(database, projectBrainId, 'project', 'Memlume');
-    insertBrain(database, domainBrainId, 'domain', 'Design');
-    insertBrain(database, excludedBrainId, 'domain', 'Private');
+    insertBrain(database, domainBrainId, 'project', 'Design');
+    insertBrain(database, excludedBrainId, 'project', 'Private');
 
     const personal = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'Use the personal route.',
       structuredData: policy('personal-route'),
@@ -287,6 +292,7 @@ describe('ContextResolver', () => {
       priority: -100,
     });
     const personal = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'Use the personal route.',
       structuredData: policy('personal-route'),
@@ -322,6 +328,7 @@ describe('ContextResolver', () => {
       priority: -100,
     });
     const personal = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'This required personal route intentionally exceeds the tiny context budget.',
       structuredData: policy('personal-route', { required: true }),
@@ -347,7 +354,7 @@ describe('ContextResolver', () => {
     const projectBrainId = createUuidV7();
     const excludedBrainId = createUuidV7();
     insertBrain(database, projectBrainId, 'project', 'Memlume');
-    insertBrain(database, excludedBrainId, 'domain', 'Private');
+    insertBrain(database, excludedBrainId, 'project', 'Private');
 
     const projectPolicy = store.save({
       brainId: projectBrainId,
@@ -441,6 +448,7 @@ describe('ContextResolver', () => {
   test('does not fall back to the personal brain for an empty trusted allowlist', () => {
     const { store, resolver } = createResolver();
     store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'This personal route must not leak through an empty allowlist.',
       structuredData: policy('personal-route'),
@@ -471,12 +479,13 @@ describe('ContextResolver', () => {
       requiredToolAvailability: ['image-tool'],
     };
     const guardedPolicy = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'Use the guarded image route.',
       structuredData: { ...policy('guarded-image-route'), trigger },
       scope: { level: 'global' },
     });
-    const guardedProcedure = insertProcedure(database, trigger);
+    const guardedProcedure = insertProcedure(database, trigger, { level: 'global' }, DEFAULT_PERSONAL_BRAIN_ID);
 
     const missing = resolver.resolve({
       intent: 'image_generation',
@@ -523,6 +532,7 @@ describe('ContextResolver', () => {
     const { store, resolver } = createResolver();
     const today = new Date().toISOString().slice(0, 10);
     store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'This future route must not be included.',
       structuredData: policy('future-route'),
@@ -530,6 +540,7 @@ describe('ContextResolver', () => {
       validFrom: '2999-01-01',
     });
     store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'This expired route must not be included.',
       structuredData: policy('expired-route'),
@@ -537,6 +548,7 @@ describe('ContextResolver', () => {
       validUntil: '2000-01-01',
     });
     store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       title: 'Future fact',
       canonicalText: 'The timed logo fact is only true in the future.',
@@ -545,6 +557,7 @@ describe('ContextResolver', () => {
       validFrom: '2999-01-01',
     });
     store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       title: 'Expired fact',
       canonicalText: 'The timed logo fact is no longer true.',
@@ -553,6 +566,7 @@ describe('ContextResolver', () => {
       validUntil: '2000-01-01',
     });
     const current = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       title: 'Current fact',
       canonicalText: 'The timed logo fact is true today.',
@@ -578,6 +592,7 @@ describe('ContextResolver', () => {
   test('applies fact payload validity dates to FTS results', () => {
     const { store, resolver } = createResolver();
     store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       title: 'Future payload fact',
       canonicalText: 'The payload timed logo fact only applies in the future.',
@@ -591,6 +606,7 @@ describe('ContextResolver', () => {
       scope: { level: 'global' },
     });
     store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       title: 'Expired payload fact',
       canonicalText: 'The payload timed logo fact no longer applies.',
@@ -617,6 +633,7 @@ describe('ContextResolver', () => {
   test('lets the highest-ranked exclusive route tool exclude conflicting routes', () => {
     const { store, resolver } = createResolver();
     const global = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'Use the global image route.',
       structuredData: policy('global-image-route', { exclusive: true }),
@@ -624,6 +641,7 @@ describe('ContextResolver', () => {
       priority: 999,
     });
     const project = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'Use the exclusive project image route.',
       structuredData: policy('project-image-route', { exclusive: true }),
@@ -647,6 +665,7 @@ describe('ContextResolver', () => {
   test('prioritizes a project route over a global exclusive route and explains the winner', () => {
     const { store, resolver } = createResolver();
     const global = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'Use the global route even when a project route is more specific.',
       structuredData: policy('global-image-route', { exclusive: true }),
@@ -654,6 +673,7 @@ describe('ContextResolver', () => {
       priority: 999,
     });
     const project = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'Use the project route, whose long text exceeds the tiny budget.',
       structuredData: policy('project-image-route'),
@@ -680,12 +700,14 @@ describe('ContextResolver', () => {
   test('excludes inactive and scope-mismatched memories', () => {
     const { database, store, resolver } = createResolver();
     const inactive = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'This archived route must not be included.',
       structuredData: policy('archived-route'),
       scope: { level: 'global' },
     });
     store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'This belongs to another project.',
       structuredData: policy('other-project-route'),
@@ -707,6 +729,7 @@ describe('ContextResolver', () => {
   test('adds applicable preferences, FTS facts, and decisions as traceable evidence', () => {
     const { store, resolver } = createResolver();
     const preference = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'preference',
       canonicalText: 'Prefer a legible mark with clean geometry.',
       structuredData: {
@@ -721,6 +744,7 @@ describe('ContextResolver', () => {
       scope: { level: 'global' },
     });
     const fact = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       title: 'Source art size',
       canonicalText: 'Use 1024px source art for a logo image.',
@@ -728,6 +752,7 @@ describe('ContextResolver', () => {
       scope: { level: 'global' },
     });
     const decision = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'decision',
       canonicalText: 'Use SVG as the source format.',
       structuredData: {
@@ -756,6 +781,7 @@ describe('ContextResolver', () => {
   test('keeps mandatory directives when the explicit context budget is too small', () => {
     const { store, resolver } = createResolver();
     const mandatory = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'Always use the required image route before any optional advice.',
       structuredData: policy('required-image-route', { exclusive: true }),
@@ -763,6 +789,7 @@ describe('ContextResolver', () => {
       priority: 1,
     });
     store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'This optional route should not fit the budget.',
       structuredData: policy('optional-image-route'),
@@ -792,6 +819,7 @@ describe('ContextResolver', () => {
   test('records optional memories omitted by a tiny context budget', () => {
     const { store, resolver } = createResolver();
     const optional = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'This optional route must be omitted.',
       structuredData: policy('optional-image-route'),

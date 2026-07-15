@@ -52,7 +52,7 @@ async function requestJson(
 
 async function createBrain(
   daemon: RunningDaemon,
-  kind: 'personal' | 'project' | 'domain' = 'project',
+  kind: 'personal' | 'project' = 'project',
   name = 'Shared project',
 ): Promise<string> {
   const result = await requestJson(daemon, '/v1/setup/brains', {
@@ -193,7 +193,7 @@ describe('shared brain adapter end-to-end flow', () => {
   test('resolves default brain priority and exposes only the ordered requested brain subset', async () => {
     const { daemon, databasePath } = await start();
     const projectBrainId = await createBrain(daemon, 'project', 'Project');
-    const domainBrainId = await createBrain(daemon, 'domain', 'Company');
+    const domainBrainId = await createBrain(daemon, 'project', 'Company');
     const personalBrainId = await createBrain(daemon, 'personal', 'Personal');
     const adapter = await registerAdapter(daemon, 'codex', 'brain-routing');
     await mount(daemon, adapter.id, personalBrainId, 'read_write');
@@ -255,7 +255,7 @@ describe('shared brain adapter end-to-end flow', () => {
   test('rejects a requested subset that includes an unmounted brain without issuing a receipt', async () => {
     const { daemon, databasePath } = await start();
     const mountedBrainId = await createBrain(daemon, 'project', 'Mounted');
-    const unmountedBrainId = await createBrain(daemon, 'domain', 'Unmounted');
+    const unmountedBrainId = await createBrain(daemon, 'project', 'Unmounted');
     const adapter = await registerAdapter(daemon, 'codex', 'restricted-routing');
     await mount(daemon, adapter.id, mountedBrainId, 'read');
 
