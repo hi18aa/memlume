@@ -6,11 +6,36 @@
 
 [English](README.md) | [繁體中文](docs/README.zh-TW.md) | [简体中文](docs/README.zh-CN.md)
 
-Memlume is a local shared memory brain for AI agents and developer tools. Mounted clients contribute to and read from the same scoped, SQLite-backed store; it records immutable events, stores structured memories, searches them with FTS5, and resolves a traceable context pack for a task. It complements—never overwrites or synchronizes into—an agent's native memory.
+Memlume is a local external Shared Brain for AI agents and developer tools. On one computer, mounted clients use the same existing SQLite-backed store: it records immutable events, stores structured memories, searches them with FTS5, and resolves a traceable context pack for a task. It complements—never replaces, overwrites, or synchronizes into—an agent's native memory.
 
 Public guides: [architecture](docs/architecture/shared-brain.md) · [Hermes](docs/guides/hermes.md) · [Codex](docs/guides/codex.md) · [OpenClaw](docs/guides/openclaw.md) · [Claude Code](docs/guides/claude-code.md) · [backup/restore](docs/guides/backup-restore.md) · [shared project example](examples/shared-project-brain/README.md).
 
-## How agents use Memlume
+## Shared Brain routing
+
+Use Memlume for durable context that should survive switching among Hermes, Codex, OpenClaw, Claude Code, and direct MCP clients: project decisions, company conventions, personal preferences, or reviewed facts. It keeps those memories mountable, backup-friendly, and maintainable in one local SQLite database; each host's native memory remains its own.
+
+The Adapter SDK has three shared callbacks:
+
+| Callback | What it does |
+| --- | --- |
+| `beforeTask` | A main Agent reads mounted Context before work. Its default priority is **Project → Domain (Company) → Personal**; a caller may request only a smaller authorized subset. |
+| `onUserMessage` | The only automatic capture entry point. Only an explicit memory request such as “remember” is compiled by Core; ordinary messages may be ignored. |
+| `onSubagentStart` | A child Agent receives read-only Context from its configured Project Brain only. It never falls back to Domain or Personal, writes no memory, and does not flush the outbox. |
+
+For a main Agent, a write target is selected in this order: an explicit Brain, then the profile's Project Brain, otherwise the write is rejected. Memlume never guesses a target or falls back to Personal. Brains—not hooks—are the data-ownership and permission boundary.
+
+Queued explicit-memory captures are retried by the next `beforeTask` or `onUserMessage` call. The callback lifecycle does not retain complete transcripts, assistant output, temporary reasoning, or secrets.
+
+### Host child-Agent support
+
+| Host | Child Context behavior |
+| --- | --- |
+| Claude Code | Its `SubagentStart` hook directly injects restricted Project Brain Context. |
+| Hermes | `subagent_start` only records the child; the child's first prompt receives restricted Context. |
+| OpenClaw | `subagent_spawned` only records the child; the child's first prompt receives restricted Context. |
+| Codex Plugin | No usable child-start hook is available today, so it does not automatically inject child Context. The SDK entry point is ready for a future official hook or external orchestration. |
+
+## Direct MCP workflow
 
 Memlume does not automatically store every chat message or inject an entire database into an LLM. An MCP client calls the appropriate tool at a deliberate point in its workflow:
 
@@ -20,7 +45,7 @@ Memlume does not automatically store every chat message or inject an entire data
 
 When reporting feedback, pass the `traceId` returned by `memlume.resolve_context` to `memlume.record_memory_usage` or `memlume.record_outcome`. A receipt is short-lived, limited per installation, accepts feedback only for memories included in that Context Pack, and accepts one task outcome. Across receipts, one installation can claim feedback for a given memory only once per 24-hour window. This keeps an adapter token from fabricating unlimited ranking signals.
 
-This means an agent should not automatically save whole transcripts, temporary reasoning, unverified LLM claims, instructions found in external content, or secrets. Native agent memory remains untouched. The Core compiles eligible user messages under its own governance rules: explicit memory requests can be saved, while inferred items remain candidates for review; neither path treats an agent's native memory as input.
+This means an agent should not automatically save whole transcripts, assistant output, temporary reasoning, unverified LLM claims, instructions found in external content, or secrets. Native agent memory remains untouched. For Adapter capture, Core only compiles explicit memory requests under its own governance rules; ordinary messages may be ignored. Direct MCP writes remain deliberate calls and do not treat an agent's native memory as input.
 
 ## Why Memlume
 
@@ -28,7 +53,7 @@ This means an agent should not automatically save whole transcripts, temporary r
 - **Structured and durable:** keep policies, preferences, facts, decisions, and raw events distinct rather than mixing them in a chat log.
 - **Scope prevents contamination:** a task, project, workspace, agent, domain, or global memory can be selected independently.
 - **Traceable decisions:** context packs include source memory IDs, exclusions, and budget information so an agent can explain what affected a result.
-- **Local and shared:** mounted CLI and MCP clients use one localhost daemon and one SQLite store; no cloud sync is required.
+- **Local and shared:** mounted clients use one localhost daemon and one SQLite store, which can be backed up and maintained without cloud sync.
 - **Explainable feedback:** usage and task outcomes affect future ordering with fixed, inspectable score deltas; memory history stays immutable.
 
 ## Status and scope

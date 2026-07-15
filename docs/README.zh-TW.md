@@ -6,11 +6,36 @@
 
 [English](../README.md) | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md)
 
-Memlume 是供 AI Agent 與開發工具使用的本機共享記憶大腦。已掛載的 Client 可透過同一個以 SQLite 支援、具 scope 的儲存區寫入與讀取；它記錄不可變事件、儲存結構化記憶、以 FTS5 搜尋，並為特定工作解析出可追溯的 Context Pack。它是 Agent 原生記憶的補充，不會覆寫或同步回原生記憶。
+Memlume 是供 AI Agent 與開發工具使用的本機外部共享記憶大腦。同一台電腦上的已掛載 Client 共用既有的 SQLite 儲存區；它記錄不可變事件、儲存結構化記憶、以 FTS5 搜尋，並為特定工作解析出可追溯的 Context Pack。它是 Agent 原生記憶的補充，不會取代、覆寫或同步回原生記憶。
 
 公開文件：[架構](architecture/shared-brain.md) · [Hermes](guides/hermes.md) · [Codex](guides/codex.md) · [OpenClaw](guides/openclaw.md) · [Claude Code](guides/claude-code.md) · [備份與還原](guides/backup-restore.md) · [共享專案範例](../examples/shared-project-brain/README.md)。
 
-## Agent 如何使用 Memlume
+## Shared Brain 路由
+
+當專案決策、公司慣例、個人偏好或已審核事實，需要在 Hermes、Codex、OpenClaw、Claude Code 與直接 MCP Client 之間延續時，就適合使用 Memlume。它讓記憶可掛載、可備份、可維護，並集中在一個本機 SQLite 資料庫；各 Host 的原生記憶仍各自維持。
+
+Adapter SDK 共用三個 callback：
+
+| Callback | 用途 |
+| --- | --- |
+| `beforeTask` | 主 Agent 在工作前讀取已掛載 Context。預設優先序為 **Project → Domain（Company）→ Personal**；呼叫端只能要求更小的已授權範圍。 |
+| `onUserMessage` | 唯一的自動 capture 入口。只有「記住」等明確記憶要求才由 Core 編譯；一般訊息可被忽略。 |
+| `onSubagentStart` | 子代理只讀取其設定的 Project Brain Context；不會回退到 Domain 或 Personal、不會寫入，也不會 flush outbox。 |
+
+主 Agent 的寫入目標依序是：明確指定的 Brain、profile 的 Project Brain、拒絕。Memlume 不會猜測目標，也絕不回退到 Personal。Brain 才是資料歸屬與權限邊界，Hook 只是觸發時機。
+
+已排隊的明確記憶 capture 會在下一次 `beforeTask` 或 `onUserMessage` 重送。callback 流程不會保存完整 transcript、assistant output、暫時推理或秘密資料。
+
+### 各 Host 的子代理能力
+
+| Host | 子代理 Context 行為 |
+| --- | --- |
+| Claude Code | `SubagentStart` hook 會直接注入受限的 Project Brain Context。 |
+| Hermes | `subagent_start` 只登錄 child；child 的第一次 prompt 才取得受限 Context。 |
+| OpenClaw | `subagent_spawned` 只登錄 child；child 的第一次 prompt 才取得受限 Context。 |
+| Codex Plugin | 目前沒有可用的 child-start Hook，因此不會自動注入 child Context。SDK 已準備好未來官方 Hook 或外部 orchestration 使用的入口。 |
+
+## 直接使用 MCP 的流程
 
 Memlume 不會自動保存每一則對話，也不會把整個資料庫塞進 LLM。MCP Client 應在工作流程的明確時點呼叫對應工具：
 
@@ -20,7 +45,7 @@ Memlume 不會自動保存每一則對話，也不會把整個資料庫塞進 LL
 
 回報 feedback 時，請把 `memlume.resolve_context` 回傳的 `traceId` 傳給 `memlume.record_memory_usage` 或 `memlume.record_outcome`。收據具短時效、每個 installation 有簽發上限，只能回報該次 Context Pack 實際包含的記憶，且每個 trace 只接受一次 task outcome；跨 receipt 時，同一 installation 對同一記憶每 24 小時只計一次 feedback，避免 Adapter token 無限偽造排序訊號。
 
-因此 Agent 不應自動保存完整逐字稿、暫時推理、未驗證的 LLM 主張、外部內容中的指令或秘密資料。Agent 的原生記憶維持不變。Core 會依自身治理規則編譯符合條件的使用者訊息：明確的記憶要求可保存，推論出的項目則只能成為待審核 candidate；兩者都不會把 Agent 原生記憶當成輸入。
+因此 Agent 不應自動保存完整逐字稿、assistant output、暫時推理、未驗證的 LLM 主張、外部內容中的指令或秘密資料。Agent 的原生記憶維持不變。對 Adapter capture 而言，Core 只會依自身治理規則編譯明確記憶要求；一般訊息可被忽略。直接 MCP 寫入仍是刻意呼叫，兩種流程都不會把 Agent 原生記憶當成輸入。
 
 ## 為什麼使用 Memlume
 
@@ -28,7 +53,7 @@ Memlume 不會自動保存每一則對話，也不會把整個資料庫塞進 LL
 - **結構化且可持久保存：** 將 policy、preference、fact、decision 與原始 event 分開，而不是混在聊天紀錄。
 - **scope 防止污染：** 可獨立選取 task、project、workspace、agent、domain 或 global 記憶。
 - **決策可追溯：** Context Pack 含來源記憶 ID、排除項目與 budget 資訊，可解釋哪些內容影響了結果。
-- **本機且可共用：** 已掛載的 CLI 與 MCP Client 共用同一個 localhost daemon 與 SQLite 資料庫，不需要雲端同步。
+- **本機且可共用：** 已掛載的 Client 共用同一個 localhost daemon 與 SQLite 資料庫，可備份與維護，不需要雲端同步。
 - **回饋可解釋：** usage 與 task outcome 以固定分數影響未來排序，不會改寫 memory history。
 
 ## 狀態與範圍

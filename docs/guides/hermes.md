@@ -1,6 +1,6 @@
 # Hermes Adapter
 
-Hermes Adapter 使用 `adapters/hermes/bridge.mjs` 與 Python plugin 將 Hermes lifecycle 轉成 Memlume Core 的共用 Adapter SDK。
+Hermes Adapter 使用 `adapters/hermes/bridge.mjs` 與 Python plugin，將 Hermes 的 Hook 差異轉成 Memlume Core 的共用 Adapter SDK。
 
 ## 設定
 
@@ -18,7 +18,11 @@ Profile 會放在使用者設定目錄；token 不會寫入 Git。`MEMLUME_DAEMO
 
 ## 流程
 
-每次任務前讀取 Context Pack；使用者明確的「記住」訊息經 `/v1/memories/capture` 寫入；需要回報 usage/outcome 時，使用同一次 Context Pack 的 `traceId`。暫時離線時，安全且不含秘密的寫入會進入 installation-specific outbox，恢復後重送。Hermes 原生記憶仍由 Hermes 自己管理。
+主 Agent 的 `pre_llm_call` 會以 `beforeTask` 讀取已掛載 Context，預設優先序為 **Project → Domain（Company）→ Personal**；也會以 `onUserMessage` 送出使用者訊息。只有明確「記住」類要求才可能由 Core 形成 memory，一般訊息可被忽略。主 Agent 寫入採明確 Brain → profile Project Brain → 拒絕，絕不回退 Personal。
+
+Hermes 的 `subagent_start` 是 observer：它只登錄 child 識別值，不會直接注入 Context、寫入記憶或 flush outbox。child 的第一次 `pre_llm_call` 才呼叫只讀的 `onSubagentStart`，且只取得 Project Brain Context，不會讀取 Domain 或 Personal。Brain 是資料歸屬與權限邊界，Hook 只決定觸發時機。
+
+暫時離線時，安全且不含秘密的明確記憶才會進入 installation-specific outbox，並在下一次 `beforeTask` 或 `onUserMessage` 重送。完整 transcript、assistant output、暫時推理與秘密資料不會自動保存。Hermes 原生記憶仍由 Hermes 自己管理。
 
 ## 檢查
 
