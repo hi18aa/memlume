@@ -19,12 +19,12 @@ The Adapter SDK has three shared callbacks:
 | Callback | What it does |
 | --- | --- |
 | `beforeTask` | A main Agent reads mounted Context before work. Its default priority is **Project → Domain (Company) → Personal**; a caller may request only a smaller authorized subset. |
-| `onUserMessage` | The only automatic capture entry point. Only an explicit memory request such as “remember” is compiled by Core; ordinary messages may be ignored. |
+| `onUserMessage` | Memlume's single automatic capture entry point. Non-sensitive user messages are sent to Core and appended as immutable events. Under governance, a normal user statement can become a reviewable `candidate`; an explicit request such as “remember” can take the `active` path, still subject to conflict review. Empty or unsupported events may be ignored, and sensitive content is redacted or rejected. |
 | `onSubagentStart` | A child Agent receives read-only Context from its configured Project Brain only. It never falls back to Domain or Personal, writes no memory, and does not flush the outbox. |
 
 For a main Agent, a write target is selected in this order: an explicit Brain, then the profile's Project Brain, otherwise the write is rejected. Memlume never guesses a target or falls back to Personal. Brains—not hooks—are the data-ownership and permission boundary.
 
-Queued explicit-memory captures are retried by the next `beforeTask` or `onUserMessage` call. The callback lifecycle does not retain complete transcripts, assistant output, temporary reasoning, or secrets.
+The local outbox accepts explicit-memory captures only; queued captures are retried by the next `beforeTask` or `onUserMessage` call. The callback lifecycle does not retain complete transcripts, assistant output, temporary reasoning, or secrets.
 
 ### Host child-Agent support
 
@@ -45,7 +45,7 @@ Memlume does not automatically store every chat message or inject an entire data
 
 When reporting feedback, pass the `traceId` returned by `memlume.resolve_context` to `memlume.record_memory_usage` or `memlume.record_outcome`. A receipt is short-lived, limited per installation, accepts feedback only for memories included in that Context Pack, and accepts one task outcome. Across receipts, one installation can claim feedback for a given memory only once per 24-hour window. This keeps an adapter token from fabricating unlimited ranking signals.
 
-This means an agent should not automatically save whole transcripts, assistant output, temporary reasoning, unverified LLM claims, instructions found in external content, or secrets. Native agent memory remains untouched. For Adapter capture, Core only compiles explicit memory requests under its own governance rules; ordinary messages may be ignored. Direct MCP writes remain deliberate calls and do not treat an agent's native memory as input.
+This means an agent should not automatically save whole transcripts, assistant output, temporary reasoning, unverified LLM claims, instructions found in external content, or secrets. Native agent memory remains untouched. For Adapter capture, Core appends non-sensitive user messages as immutable events; governance can turn a normal statement into a reviewable `candidate`, while an explicit memory request can take the `active` path and still undergo conflict review. Empty or unsupported events may be ignored, and sensitive content is redacted or rejected. Direct MCP writes remain deliberate calls and do not treat an agent's native memory as input.
 
 ## Why Memlume
 
@@ -207,7 +207,7 @@ Build first, keep the daemon running, then add an entry like this to your MCP cl
 - `memlume.record_memory_usage`
 - `memlume.record_outcome`
 
-`memlume.record_event` and `memlume.remember` accept an optional `brainId` to select a destination shared Brain. It is not an authorization grant: `MEMLUME_TOKEN` identifies the installation, and the daemon accepts the write only when that installation has a `read_write` mount for the selected Brain. `memlume.remember` returns `status: "candidate"` because structured writes require protected review; adapter capture of an explicit user message can still follow the Core compiler's explicit-user path. The direct MCP server has no local outbox, so it never claims `queued`; an Adapter may use `queued` only after it has actually persisted a retryable write locally. `record_memory_usage` and `record_outcome` are append-only feedback signals, not memory edits, and must use the `traceId` returned by `memlume.resolve_context`.
+`memlume.record_event` and `memlume.remember` accept an optional `brainId` to select a destination shared Brain. It is not an authorization grant: `MEMLUME_TOKEN` identifies the installation, and the daemon accepts the write when that installation has a `read_write` mount for the selected Brain. `memlume.remember` returns `status: "candidate"` because structured writes require protected review; adapter capture of an explicit user message can still follow the Core compiler's explicit-user path. The direct MCP server has no local outbox, so it never claims `queued`; an Adapter may use `queued` after it has actually persisted a retryable write locally. `record_memory_usage` and `record_outcome` are append-only feedback signals, not memory edits, and must use the `traceId` returned by `memlume.resolve_context`.
 
 For example, an MCP client can call `memlume.resolve_context` with:
 

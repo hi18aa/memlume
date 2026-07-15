@@ -55,12 +55,12 @@ OpenClaw 設定中的 `corePath` 必須是完整 Memlume repository；Plugin 會
 | OpenClaw typed hook | Memlume 行為 |
 | --- | --- |
 | `before_prompt_build`（主 Agent） | 呼叫 `beforeTask`，以已掛載的 **Project → Domain（Company）→ Personal** bounded Shared Context 回傳暫時 `prependContext`。內容明確是背景參考，系統、developer 與當前使用者指示永遠優先。 |
-| `message_received` | 呼叫 `onUserMessage`，將使用者訊息交給 Core 編譯與治理；只有明確記憶要求才可能形成 memory。 |
+| `message_received` | 呼叫 `onUserMessage`，將非敏感使用者訊息送到 Core 並追加 immutable event；依治理規則，非明確陳述可成為待審核 `candidate`，明確「記住」類要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。 |
 | `subagent_spawned` | 只登錄子代理 session；子代理的第一個 `before_prompt_build` 才會呼叫只讀且受 Project Brain 限制的 `onSubagentStart`，不會讀取 Domain 或 Personal。 |
 
-例如使用者說「`記住專案使用 pnpm`」時，Plugin 會以設定的 Project scope 與 Brain 交給 Memlume Core。一般訊息可被忽略；完整 transcript、assistant output、暫時推理與秘密資料不會形成自動 capture。Core 仍負責敏感資料過濾、候選審核、衝突處理與 mount 權限；Plugin 不能宣稱寫入已成功，也不會把 OpenClaw 私有記憶同步到 Memlume。
+例如使用者說「`記住專案使用 pnpm`」時，Plugin 會以設定的 Project scope 與 Brain 交給 Memlume Core。非敏感使用者訊息會追加 immutable event；依治理規則，非明確陳述可成為待審核 `candidate`，明確要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。完整 transcript、assistant output 與暫時推理不會形成自動 capture。Core 仍負責敏感資料過濾、候選審核、衝突處理與 mount 權限；Plugin 不能宣稱寫入已成功，也不會把 OpenClaw 私有記憶同步到 Memlume。
 
-若 daemon 暫時不可用，Shared Context 讀取會 fail-open，OpenClaw 照常執行。只有明確記憶請求會由 SDK 放進本機 outbox，並在下一次 `before_prompt_build` 或 `message_received` 對應的 `beforeTask`／`onUserMessage` 重送。Brain 是資料歸屬與權限邊界，Hook 只決定觸發時機。
+若 daemon 暫時不可用，Shared Context 讀取會 fail-open，OpenClaw 照常執行。本機 outbox 僅接受明確記憶 capture，並在下一次 `before_prompt_build` 或 `message_received` 對應的 `beforeTask`／`onUserMessage` 重送。Brain 是資料歸屬與權限邊界，Hook 只決定觸發時機。
 
 ## 驗證
 

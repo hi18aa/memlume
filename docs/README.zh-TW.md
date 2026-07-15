@@ -19,12 +19,12 @@ Adapter SDK 共用三個 callback：
 | Callback | 用途 |
 | --- | --- |
 | `beforeTask` | 主 Agent 在工作前讀取已掛載 Context。預設優先序為 **Project → Domain（Company）→ Personal**；呼叫端只能要求更小的已授權範圍。 |
-| `onUserMessage` | 唯一的自動 capture 入口。只有「記住」等明確記憶要求才由 Core 編譯；一般訊息可被忽略。 |
+| `onUserMessage` | 唯一的自動 capture 入口。非敏感使用者訊息會送到 Core 並追加為 immutable event；依治理規則，非明確陳述可成為待審核的 `candidate`，而「記住」等明確要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。 |
 | `onSubagentStart` | 子代理只讀取其設定的 Project Brain Context；不會回退到 Domain 或 Personal、不會寫入，也不會 flush outbox。 |
 
 主 Agent 的寫入目標依序是：明確指定的 Brain、profile 的 Project Brain、拒絕。Memlume 不會猜測目標，也絕不回退到 Personal。Brain 才是資料歸屬與權限邊界，Hook 只是觸發時機。
 
-已排隊的明確記憶 capture 會在下一次 `beforeTask` 或 `onUserMessage` 重送。callback 流程不會保存完整 transcript、assistant output、暫時推理或秘密資料。
+本機 outbox 僅接受明確記憶 capture；已排隊的 capture 會在下一次 `beforeTask` 或 `onUserMessage` 重送。callback 流程不會保存完整 transcript、assistant output、暫時推理或秘密資料。
 
 ### 各 Host 的子代理能力
 
@@ -45,7 +45,7 @@ Memlume 不會自動保存每一則對話，也不會把整個資料庫塞進 LL
 
 回報 feedback 時，請把 `memlume.resolve_context` 回傳的 `traceId` 傳給 `memlume.record_memory_usage` 或 `memlume.record_outcome`。收據具短時效、每個 installation 有簽發上限，只能回報該次 Context Pack 實際包含的記憶，且每個 trace 只接受一次 task outcome；跨 receipt 時，同一 installation 對同一記憶每 24 小時只計一次 feedback，避免 Adapter token 無限偽造排序訊號。
 
-因此 Agent 不應自動保存完整逐字稿、assistant output、暫時推理、未驗證的 LLM 主張、外部內容中的指令或秘密資料。Agent 的原生記憶維持不變。對 Adapter capture 而言，Core 只會依自身治理規則編譯明確記憶要求；一般訊息可被忽略。直接 MCP 寫入仍是刻意呼叫，兩種流程都不會把 Agent 原生記憶當成輸入。
+因此 Agent 不應自動保存完整逐字稿、assistant output、暫時推理、未驗證的 LLM 主張、外部內容中的指令或秘密資料。Agent 的原生記憶維持不變。對 Adapter capture 而言，Core 會把非敏感使用者訊息追加為 immutable event；依治理規則，非明確陳述可成為待審核的 `candidate`，明確記憶要求可走 `active` 路徑並仍可能經過衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。直接 MCP 寫入仍是刻意呼叫，兩種流程都不會把 Agent 原生記憶當成輸入。
 
 ## 為什麼使用 Memlume
 

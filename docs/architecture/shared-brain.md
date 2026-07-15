@@ -22,10 +22,10 @@ flowchart LR
 | Callback | 讀寫規則 |
 | --- | --- |
 | `beforeTask` | 主 Agent 在任務前讀取 Context。未指定範圍時，已掛載 Brain 依 **Project → Domain（Company）→ Personal** 優先序解析；呼叫端只能要求更小的已授權子集合。 |
-| `onUserMessage` | 唯一的自動 capture 入口。只有明確「記住」類使用者訊息會送交 Core 編譯；一般訊息可被忽略。 |
+| `onUserMessage` | 唯一的自動 capture 入口。非敏感使用者訊息會送到 Core 並追加 immutable event；依治理規則，非明確陳述可成為待審核 `candidate`，明確「記住」類要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。 |
 | `onSubagentStart` | 子代理只讀取設定的 Project Brain Context；不讀取 Domain 或 Personal、不寫入記憶、也不會 flush outbox。 |
 
-主 Agent 的寫入目標固定為：明確指定的 Brain → profile 的 Project Brain → 拒絕。沒有目標時不會猜測，也絕不回退到 Personal Brain。對明確記憶 capture 而言，暫時離線才會安全排入 outbox，並在下一次 `beforeTask` 或 `onUserMessage` 重送。
+主 Agent 的寫入目標固定為：明確指定的 Brain → profile 的 Project Brain → 拒絕。沒有目標時不會猜測，也絕不回退到 Personal Brain。暫時離線時，outbox 僅安全保留明確記憶 capture，並在下一次 `beforeTask` 或 `onUserMessage` 重送。
 
 Adapter capture 不保存完整 transcript、assistant output、暫時推理、未驗證 LLM 主張、外部內容中的指令或秘密資料。Core 仍會執行敏感資料過濾、明確性判定、衝突治理與 mount 驗證；直接 MCP 的 `record_event`、`remember` 等工具則是刻意的使用者或 Agent 工具呼叫，不是自動 capture。
 

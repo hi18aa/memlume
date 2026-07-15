@@ -42,9 +42,9 @@ $env:MEMLUME_NODE_BINARY = 'node' # 選填
 | `pre_llm_call`（主 Agent） | 先非阻塞送出使用者訊息作為 Project Brain capture，再在短暫上限內以 `beforeTask` 解析已掛載的 **Project → Domain（Company）→ Personal** Shared Context；失敗時直接繼續原對話。 |
 | `subagent_start` | 僅登錄 child session，不注入 Context、不寫入記憶。child 的第一次 `pre_llm_call` 才以 `onSubagentStart` 取得只讀的 Project Brain Context；不會回退到 Domain 或 Personal。 |
 
-例如「`記住專案使用 pnpm`」會連同 `{ level: 'project', projectId }` 與 `MEMLUME_BRAIN_ID` 送到 Core。一般訊息可被忽略；完整 transcript、assistant output、暫時推理與秘密資料不會形成自動 capture。Core 仍負責敏感資料過濾、候選審核、衝突治理與 mount 授權；Adapter 不自行保存、重試或模擬 Hermes 的私有記憶。
+例如「`記住專案使用 pnpm`」會連同 `{ level: 'project', projectId }` 與 `MEMLUME_BRAIN_ID` 送到 Core。非敏感使用者訊息會追加 immutable event；依治理規則，非明確陳述可成為待審核 `candidate`，明確要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。完整 transcript、assistant output 與暫時推理不會形成自動 capture。Core 仍負責敏感資料過濾、候選審核、衝突治理與 mount 授權；Adapter 不自行保存、重試或模擬 Hermes 的私有記憶。
 
-明確記憶暫時無法送達時，SDK 只會將安全的請求排入本機 outbox，並在下一次 `pre_llm_call` 的 `beforeTask` 或 `onUserMessage` 重送。Brain 是資料歸屬與權限邊界，Hook 只決定何時觸發。
+明確記憶暫時無法送達時，SDK 會將安全的請求排入本機 outbox；outbox 僅接受明確記憶 capture，並在下一次 `pre_llm_call` 的 `beforeTask` 或 `onUserMessage` 重送。Brain 是資料歸屬與權限邊界，Hook 只決定何時觸發。
 
 ## 驗證
 

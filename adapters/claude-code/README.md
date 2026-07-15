@@ -23,11 +23,11 @@ claude --plugin-dir ./adapters/claude-code
 | `UserPromptSubmit` | 以 `beforeTask` 讀取已掛載的 **Project → Domain（Company）→ Personal** Shared Context，使用官方 `additionalContext` 暫時提供給主 Agent；同時在獨立本機工作中以 `onUserMessage` 送出使用者訊息。 |
 | `SubagentStart` | 直接呼叫只讀的 `onSubagentStart`，以官方 `additionalContext` 注入受限的 Project Brain Context；不寫入記憶，也不會讀取 Domain 或 Personal。 |
 
-例如使用者說「`記住專案使用 pnpm`」，Plugin 會以設定的 Project scope 與 Brain 交給 Memlume Core。是否保存、成為候選、被忽略或被拒絕，以及敏感資料過濾、衝突治理與 mount 權限，都只能由 Core 決定。
+非敏感使用者訊息會以設定的 Project scope 與 Brain 送到 Memlume Core，並追加 immutable event。依治理規則，非明確陳述可成為待審核 `candidate`；例如使用者說「`記住專案使用 pnpm`」時，明確要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。敏感資料過濾、衝突治理與 mount 權限都只能由 Core 決定。
 
 Shared Context 明確標記為背景參考；系統、developer 與當前使用者指示永遠優先。Plugin 不會以 Shared Context 覆蓋 Claude 原生記憶，也不會把 Claude 原生記憶複製進 Memlume。
 
-當 daemon 暫時無法使用時，context 讀取會 fail-open，Claude Code 會照常工作。明確記憶請求若無法送達，Adapter SDK 才會在 `${CLAUDE_PLUGIN_DATA}` 建立本機 outbox 並如實標示為 `queued`；它會在下一次 `beforeTask` 或 `onUserMessage` 重送。完整 transcript、assistant output 與暫時推理不會離線保存。
+當 daemon 暫時無法使用時，context 讀取會 fail-open，Claude Code 會照常工作。本機 outbox 僅接受明確記憶 capture，並如實標示為 `queued`；它會在下一次 `beforeTask` 或 `onUserMessage` 重送。完整 transcript、assistant output 與暫時推理不會離線保存。
 
 ## MCP 工具
 
