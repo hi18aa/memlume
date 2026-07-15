@@ -18,7 +18,7 @@ type MemoryDraft = {
   readonly priority?: number;
   readonly confidence?: number;
   readonly explicitness?: number;
-  readonly brainId?: string;
+  readonly brainId: string;
   readonly sourceEventId?: string;
 };
 
@@ -157,12 +157,14 @@ describe('MemoryStore', () => {
   test('keeps inferred memories as candidates until approval, then supersedes the corrected active memory', () => {
     const { store } = createStore();
     const oldMemory = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'The project uses pnpm.',
       structuredData: { subject: 'project', predicate: 'package_manager', object: 'pnpm', confidence: 1 },
       scope: { level: 'project', projectId: 'memlume' },
     });
     const candidate = store.saveCandidate({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'The project uses npm.',
       structuredData: { subject: ' Project ', predicate: 'PACKAGE_MANAGER', object: 'npm', confidence: 0.5 },
@@ -193,12 +195,14 @@ describe('MemoryStore', () => {
   test('rejects a candidate without changing the active memory', () => {
     const { store } = createStore();
     const active = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'The project uses pnpm.',
       structuredData: { subject: 'project', predicate: 'package_manager', object: 'pnpm', confidence: 1 },
       scope: { level: 'project', projectId: 'memlume' },
     });
     const candidate = store.saveCandidate({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'The project uses npm.',
       structuredData: { subject: 'project', predicate: 'package_manager', object: 'npm', confidence: 0.5 },
@@ -219,12 +223,14 @@ describe('MemoryStore', () => {
   test('does not approve a candidate into an active duplicate', () => {
     const { store } = createStore();
     const candidate = store.saveCandidate({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'The project uses pnpm.',
       structuredData: { subject: 'project', predicate: 'package_manager', object: 'pnpm', confidence: 0.5 },
       scope: { level: 'project', projectId: 'memlume' },
     });
     const active = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'The project uses pnpm.',
       structuredData: { subject: 'project', predicate: 'package_manager', object: 'pnpm', confidence: 1 },
@@ -242,12 +248,14 @@ describe('MemoryStore', () => {
   test('does not let a candidate supersede an unrelated active memory', () => {
     const { store } = createStore();
     const unrelated = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'The user lives in Taipei.',
       structuredData: { subject: 'user', predicate: 'location', object: 'Taipei', confidence: 1 },
       scope: { level: 'project', projectId: 'memlume' },
     });
     const candidate = store.saveCandidate({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'The project uses pnpm.',
       structuredData: { subject: 'project', predicate: 'package_manager', object: 'pnpm', confidence: 0.5 },
@@ -266,18 +274,21 @@ describe('MemoryStore', () => {
   test('requires the matching active memory id when a candidate conflicts on its semantic subject', () => {
     const { store } = createStore();
     const conflicting = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'The project uses pnpm.',
       structuredData: { subject: 'project', predicate: 'package_manager', object: 'pnpm', confidence: 1 },
       scope: { level: 'project', projectId: 'memlume' },
     });
     const unrelated = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'The project uses TypeScript.',
       structuredData: { subject: 'project', predicate: 'language', object: 'TypeScript', confidence: 1 },
       scope: { level: 'project', projectId: 'memlume' },
     });
     const candidate = store.saveCandidate({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'The project uses npm.',
       structuredData: { subject: 'project', predicate: 'package_manager', object: 'npm', confidence: 0.5 },
@@ -301,6 +312,7 @@ describe('MemoryStore', () => {
   test('writes incrementing prior snapshots atomically with a required actor and reason', () => {
     const { database, store } = createStore();
     const fact = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'SQLite is the local durable memory store.',
       structuredData: { subject: 'Memlume', predicate: 'uses', object: 'SQLite', confidence: 1 },
@@ -357,18 +369,21 @@ describe('MemoryStore', () => {
     const { store } = createStore();
     const invalid = [
       {
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         kind: 'preference',
         canonicalText: 'A malformed preference.',
         structuredData: null,
         scope: { level: 'global' },
       },
       {
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         kind: 'fact',
         canonicalText: 'A malformed fact.',
         structuredData: { subject: 'logo', predicate: 'source_size', object: null, confidence: 1 },
         scope: { level: 'global' },
       },
       {
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         kind: 'decision',
         canonicalText: 'A malformed decision.',
         structuredData: { rationale: [] },
@@ -385,6 +400,7 @@ describe('MemoryStore', () => {
   test('saves only manual active memories, validates stored JSON, and refreshes FTS5 on update', () => {
     const { database, store } = createStore();
     const fact = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       title: 'Storage choice',
       canonicalText: 'SQLite is the local durable memory store.',
@@ -414,6 +430,7 @@ describe('MemoryStore', () => {
 
     expect(() =>
       store.save({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         kind: 'procedure' as never,
         canonicalText: 'This cannot be manually saved in v0.1.',
         structuredData: {},

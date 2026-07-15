@@ -25,6 +25,7 @@ describe('outcome store', () => {
     const store = new MemoryStore(database);
     const outcomes = new OutcomeStore(database);
     const memory = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'The project uses pnpm.',
       structuredData: { subject: 'project', predicate: 'package_manager', object: 'pnpm', confidence: 1 },
@@ -72,6 +73,7 @@ describe('outcome store', () => {
     const store = new MemoryStore(database);
     const outcomes = new OutcomeStore(database);
     const memory = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'Receipt-backed memory.',
       structuredData: { subject: 'project', predicate: 'has', object: 'receipt', confidence: 1 },
@@ -113,12 +115,14 @@ describe('outcome store', () => {
     const store = new MemoryStore(database);
     const outcomes = new OutcomeStore(database);
     const included = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'Included receipt memory.',
       structuredData: { subject: 'project', predicate: 'has', object: 'included', confidence: 1 },
       scope: { level: 'global' },
     });
     const omitted = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'Omitted receipt memory.',
       structuredData: { subject: 'project', predicate: 'has', object: 'omitted', confidence: 1 },
@@ -187,6 +191,7 @@ describe('outcome store', () => {
     const store = new MemoryStore(database);
     const outcomes = new OutcomeStore(database);
     const memory = store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'Rate limited receipt memory.',
       structuredData: { subject: 'project', predicate: 'has', object: 'rate-limit', confidence: 1 },
