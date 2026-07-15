@@ -154,6 +154,22 @@ describe('RoutingInboxStore', () => {
     assert.deepEqual(store.listResolved(), []);
   });
 
+  test('does not append or drop pending when an invalid resolved marker needs repair', async () => {
+    const { rootDir, store } = await createStore();
+    const item = inboxItem();
+    const target = semanticRecord({ captureId: item.captureId, atomKey: item.atomKey });
+    store.addPending(item);
+    await writeFile(join(rootDir, 'inbox', 'resolved', `${item.recordId}.md`), 'not a routing resolution');
+    const appended = [];
+
+    assert.throws(
+      () => store.resolve(item.recordId, target, (record) => appended.push(record)),
+      /resolution_conflict|repair-required/i,
+    );
+    assert.deepEqual(store.readPending(item.recordId), item);
+    assert.equal(appended.length, 0);
+  });
+
   test('quarantine is separate from active pending and never receives a Brain id', async () => {
     const { rootDir, store } = await createStore();
     const item = inboxItem();

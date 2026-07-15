@@ -141,7 +141,12 @@ export class RoutingInboxStore {
   ): RoutingInboxResolvedRecord {
     const id = parseRecordId(recordId);
     const resolvedPath = this.recordPath('resolved', id);
-    const alreadyResolved = this.readOptional(resolvedPath, parseResolved);
+    let alreadyResolved: RoutingInboxResolvedRecord | undefined;
+    try {
+      alreadyResolved = this.readOptional(resolvedPath, parseResolved);
+    } catch (error) {
+      throw new Error(`resolution_conflict: existing resolution ${id} requires repair.`, { cause: error });
+    }
     if (alreadyResolved !== undefined) {
       return alreadyResolved;
     }
@@ -176,18 +181,15 @@ export class RoutingInboxStore {
       ...(pending.targetRef === undefined ? {} : { targetRef: pending.targetRef }),
     };
 
-    // Move the durable pending file first, then atomically replace its content
-    // with the strict resolution envelope. The callback has already succeeded.
-    const staged = writeTempFile(resolvedPath, renderRecord(canonicalJson(resolved)));
+    // Persist the complete resolution before deleting pending. If the process
+    // stops after this write, the next resolve sees a valid marker and will not
+    // append the same target again.
+    atomicWrite(resolvedPath, renderRecord(canonicalJson(resolved)));
     try {
-      assertRegularFileOrMissing(resolvedPath);
-      renameSync(pendingPath, resolvedPath);
-      replaceFromTemp(resolvedPath, staged);
-    } catch (error) {
-      if (existsSync(staged)) {
-        unlinkSync(staged);
-      }
-      throw error;
+      unlinkSync(pendingPath);
+    } catch {
+      // The resolved marker is authoritative; a duplicate pending source can
+      // remain for a later cleanup pass without causing a duplicate append.
     }
     return resolved;
   }
@@ -501,29 +503,6 @@ function writeTempFile(path: string, content: string): string {
     if (!completed && existsSync(tempPath)) {
       unlinkSync(tempPath);
     }
-  }
-}
-
-function replaceFromTemp(path: string, tempPath: string): void {
-  try {
-    renameSync(tempPath, path);
-  } catch (error) {
-    if (!pathExists(path)) {
-      throw error;
-    }
-    assertRegularFile(path);
-    unlinkSync(path);
-    renameSync(tempPath, path);
-  } finally {
-    if (existsSync(tempPath)) {
-      unlinkSync(tempPath);
-    }
-  }
-}
-
-function assertRegularFileOrMissing(path: string): void {
-  if (pathExists(path)) {
-    assertRegularFile(path);
   }
 }
 
