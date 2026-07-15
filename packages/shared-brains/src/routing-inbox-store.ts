@@ -161,6 +161,14 @@ export class RoutingInboxStore {
     if (!('brainId' in target) || typeof target.brainId !== 'string') {
       throw new Error('resolve requires a Brain-bound target record; Inbox does not infer a target Brain.');
     }
+    if (
+      !('captureId' in target)
+      || !('atomKey' in target)
+      || target.captureId !== pending.captureId
+      || target.atomKey !== pending.atomKey
+    ) {
+      throw new Error(`atom_mismatch: target record ${target.recordId} is not bound to pending atom ${pending.recordId}.`);
+    }
 
     // The callback is deliberately before any resolved marker is written.
     // A thrown append leaves the pending item available for a safe retry.
@@ -201,15 +209,25 @@ export class RoutingInboxStore {
   ): RoutingInboxQuarantineRecord {
     const item = parsePending(input);
     const parsedReason = NonEmptyTextSchema.parse(reason);
-    const intendedTargetRef = metadata.intendedTargetRef === undefined
-      ? item.targetRef
-      : NonEmptyTextSchema.parse(metadata.intendedTargetRef);
     const conflictWithRecordId = metadata.conflictWithRecordId === undefined
       ? undefined
       : parseRecordId(metadata.conflictWithRecordId);
+    const pendingPath = this.recordPath('pending', item.recordId);
+    const pending = this.readOptional(pendingPath, parsePending);
+    const resolvedPath = this.recordPath('resolved', item.recordId);
+    if (pathExists(resolvedPath)) {
+      throw new Error(`record_conflict: Inbox record ${item.recordId} is already resolved.`);
+    }
+
     const path = this.recordPath('quarantine', item.recordId);
     const existing = this.readOptional(path, parseQuarantine);
     if (existing !== undefined) {
+      if (pending !== undefined && canonicalJson(pending) !== canonicalJson(item)) {
+        throw new Error(`record_conflict: pending record ${item.recordId} differs from the caller content.`);
+      }
+      const intendedTargetRef = metadata.intendedTargetRef === undefined
+        ? item.targetRef
+        : NonEmptyTextSchema.parse(metadata.intendedTargetRef);
       const candidate = makeQuarantine(item, parsedReason, { intendedTargetRef, conflictWithRecordId }, existing.updatedAt);
       if (canonicalJson(existing) === canonicalJson(candidate)) {
         return existing;
@@ -217,9 +235,17 @@ export class RoutingInboxStore {
       throw new Error(`record_conflict: quarantine record ${item.recordId} already exists with different content.`);
     }
 
-    const quarantined = makeQuarantine(item, parsedReason, { intendedTargetRef, conflictWithRecordId });
+    if (pending === undefined) {
+      throw new Error(`Routing Inbox record ${item.recordId} was not found in pending.`);
+    }
+    if (canonicalJson(pending) !== canonicalJson(item)) {
+      throw new Error(`record_conflict: pending record ${item.recordId} differs from the caller content.`);
+    }
+    const intendedTargetRef = metadata.intendedTargetRef === undefined
+      ? pending.targetRef
+      : NonEmptyTextSchema.parse(metadata.intendedTargetRef);
+    const quarantined = makeQuarantine(pending, parsedReason, { intendedTargetRef, conflictWithRecordId });
     atomicWrite(path, renderRecord(canonicalJson(quarantined)));
-    const pendingPath = this.recordPath('pending', item.recordId);
     if (pathExists(pendingPath)) {
       assertRegularFile(pendingPath);
       unlinkSync(pendingPath);

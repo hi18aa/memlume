@@ -170,9 +170,72 @@ describe('RoutingInboxStore', () => {
     assert.equal(appended.length, 0);
   });
 
+  test('rejects a stale quarantine caller object without deleting pending', async () => {
+    const { store } = await createStore();
+    const item = inboxItem();
+    store.addPending(item);
+
+    assert.throws(
+      () => store.quarantine({ ...item, statement: 'stale caller content' }, 'ambiguous_target'),
+      /record_conflict/i,
+    );
+    assert.deepEqual(store.readPending(item.recordId), item);
+    assert.deepEqual(store.listQuarantine(), []);
+  });
+
+  test('requires a pending item before creating quarantine', async () => {
+    const { store } = await createStore();
+    const item = inboxItem();
+
+    assert.throws(() => store.quarantine(item, 'ambiguous_target'), /pending|not found/i);
+    assert.deepEqual(store.listQuarantine(), []);
+  });
+
+  test('rejects quarantine when the item is already resolved', async () => {
+    const { store } = await createStore();
+    const item = inboxItem();
+    const target = semanticRecord({ captureId: item.captureId, atomKey: item.atomKey });
+    store.addPending(item);
+    store.resolve(item.recordId, target, () => {});
+
+    assert.throws(() => store.quarantine(item, 'ambiguous_target'), /record_conflict|resolved/i);
+    assert.deepEqual(store.listQuarantine(), []);
+  });
+
+  test('rejects a target with a different capture id before append', async () => {
+    const { store } = await createStore();
+    const item = inboxItem();
+    const target = semanticRecord({ captureId: createUuidV7(), atomKey: item.atomKey });
+    store.addPending(item);
+    const appended = [];
+
+    assert.throws(
+      () => store.resolve(item.recordId, target, (record) => appended.push(record)),
+      /record_conflict|atom_mismatch/i,
+    );
+    assert.equal(appended.length, 0);
+    assert.deepEqual(store.readPending(item.recordId), item);
+  });
+
+  test('rejects a target with a different atom key before append', async () => {
+    const { store } = await createStore();
+    const item = inboxItem();
+    const target = semanticRecord({ captureId: item.captureId, atomKey: 'fact:other' });
+    store.addPending(item);
+    const appended = [];
+
+    assert.throws(
+      () => store.resolve(item.recordId, target, (record) => appended.push(record)),
+      /record_conflict|atom_mismatch/i,
+    );
+    assert.equal(appended.length, 0);
+    assert.deepEqual(store.readPending(item.recordId), item);
+  });
+
   test('quarantine is separate from active pending and never receives a Brain id', async () => {
     const { rootDir, store } = await createStore();
     const item = inboxItem();
+    store.addPending(item);
     const quarantined = store.quarantine(item, 'record_conflict', {
       intendedTargetRef: 'project:frontend',
       conflictWithRecordId: createUuidV7(),
@@ -181,6 +244,10 @@ describe('RoutingInboxStore', () => {
     assert.equal('brainId' in quarantined, false);
     assert.deepEqual(store.listPending(), []);
     assert.equal(existsSync(join(rootDir, 'inbox', 'quarantine', `${item.recordId}.md`)), true);
+    assert.deepEqual(store.quarantine(item, 'record_conflict', {
+      intendedTargetRef: 'project:frontend',
+      conflictWithRecordId: quarantined.conflictWithRecordId,
+    }), quarantined);
   });
 
   test('rejects symlinked inbox directories that escape the root', async (t) => {
