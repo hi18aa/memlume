@@ -2,6 +2,11 @@ import { describe, expect, test } from 'vitest';
 
 import {
   ContextPackSchema,
+  ContextDecisionSchema,
+  ContextDirectiveSchema,
+  ContextKnowledgeSchema,
+  ContextPreferenceSchema,
+  ContextProcedureSchema,
   ContextReceiptSchema,
   DEFAULT_PERSONAL_BRAIN_ID,
   EventSchema,
@@ -307,6 +312,27 @@ describe('shared memory contracts', () => {
     }).success).toBe(false);
   });
 
+  test('requires an explicit brain on every context item', () => {
+    expect(ContextDirectiveSchema.safeParse({
+      memoryId: ids.memory,
+      text: 'Use the configured image route.',
+      priority: 1,
+      mandatory: false,
+    }).success).toBe(false);
+    expect(ContextProcedureSchema.safeParse({
+      memoryId: ids.memory,
+      name: 'Image workflow',
+      steps: ['Prepare the image.'],
+    }).success).toBe(false);
+    expect(ContextPreferenceSchema.safeParse({ memoryId: ids.preference, text: 'Prefer legible symbols.' }).success).toBe(false);
+    expect(ContextKnowledgeSchema.safeParse({
+      memoryId: ids.fact,
+      title: 'Image size',
+      summary: 'Use 1024px source art.',
+    }).success).toBe(false);
+    expect(ContextDecisionSchema.safeParse({ memoryId: ids.decision, text: 'Use SQLite.' }).success).toBe(false);
+  });
+
   test('requires a traceable context pack with complete directives', () => {
     const pack = {
       traceId: ids.trace,
@@ -352,7 +378,7 @@ describe('shared memory contracts', () => {
     const { traceId: _, ...untracedPack } = pack;
     expect(ContextPackSchema.safeParse(untracedPack).success).toBe(false);
     expect(ContextPackSchema.safeParse({ ...pack, traceId: 'trace-1' }).success).toBe(false);
-    const legacyPack = ContextPackSchema.parse({
+    const legacyPack = ContextPackSchema.safeParse({
       ...pack,
       directives: pack.directives.map(({ brainId: _, ...directive }) => directive),
       procedures: pack.procedures.map(({ brainId: _, ...procedure }) => procedure),
@@ -360,11 +386,7 @@ describe('shared memory contracts', () => {
       knowledge: pack.knowledge.map(({ brainId: _, ...knowledge }) => knowledge),
       decisions: pack.decisions.map(({ brainId: _, ...decision }) => decision),
     });
-    expect(legacyPack.directives[0]?.brainId).toBe(DEFAULT_PERSONAL_BRAIN_ID);
-    expect(legacyPack.procedures[0]?.brainId).toBe(DEFAULT_PERSONAL_BRAIN_ID);
-    expect(legacyPack.preferences[0]?.brainId).toBe(DEFAULT_PERSONAL_BRAIN_ID);
-    expect(legacyPack.knowledge[0]?.brainId).toBe(DEFAULT_PERSONAL_BRAIN_ID);
-    expect(legacyPack.decisions[0]?.brainId).toBe(DEFAULT_PERSONAL_BRAIN_ID);
+    expect(legacyPack.success).toBe(false);
     expect(
       ContextPackSchema.safeParse({
         ...pack,

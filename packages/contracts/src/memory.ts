@@ -6,7 +6,6 @@ export const IsoUtcDateTimeSchema = z.iso
   .refine((value) => value.endsWith('Z'), 'Expected a UTC ISO 8601 timestamp.');
 export const IsoDateSchema = z.iso.date();
 export const NonEmptyTextSchema = z.string().trim().min(1);
-const DefaultPersonalBrainIdSchema = UuidV7Schema.default('00000000-0000-7000-8000-000000000001');
 const PreservedTextSchema = z.string().refine((value) => value.trim().length > 0, 'Expected non-empty text.');
 
 export const JsonValueSchema = z.json();
@@ -261,7 +260,7 @@ export type Event = z.infer<typeof EventSchema>;
 
 export const ContextDirectiveSchema = z.object({
   memoryId: UuidV7Schema,
-  brainId: DefaultPersonalBrainIdSchema,
+  brainId: UuidV7Schema,
   sourceEventId: UuidV7Schema.optional(),
   text: NonEmptyTextSchema,
   actionTarget: NonEmptyTextSchema.optional(),
@@ -272,7 +271,7 @@ export type ContextDirective = z.infer<typeof ContextDirectiveSchema>;
 
 export const ContextProcedureSchema = z.object({
   memoryId: UuidV7Schema,
-  brainId: DefaultPersonalBrainIdSchema,
+  brainId: UuidV7Schema,
   name: NonEmptyTextSchema,
   steps: z.array(NonEmptyTextSchema).min(1),
 });
@@ -280,14 +279,14 @@ export type ContextProcedure = z.infer<typeof ContextProcedureSchema>;
 
 export const ContextPreferenceSchema = z.object({
   memoryId: UuidV7Schema,
-  brainId: DefaultPersonalBrainIdSchema,
+  brainId: UuidV7Schema,
   text: NonEmptyTextSchema,
 });
 export type ContextPreference = z.infer<typeof ContextPreferenceSchema>;
 
 export const ContextKnowledgeSchema = z.object({
   memoryId: UuidV7Schema,
-  brainId: DefaultPersonalBrainIdSchema,
+  brainId: UuidV7Schema,
   title: NonEmptyTextSchema,
   summary: NonEmptyTextSchema,
 });
@@ -295,7 +294,7 @@ export type ContextKnowledge = z.infer<typeof ContextKnowledgeSchema>;
 
 export const ContextDecisionSchema = z.object({
   memoryId: UuidV7Schema,
-  brainId: DefaultPersonalBrainIdSchema,
+  brainId: UuidV7Schema,
   text: NonEmptyTextSchema,
 });
 export type ContextDecision = z.infer<typeof ContextDecisionSchema>;
