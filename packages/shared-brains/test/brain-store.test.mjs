@@ -26,7 +26,7 @@ describe('BrainStore', () => {
   test('creates validated brains and lists them deterministically by creation time and id', () => {
     const { database, store } = createStore();
     const first = store.createBrain({ kind: 'project', name: 'Memlume' });
-    const second = store.createBrain({ kind: 'domain', name: 'Frontend' });
+    const second = store.createBrain({ kind: 'project', name: 'Frontend' });
 
     assert.deepEqual(BrainSchema.parse(first), first);
     assert.deepEqual(BrainSchema.parse(second), second);
@@ -134,7 +134,7 @@ describe('BrainStore', () => {
   test('allows mounted reads but requires read_write access for writes', () => {
     const { store } = createStore();
     const brain = store.createBrain({ kind: 'project', name: 'Memlume' });
-    const unmountedBrain = store.createBrain({ kind: 'domain', name: 'Frontend' });
+    const unmountedBrain = store.createBrain({ kind: 'project', name: 'Frontend' });
     const { installation } = store.registerInstallation({
       clientType: 'codex',
       installationId: 'desktop',
