@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 import { IsoUtcDateTimeSchema, NonEmptyTextSchema, UuidV7Schema } from './memory.js';
 
-export const BrainKindSchema = z.enum(['personal', 'project', 'domain']);
+export const BrainKindSchema = z.enum(['personal', 'project']);
 export type BrainKind = z.infer<typeof BrainKindSchema>;
 
 export const BrainSchema = z.object({

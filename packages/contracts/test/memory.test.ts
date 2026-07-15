@@ -85,6 +85,7 @@ describe('shared memory contracts', () => {
       'fact',
       'decision',
       'capability',
+      'event',
     ]);
 
     expect(
@@ -143,6 +144,7 @@ describe('shared memory contracts', () => {
   test('rejects malformed memory identifiers, dates, canonical text, confidence, and priority', () => {
     const memory = {
       id: ids.memory,
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'policy',
       canonicalText: 'Use the image generation skill.',
       structuredData: policy,
@@ -192,6 +194,7 @@ describe('shared memory contracts', () => {
   test('requires structured preference, fact, and decision payloads', () => {
     const memory = {
       id: ids.memory,
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       canonicalText: 'A structured memory.',
       scope: { level: 'global' },
       status: 'active',
@@ -260,6 +263,7 @@ describe('shared memory contracts', () => {
     const rawContent = '  我不喜歡亂花錢。  ';
     const event = EventSchema.parse({
       id: ids.event,
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       eventType: 'user_statement',
       rawContent,
       occurredAt: '2026-07-12T15:00:00.000Z',
@@ -273,8 +277,8 @@ describe('shared memory contracts', () => {
     expect(EventSchema.safeParse({ ...event, source: {} }).success).toBe(false);
   });
 
-  test('assigns the personal brain to legacy-compatible event and memory input', () => {
-    const memory = MemoryItemSchema.parse({
+  test('rejects event and memory input without an explicit brain', () => {
+    const memory = {
       id: ids.memory,
       kind: 'fact',
       canonicalText: 'Memlume stores shared memories locally.',
@@ -291,9 +295,16 @@ describe('shared memory contracts', () => {
       explicitness: 1,
       createdAt: '2026-07-12T15:00:00.000Z',
       updatedAt: '2026-07-12T15:00:00.000Z',
-    });
+    };
 
-    expect(memory.brainId).toBe(DEFAULT_PERSONAL_BRAIN_ID);
+    expect(MemoryItemSchema.safeParse(memory).success).toBe(false);
+    expect(EventSchema.safeParse({
+      id: ids.event,
+      eventType: 'user_statement',
+      rawContent: '我不喜歡亂花錢。',
+      occurredAt: '2026-07-12T15:00:00.000Z',
+      source: { agent: 'codex-cli', conversationId: 'conversation-1' },
+    }).success).toBe(false);
   });
 
   test('requires a traceable context pack with complete directives', () => {

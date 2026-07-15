@@ -6,8 +6,8 @@ export const IsoUtcDateTimeSchema = z.iso
   .refine((value) => value.endsWith('Z'), 'Expected a UTC ISO 8601 timestamp.');
 export const IsoDateSchema = z.iso.date();
 export const NonEmptyTextSchema = z.string().trim().min(1);
-const PreservedTextSchema = z.string().refine((value) => value.trim().length > 0, 'Expected non-empty text.');
 const DefaultPersonalBrainIdSchema = UuidV7Schema.default('00000000-0000-7000-8000-000000000001');
+const PreservedTextSchema = z.string().refine((value) => value.trim().length > 0, 'Expected non-empty text.');
 
 export const JsonValueSchema = z.json();
 export type JsonValue = z.infer<typeof JsonValueSchema>;
@@ -27,12 +27,14 @@ export const MemoryKindSchema = z.enum([
   'fact',
   'decision',
   'capability',
+  'event',
 ]);
 export type MemoryKind = z.infer<typeof MemoryKindSchema>;
 
 export const MemoryStatusSchema = z.enum([
   'candidate',
   'active',
+  'event_only',
   'superseded',
   'expired',
   'rejected',
@@ -157,7 +159,7 @@ export type CapabilityData = z.infer<typeof CapabilityDataSchema>;
 
 const MemoryItemMetadataSchema = z.object({
   id: UuidV7Schema,
-  brainId: DefaultPersonalBrainIdSchema,
+  brainId: UuidV7Schema,
   title: NonEmptyTextSchema.optional(),
   canonicalText: NonEmptyTextSchema,
   scope: MemoryScopeSchema,
@@ -208,12 +210,19 @@ export const CapabilityMemoryItemSchema = MemoryItemMetadataSchema.extend({
 });
 export type CapabilityMemoryItem = z.infer<typeof CapabilityMemoryItemSchema>;
 
+export const EventMemoryItemSchema = MemoryItemMetadataSchema.extend({
+  kind: z.literal('event'),
+  structuredData: NonEmptyJsonValueSchema,
+});
+export type EventMemoryItem = z.infer<typeof EventMemoryItemSchema>;
+
 export const OtherMemoryItemSchema = z.discriminatedUnion('kind', [
   ProcedureMemoryItemSchema,
   PreferenceMemoryItemSchema,
   FactMemoryItemSchema,
   DecisionMemoryItemSchema,
   CapabilityMemoryItemSchema,
+  EventMemoryItemSchema,
 ]);
 export type OtherMemoryItem = z.infer<typeof OtherMemoryItemSchema>;
 
@@ -224,6 +233,7 @@ export const MemoryItemSchema = z.discriminatedUnion('kind', [
   FactMemoryItemSchema,
   DecisionMemoryItemSchema,
   CapabilityMemoryItemSchema,
+  EventMemoryItemSchema,
 ]);
 export type MemoryItem = z.infer<typeof MemoryItemSchema>;
 
@@ -240,7 +250,7 @@ export type EventSource = z.infer<typeof EventSourceSchema>;
 
 export const EventSchema = z.object({
   id: UuidV7Schema,
-  brainId: DefaultPersonalBrainIdSchema,
+  brainId: UuidV7Schema,
   eventType: NonEmptyTextSchema,
   rawContent: PreservedTextSchema,
   structuredData: JsonValueSchema.optional(),

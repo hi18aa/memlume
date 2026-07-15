@@ -17,7 +17,7 @@ const ids = {
 
 describe('shared brain contracts', () => {
   test('accepts only the supported brain kinds', () => {
-    expect(BrainKindSchema.options).toEqual(['personal', 'project', 'domain']);
+    expect(BrainKindSchema.options).toEqual(['personal', 'project']);
     expect(BrainKindSchema.safeParse('team').success).toBe(false);
   });
 
