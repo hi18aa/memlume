@@ -101,13 +101,20 @@ function seedImportTarget(filename) {
 
 function downgradeToReceiptMigration005(database) {
   database.exec(`
+    DROP TRIGGER IF EXISTS brains_reject_domain_insert;
+    DROP TRIGGER IF EXISTS brains_reject_domain_update;
+    DROP TRIGGER IF EXISTS project_keys_reject_unsafe_git_remote_insert;
+    DROP TRIGGER IF EXISTS project_keys_reject_unsafe_git_remote_update;
+    DROP TABLE IF EXISTS workspace_projects;
+    DROP TABLE IF EXISTS project_keys;
+    DROP TABLE IF EXISTS brain_aliases;
     DROP INDEX IF EXISTS idx_feedback_signal_claims_agent_memory_at;
     DROP TABLE IF EXISTS feedback_signal_claims;
     DROP INDEX IF EXISTS idx_user_confirmations_expires_at;
     DROP TABLE IF EXISTS user_confirmations;
     DROP INDEX IF EXISTS idx_memory_usage_trace_memory_outcome;
     ALTER TABLE context_receipts DROP COLUMN source_memory_ids;
-    DELETE FROM schema_migrations WHERE id = '006_receipt_hardening';
+    DELETE FROM schema_migrations WHERE id IN ('006_receipt_hardening', '007_project_model');
   `);
 }
 

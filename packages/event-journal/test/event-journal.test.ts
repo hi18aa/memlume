@@ -7,7 +7,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 
 import { DEFAULT_PERSONAL_BRAIN_ID } from '@memlume/contracts';
 import * as publicDatabase from '../../database/src/index.js';
-import { initialMigration, openDatabase } from '../../database/src/internal.js';
+import { initialMigration, migrations, openDatabase } from '../../database/src/internal.js';
 import { EventBrainConflictError, EventJournal } from '../src/index.js';
 
 const databases: ReturnType<typeof openDatabase>[] = [];
@@ -90,14 +90,9 @@ describe('SQLite migration', () => {
     databases.pop();
     const upgraded = openDatabase(filename);
     databases.push(upgraded);
-    expect(upgraded.prepare('SELECT id FROM schema_migrations ORDER BY id').all()).toEqual([
-      { id: '001_initial' },
-      { id: '002_event_reference_dedup' },
-      { id: '003_shared_brains' },
-      { id: '004_memory_outcomes' },
-      { id: '005_feedback_receipts' },
-      { id: '006_receipt_hardening' },
-    ]);
+    expect(upgraded.prepare('SELECT id FROM schema_migrations ORDER BY id').all()).toEqual(
+      migrations.map(({ id }) => ({ id })),
+    );
 
     upgraded.exec(`
       DROP TABLE schema_migrations;
@@ -109,14 +104,9 @@ describe('SQLite migration', () => {
     databases.pop();
     const legacyUpgrade = openDatabase(filename);
     databases.push(legacyUpgrade);
-    expect(legacyUpgrade.prepare('SELECT id FROM schema_migrations ORDER BY id').all()).toEqual([
-      { id: '001_initial' },
-      { id: '002_event_reference_dedup' },
-      { id: '003_shared_brains' },
-      { id: '004_memory_outcomes' },
-      { id: '005_feedback_receipts' },
-      { id: '006_receipt_hardening' },
-    ]);
+    expect(legacyUpgrade.prepare('SELECT id FROM schema_migrations ORDER BY id').all()).toEqual(
+      migrations.map(({ id }) => ({ id })),
+    );
     expect(
       legacyUpgrade
         .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_content_hash'")
