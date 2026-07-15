@@ -39,6 +39,7 @@ async function handle(input) {
     return {};
   }
   if (input.hook_event_name === 'UserPromptSubmit') return beforePrompt(input, configuration);
+  if (input.hook_event_name === 'SubagentStart') return beforeSubagent(input, configuration);
   return {};
 }
 
@@ -63,6 +64,25 @@ async function beforePrompt(input, configuration) {
   return additionalContext === undefined
     ? {}
     : { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext } };
+}
+
+async function beforeSubagent(input, configuration) {
+  const client = await createClient(configuration.brainId);
+  const subagentId = text(input.agent_id);
+  const context = await client.onSubagentStart({
+    envelope: configuration.envelope,
+    parentTaskId: configuration.envelope.sessionId,
+    ...(subagentId === undefined ? {} : { subagentId }),
+    intent: 'shared_memory',
+    scope: configuration.scope,
+    task: null,
+    contextBudget: CONTEXT_BUDGET,
+    requestedBrainIds: [configuration.brainId],
+  });
+  const additionalContext = compactContext(context);
+  return additionalContext === undefined
+    ? {}
+    : { hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext } };
 }
 
 async function handleBackgroundWrite(input) {

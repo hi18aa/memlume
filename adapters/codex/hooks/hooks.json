@@ -24,6 +24,18 @@
           }
         ]
       }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/hooks/memlume.mjs\"",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\hooks\\memlume.mjs\"",
+            "timeout": 20
+          }
+        ]
+      }
     ]
   }
 }
