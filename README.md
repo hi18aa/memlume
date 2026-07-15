@@ -19,8 +19,10 @@ The Adapter SDK has three shared callbacks:
 | Callback | What it does |
 | --- | --- |
 | `beforeTask` | A main Agent reads mounted Context before work. Its default priority is **Project → Domain (Company) → Personal**; a caller may request only a smaller authorized subset. |
-| `onUserMessage` | Memlume's single automatic capture entry point. Non-sensitive user messages are sent to Core and appended as immutable events. Under governance, a normal user statement can become a reviewable `candidate`; an explicit request such as “remember” can take the `active` path, still subject to conflict review. Empty or unsupported events may be ignored, and sensitive content is redacted or rejected. |
+| `onUserMessage` | Memlume's single automatic capture entry point. It sends eligible user messages to Core for governed capture. |
 | `onSubagentStart` | A child Agent receives read-only Context from its configured Project Brain only. It never falls back to Domain or Personal, writes no memory, and does not flush the outbox. |
+
+Capture governance: eligible, non-sensitive user messages are appended as immutable events. Normal statements can become reviewable `candidate` memories; an explicit request such as “remember” can take the `active` path, still subject to conflict review. Blank or unsupported events are ignored, and sensitive content is redacted or rejected.
 
 For a main Agent, a write target is selected in this order: an explicit Brain, then the profile's Project Brain, otherwise the write is rejected. Memlume never guesses a target or falls back to Personal. Brains—not hooks—are the data-ownership and permission boundary.
 
@@ -30,10 +32,10 @@ The local outbox accepts explicit-memory captures only; queued captures are retr
 
 | Host | Child Context behavior |
 | --- | --- |
-| Claude Code | Its `SubagentStart` hook directly injects restricted Project Brain Context. |
-| Hermes | `subagent_start` only records the child; the child's first prompt receives restricted Context. |
-| OpenClaw | `subagent_spawned` only records the child; the child's first prompt receives restricted Context. |
-| Codex Plugin | No usable child-start hook is available today, so it does not automatically inject child Context. The SDK entry point is ready for a future official hook or external orchestration. |
+| Claude Code | Its `SubagentStart` hook directly injects restricted Project Brain Context through official `additionalContext`. |
+| Hermes | `subagent_start` observes and registers the child; its first supported `pre_llm_call` prompt receives restricted Context. |
+| OpenClaw | `subagent_spawned` observes and registers the child; its first supported `before_prompt_build` prompt receives restricted Context. |
+| Codex Plugin | Official [`SubagentStart`](https://learn.chatgpt.com/docs/hooks#subagentstart) directly injects restricted Project Brain Context through `additionalContext`. |
 
 ## Direct MCP workflow
 
@@ -45,7 +47,7 @@ Memlume does not automatically store every chat message or inject an entire data
 
 When reporting feedback, pass the `traceId` returned by `memlume.resolve_context` to `memlume.record_memory_usage` or `memlume.record_outcome`. A receipt is short-lived, limited per installation, accepts feedback only for memories included in that Context Pack, and accepts one task outcome. Across receipts, one installation can claim feedback for a given memory only once per 24-hour window. This keeps an adapter token from fabricating unlimited ranking signals.
 
-This means an agent should not automatically save whole transcripts, assistant output, temporary reasoning, unverified LLM claims, instructions found in external content, or secrets. Native agent memory remains untouched. For Adapter capture, Core appends non-sensitive user messages as immutable events; governance can turn a normal statement into a reviewable `candidate`, while an explicit memory request can take the `active` path and still undergo conflict review. Empty or unsupported events may be ignored, and sensitive content is redacted or rejected. Direct MCP writes remain deliberate calls and do not treat an agent's native memory as input.
+This means an agent should not automatically save whole transcripts, assistant output, temporary reasoning, unverified LLM claims, instructions found in external content, or secrets. Native agent memory remains untouched. Direct MCP writes remain deliberate calls and do not treat an agent's native memory as input.
 
 ## Why Memlume
 

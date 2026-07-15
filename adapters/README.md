@@ -23,8 +23,10 @@ callbacks.initialize({ envelope });
 | Callback | Adapter 必須維持的邊界 |
 | --- | --- |
 | `beforeTask(...)` | 主 Agent 讀取 Context。未指定範圍時，Core 依已掛載 Brain 的 **Project → Domain（Company）→ Personal** 優先序解析；可要求較小的已授權範圍。讀取失敗必須 fail-open，以空 Context 繼續原任務。 |
-| `onUserMessage(...)` | 唯一的自動 capture 入口。非敏感使用者訊息會送到 Core 並追加 immutable event；依治理規則，非明確陳述可成為待審核 `candidate`，明確「記住」類要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。主 Agent 寫入採明確 Brain → `defaultWriteBrainId`（Project Brain）→ `rejected`，永不回退 Personal。 |
+| `onUserMessage(...)` | 唯一的自動 capture 入口；將符合資格的使用者訊息交由 Core 進行治理。主 Agent 寫入採明確 Brain → `defaultWriteBrainId`（Project Brain）→ `rejected`，永不回退 Personal。 |
 | `onSubagentStart(...)` | 只讀取設定的 Project Brain Context，不讀取 Domain 或 Personal，不建立寫入，也不 flush outbox。Host 沒有可注入 child Context 的事件時，不得偽造支援。 |
+
+Capture 治理：符合資格且非敏感的使用者訊息會追加為 immutable event。一般陳述可能成為待審核的 `candidate`；「記住」等明確要求可走 `active` 路徑，仍須經過衝突審核。空白或不支援事件會被 ignore，敏感資料會 redacted 或 rejected。
 
 `onSubagentStart` 可接收 `parentTaskId` 與 `subagentId` 供 Host 對應，但 SDK 會在 Context request 前移除它們；Host 私有內容也不得送入 request。Brain 才是資料歸屬與權限邊界，Hook 只決定何時觸發。
 

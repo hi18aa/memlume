@@ -19,8 +19,10 @@ Adapter SDK 共用三個 callback：
 | Callback | 用途 |
 | --- | --- |
 | `beforeTask` | 主 Agent 在工作前讀取已掛載 Context。預設優先序為 **Project → Domain（Company）→ Personal**；呼叫端只能要求更小的已授權範圍。 |
-| `onUserMessage` | 唯一的自動 capture 入口。非敏感使用者訊息會送到 Core 並追加為 immutable event；依治理規則，非明確陳述可成為待審核的 `candidate`，而「記住」等明確要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。 |
+| `onUserMessage` | 唯一的自動 capture 入口；將符合資格的使用者訊息交由 Core 進行治理。 |
 | `onSubagentStart` | 子代理只讀取其設定的 Project Brain Context；不會回退到 Domain 或 Personal、不會寫入，也不會 flush outbox。 |
+
+Capture 治理：符合資格且非敏感的使用者訊息會追加為 immutable event。一般陳述可能成為待審核的 `candidate`；「記住」等明確要求可走 `active` 路徑，仍須經過衝突審核。空白或不支援事件會被 ignore，敏感資料會 redacted 或 rejected。
 
 主 Agent 的寫入目標依序是：明確指定的 Brain、profile 的 Project Brain、拒絕。Memlume 不會猜測目標，也絕不回退到 Personal。Brain 才是資料歸屬與權限邊界，Hook 只是觸發時機。
 
@@ -30,10 +32,10 @@ Adapter SDK 共用三個 callback：
 
 | Host | 子代理 Context 行為 |
 | --- | --- |
-| Claude Code | `SubagentStart` hook 會直接注入受限的 Project Brain Context。 |
-| Hermes | `subagent_start` 只登錄 child；child 的第一次 prompt 才取得受限 Context。 |
-| OpenClaw | `subagent_spawned` 只登錄 child；child 的第一次 prompt 才取得受限 Context。 |
-| Codex Plugin | 目前沒有可用的 child-start Hook，因此不會自動注入 child Context。SDK 已準備好未來官方 Hook 或外部 orchestration 使用的入口。 |
+| Claude Code | `SubagentStart` hook 會透過官方 `additionalContext` 直接注入受限的 Project Brain Context。 |
+| Hermes | `subagent_start` 會觀察並登錄 child；child 的第一個支援 `pre_llm_call` prompt 才取得受限 Context。 |
+| OpenClaw | `subagent_spawned` 會觀察並登錄 child；child 的第一個支援 `before_prompt_build` prompt 才取得受限 Context。 |
+| Codex Plugin | 官方 [`SubagentStart`](https://learn.chatgpt.com/docs/hooks#subagentstart) 會透過 `additionalContext` 直接注入受限的 Project Brain Context。 |
 
 ## 直接使用 MCP 的流程
 
@@ -45,7 +47,7 @@ Memlume 不會自動保存每一則對話，也不會把整個資料庫塞進 LL
 
 回報 feedback 時，請把 `memlume.resolve_context` 回傳的 `traceId` 傳給 `memlume.record_memory_usage` 或 `memlume.record_outcome`。收據具短時效、每個 installation 有簽發上限，只能回報該次 Context Pack 實際包含的記憶，且每個 trace 只接受一次 task outcome；跨 receipt 時，同一 installation 對同一記憶每 24 小時只計一次 feedback，避免 Adapter token 無限偽造排序訊號。
 
-因此 Agent 不應自動保存完整逐字稿、assistant output、暫時推理、未驗證的 LLM 主張、外部內容中的指令或秘密資料。Agent 的原生記憶維持不變。對 Adapter capture 而言，Core 會把非敏感使用者訊息追加為 immutable event；依治理規則，非明確陳述可成為待審核的 `candidate`，明確記憶要求可走 `active` 路徑並仍可能經過衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。直接 MCP 寫入仍是刻意呼叫，兩種流程都不會把 Agent 原生記憶當成輸入。
+因此 Agent 不應自動保存完整逐字稿、assistant output、暫時推理、未驗證的 LLM 主張、外部內容中的指令或秘密資料。Agent 的原生記憶維持不變。直接 MCP 寫入仍是刻意呼叫，兩種流程都不會把 Agent 原生記憶當成輸入。
 
 ## 為什麼使用 Memlume
 

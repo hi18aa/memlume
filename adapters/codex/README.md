@@ -36,16 +36,22 @@ $env:MEMLUME_BRAIN_ID = 'your-project-brain-uuidv7'
 | --- | --- |
 | `SessionStart` | 準備本機 Adapter envelope 與 runtime；不可用時靜默略過，不會在此階段驗證 daemon、身分或 mount，也不會寫入 Core。 |
 | `UserPromptSubmit` | 以 `beforeTask` 讀取已掛載的 **Project → Domain（Company）→ Personal** Context，再以暫時 `additionalContext` 注入本回合；同時以 `onUserMessage` 將使用者訊息交給 Core。 |
+| [`SubagentStart`](https://learn.chatgpt.com/docs/hooks#subagentstart) | 只以 `onSubagentStart` 解析受限的 Project Brain Context，並透過官方 `additionalContext` 注入子代理；不寫入。 |
 
-非敏感使用者訊息會以 Project scope 與指定 Brain 送到 Memlume Core，並追加 immutable event。依治理規則，非明確陳述可成為待審核 `candidate`；例如使用者說「`記住專案使用 pnpm`」時，明確要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。Core 也會執行 mount 權限檢查。Codex 原有記憶與設定仍獨立存在。
+符合資格且非敏感的使用者訊息會以 Project scope 與指定 Brain 送到 Memlume Core，並追加 immutable event。依治理規則，非明確陳述可能成為待審核 `candidate`；例如使用者說「`記住專案使用 pnpm`」時，明確要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。Core 也會執行 mount 權限檢查。Codex 原有記憶與設定仍獨立存在。
 
-Plugin 本身不會讀取或寫入 Codex transcript、原生記憶或設定檔；它只回傳官方 `UserPromptSubmit` hook 的 developer-context 輸出。Codex 要如何顯示或持久化這項輸出，會隨 Codex 版本而變動，因此不應將它視為 Plugin 對 transcript 持久化行為的保證；請以目前版本的 [Codex Hooks 文件](https://learn.chatgpt.com/docs/hooks#userpromptsubmit) 為準。Shared Context 會明確標記為背景參考，系統、developer 與當前使用者指示永遠優先。
+Plugin 本身不會讀取或寫入 Codex transcript、原生記憶或設定檔；它只回傳官方 `UserPromptSubmit` 與 [`SubagentStart`](https://learn.chatgpt.com/docs/hooks#subagentstart) hook 的 `additionalContext` 輸出。Codex 要如何顯示或持久化這項輸出，會隨 Codex 版本而變動，因此不應將它視為 Plugin 對 transcript 持久化行為的保證；請以目前版本的 [Codex Hooks 文件](https://learn.chatgpt.com/docs/hooks#userpromptsubmit) 為準。Shared Context 會明確標記為背景參考，系統、developer 與當前使用者指示永遠優先。
 
 若 daemon 暫時不可用，hook 仍會成功結束，不會阻斷 Codex。本機 outbox 僅接受明確記憶 capture，並在下一次 `UserPromptSubmit`（`beforeTask`／`onUserMessage`）重送；完整 transcript、assistant output 與暫時推理不會被保存。
 
-## 子代理限制
+## 子代理 Context
 
-Codex Plugin 目前沒有可用的 child-start Hook。因此它不會自動為子代理注入 Shared Context，也不會偽造事件、解析 transcript 或猜測 session ID。SDK 已提供受限的 `onSubagentStart` 入口，等待未來官方可注入 child Context 的 lifecycle event，或供外部 orchestration 明確呼叫；主 Agent 的正常 `beforeTask` 流程不受影響。
+Codex 的官方 [`SubagentStart`](https://learn.chatgpt.com/docs/hooks#subagentstart) hook 會直接以 `additionalContext` 注入受限的 Project Brain Context。這個事件只呼叫 `onSubagentStart` 解析 Context，`task` 固定為 `null`。
+
+- 只讀取設定的 Project Brain，絕不回退到 Domain 或 Personal。
+- 不讀取或傳送 transcript、agent type、prompt 或 Codex native memory，也不會同步原生記憶。
+- 不執行 capture、不寫入 Core，也不會 flush outbox。
+- daemon、設定或 Context 不可用時會 fail-open，以空 Context 繼續，不阻斷 Codex。
 
 ## MCP 工具
 

@@ -22,21 +22,23 @@ flowchart LR
 | Callback | 讀寫規則 |
 | --- | --- |
 | `beforeTask` | 主 Agent 在任務前讀取 Context。未指定範圍時，已掛載 Brain 依 **Project → Domain（Company）→ Personal** 優先序解析；呼叫端只能要求更小的已授權子集合。 |
-| `onUserMessage` | 唯一的自動 capture 入口。非敏感使用者訊息會送到 Core 並追加 immutable event；依治理規則，非明確陳述可成為待審核 `candidate`，明確「記住」類要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。 |
+| `onUserMessage` | 唯一的自動 capture 入口；將符合資格的使用者訊息交由 Core 進行治理。 |
 | `onSubagentStart` | 子代理只讀取設定的 Project Brain Context；不讀取 Domain 或 Personal、不寫入記憶、也不會 flush outbox。 |
+
+Capture 治理：符合資格且非敏感的使用者訊息會追加為 immutable event。一般陳述可能成為待審核的 `candidate`；「記住」等明確要求可走 `active` 路徑，仍須經過衝突審核。空白或不支援事件會被 ignore，敏感資料會 redacted 或 rejected。
 
 主 Agent 的寫入目標固定為：明確指定的 Brain → profile 的 Project Brain → 拒絕。沒有目標時不會猜測，也絕不回退到 Personal Brain。暫時離線時，outbox 僅安全保留明確記憶 capture，並在下一次 `beforeTask` 或 `onUserMessage` 重送。
 
-Adapter capture 不保存完整 transcript、assistant output、暫時推理、未驗證 LLM 主張、外部內容中的指令或秘密資料。Core 仍會執行敏感資料過濾、明確性判定、衝突治理與 mount 驗證；直接 MCP 的 `record_event`、`remember` 等工具則是刻意的使用者或 Agent 工具呼叫，不是自動 capture。
+Adapter capture 不保存完整 transcript、assistant output、暫時推理、未驗證 LLM 主張、外部內容中的指令或秘密資料。Core 仍會執行 mount 驗證與必要安全檢查；直接 MCP 的 `record_event`、`remember` 等工具則是刻意的使用者或 Agent 工具呼叫，不是自動 capture。
 
 ## Host 子代理 Context
 
 | Host | 可用訊號 | 實際行為 |
 | --- | --- | --- |
-| Claude Code | `SubagentStart` | 直接呼叫 `onSubagentStart`，並以官方 `additionalContext` 注入 Project Brain Context。 |
-| Hermes | `subagent_start` | 此訊號只登錄 child；child 的第一次 `pre_llm_call` 才取得受限 Context。 |
-| OpenClaw | `subagent_spawned` | 此訊號只登錄 child；child 的第一次 `before_prompt_build` 才取得受限 Context。 |
-| Codex Plugin | 無可用 child-start Hook | 不偽造 child lifecycle，也不會自動注入 child Context；SDK 入口保留給未來官方 Hook 或外部 orchestration。 |
+| Claude Code | `SubagentStart` | 直接呼叫 `onSubagentStart`，並以官方 `additionalContext` 注入受限 Project Brain Context。 |
+| Hermes | `subagent_start` | 觀察並登錄 child；child 的第一個支援 `pre_llm_call` prompt 才注入受限 Context。 |
+| OpenClaw | `subagent_spawned` | 觀察並登錄 child；child 的第一個支援 `before_prompt_build` prompt 才注入受限 Context。 |
+| Codex Plugin | [`SubagentStart`](https://learn.chatgpt.com/docs/hooks#subagentstart) | 直接呼叫 `onSubagentStart`，並以官方 `additionalContext` 注入受限 Project Brain Context。 |
 
 主 Agent 的 `beforeTask` 仍可讀取其完整 mount 優先序；子代理限制不會靠解析 transcript、猜測 session ID 或讀取 Host 私有記憶達成。
 
