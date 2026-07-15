@@ -150,6 +150,9 @@ describe('project model migration', () => {
     database
       .prepare('INSERT INTO project_keys (id, brain_id, key_type, canonical_value, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run('remote-key', 'legacy-domain', 'git_remote', 'https://github.com/hi18aa/memlume.git', timestamp, timestamp);
+    database
+      .prepare('INSERT INTO project_keys (id, brain_id, key_type, canonical_value, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('ssh-remote-key', 'legacy-domain', 'git_remote', 'git@github.com:hi18aa/memlume.git', timestamp, timestamp);
     assert.throws(
       () => database
         .prepare('INSERT INTO project_keys (id, brain_id, key_type, canonical_value, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')

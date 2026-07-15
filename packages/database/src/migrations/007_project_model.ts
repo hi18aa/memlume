@@ -63,7 +63,10 @@ const upSql = `
       AND (
         instr(NEW.canonical_value, '?') > 0
         OR instr(NEW.canonical_value, '#') > 0
-        OR instr(NEW.canonical_value, '@') > 0
+        OR (
+          instr(NEW.canonical_value, '://') > 0
+          AND instr(substr(NEW.canonical_value, instr(NEW.canonical_value, '://') + 3), '@') > 0
+        )
       )
   BEGIN
     SELECT RAISE(ABORT, 'git remote must not contain credentials, query, or fragment');
@@ -75,7 +78,10 @@ const upSql = `
       AND (
         instr(NEW.canonical_value, '?') > 0
         OR instr(NEW.canonical_value, '#') > 0
-        OR instr(NEW.canonical_value, '@') > 0
+        OR (
+          instr(NEW.canonical_value, '://') > 0
+          AND instr(substr(NEW.canonical_value, instr(NEW.canonical_value, '://') + 3), '@') > 0
+        )
       )
   BEGIN
     SELECT RAISE(ABORT, 'git remote must not contain credentials, query, or fragment');
