@@ -14,7 +14,7 @@ import {
 } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import { TextDecoder } from 'node:util';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 import {
   BrainRecordSchema,
@@ -122,7 +122,9 @@ export class MarkdownRecordStore {
         if (!path.endsWith('.md')) {
           return;
         }
-        records.push(readStoredRecord(path).record);
+        const stored = readStoredRecord(path);
+        assertRecordPathBinding(path, stored.record, this.brainsDir);
+        records.push(stored.record);
       });
     }
     records.sort((left, right) => {
@@ -182,9 +184,12 @@ export class MarkdownRecordStore {
       }
       let found: string | undefined;
       walk(recordsDir, (path) => {
-        if (found === undefined && path.endsWith(`${target}.md`)) {
-          found = path;
+        if (found !== undefined || basename(path) !== `${target}.md`) {
+          return;
         }
+        const stored = readStoredRecord(path);
+        assertRecordPathBinding(path, stored.record, this.brainsDir);
+        found = path;
       });
       if (found !== undefined) {
         return found;
@@ -253,6 +258,37 @@ function readStoredRecord(path: string): { readonly record: BrainRecord; readonl
   }
   const record = parseRecord(parsed);
   return { record, checksum };
+}
+
+function assertRecordPathBinding(path: string, record: BrainRecord, brainsDir: string): void {
+  if (!('brainId' in record) || typeof record.brainId !== 'string') {
+    throw new Error(`Record integrity failure: ${path} has no Brain binding.`);
+  }
+  const brainId = parseBrainId(record.brainId);
+  const recordId = parseRecordId(record.recordId);
+  const createdAt = 'createdAt' in record ? record.createdAt : undefined;
+  if (createdAt === undefined) {
+    throw new Error(`Record integrity failure: ${path} has no creation timestamp.`);
+  }
+  const expected = join(
+    brainsDir,
+    brainId,
+    'records',
+    createdAt.slice(0, 4),
+    createdAt.slice(5, 7),
+    `${recordId}.md`,
+  );
+  if (samePath(path, expected) === false || basename(path) !== `${recordId}.md`) {
+    throw new Error(`Record integrity failure: path is not bound to Brain ${brainId} and record ${recordId}.`);
+  }
+}
+
+function samePath(left: string, right: string): boolean {
+  const normalizedLeft = resolve(left);
+  const normalizedRight = resolve(right);
+  return process.platform === 'win32'
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
 }
 
 function parseRecord(input: unknown): BrainRecord {

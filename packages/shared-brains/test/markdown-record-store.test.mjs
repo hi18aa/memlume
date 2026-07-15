@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -138,6 +138,37 @@ describe('MarkdownRecordStore', () => {
     store.append(later);
     store.append(earlier);
     assert.deepEqual(store.list(brainId).map((record) => record.recordId), [earlier.recordId, later.recordId]);
+  });
+
+  test('rejects records copied into another Brain directory', async () => {
+    const { rootDir, store } = await createStore();
+    const sourceBrainId = '018f9d4e-7c2a-7b91-8dc0-61749dbcc030';
+    const targetBrainId = '018f9d4e-7c2a-7b91-8dc0-61749dbcc020';
+    const record = semanticRecord({ brainId: sourceBrainId });
+    store.append(record);
+
+    const sourcePath = join(rootDir, 'brains', sourceBrainId, 'records', '2026', '07', `${record.recordId}.md`);
+    const targetDir = join(rootDir, 'brains', targetBrainId, 'records', '2026', '07');
+    await mkdir(targetDir, { recursive: true });
+    await copyFile(sourcePath, join(targetDir, `${record.recordId}.md`));
+
+    assert.throws(() => store.list(targetBrainId), /brain.*mismatch|integrity|record_conflict/i);
+    assert.throws(() => store.read(record.recordId), /brain.*mismatch|integrity|record_conflict/i);
+  });
+
+  test('rejects duplicate record ids across Brain directories without overwriting', async () => {
+    const { rootDir, store } = await createStore();
+    const firstBrainId = '018f9d4e-7c2a-7b91-8dc0-61749dbcc020';
+    const secondBrainId = '018f9d4e-7c2a-7b91-8dc0-61749dbcc030';
+    const record = semanticRecord({ brainId: firstBrainId });
+    store.append(record);
+    const duplicate = semanticRecord({ ...record, brainId: secondBrainId });
+
+    assert.throws(() => store.append(duplicate), /record_conflict/i);
+    assert.equal(
+      existsSync(join(rootDir, 'brains', secondBrainId, 'records', '2026', '07', `${record.recordId}.md`)),
+      false,
+    );
   });
 
   test('rejects symlinked brain directories that escape the root', async (t) => {
