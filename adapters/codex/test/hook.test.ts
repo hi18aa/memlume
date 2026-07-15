@@ -158,6 +158,14 @@ describe('Codex plugin hook', () => {
     expect(mcp.mcpServers.memlume.args).toEqual(['./scripts/mcp.mjs']);
     expect(mcp.mcpServers.memlume.env_vars).toEqual(['MEMLUME_HOME', 'MEMLUME_TOKEN', 'MEMLUME_DAEMON_URL', 'MEMLUME_CONFIG_PATH']);
     expect(Object.keys(hooks.hooks)).toEqual(['SessionStart', 'UserPromptSubmit', 'SubagentStart']);
+    expect(hooks.hooks.SubagentStart).toEqual([{
+      hooks: [{
+        type: 'command',
+        command: 'node "$PLUGIN_ROOT/hooks/memlume.mjs"',
+        commandWindows: 'node "$env:PLUGIN_ROOT\\hooks\\memlume.mjs"',
+        timeout: 20,
+      }],
+    }]);
     expect(JSON.stringify(hooks)).toContain('PLUGIN_ROOT');
     expect(JSON.stringify(hooks)).toContain('commandWindows');
   });
