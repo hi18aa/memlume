@@ -45,6 +45,10 @@ function semanticRecord(overrides = {}) {
 }
 
 describe('MarkdownRecordStore', () => {
+  test('requires an absolute storage root', () => {
+    assert.throws(() => new MarkdownRecordStore({ rootDir: 'relative/../memlume-records' }), /absolute/i);
+  });
+
   test('writes canonical immutable records and round-trips them', async () => {
     const { rootDir, store } = await createStore();
     const record = semanticRecord();

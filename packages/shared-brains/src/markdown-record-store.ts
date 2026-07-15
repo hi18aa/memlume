@@ -43,6 +43,9 @@ export class MarkdownRecordStore {
     if (typeof options.rootDir !== 'string' || options.rootDir.trim().length === 0) {
       throw new Error('rootDir is required.');
     }
+    if (isAbsolute(options.rootDir) === false) {
+      throw new Error('Storage rootDir must be absolute.');
+    }
     this.rootDir = resolve(options.rootDir);
     this.brainsDir = join(this.rootDir, 'brains');
     this.brainId = options.brainId === undefined ? undefined : parseBrainId(options.brainId);
