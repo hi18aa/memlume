@@ -41,7 +41,10 @@ type OutcomeStore = {
     readonly outcome?: 'adopted' | 'ignored' | 'corrected' | null;
   }, brainIds: readonly string[]): unknown;
 };
-type MemoryStoreConstructor = new (database: SqliteDatabase) => MemoryStore;
+type MemoryStoreConstructor = new (
+  database: SqliteDatabase,
+  options?: { readonly allowLegacyWrites?: boolean },
+) => MemoryStore;
 type ContextResolverConstructor = new (store: MemoryStore, outcomes?: OutcomeStore) => {
   resolve(input: {
     readonly intent: string;
@@ -71,7 +74,7 @@ function createResolver(): { database: SqliteDatabase; store: MemoryStore; outco
 
   expect(MemoryStore).toBeTypeOf('function');
   expect(ContextResolver).toBeTypeOf('function');
-  const store = new MemoryStore!(database);
+  const store = new MemoryStore!(database, { allowLegacyWrites: true });
   const outcomes = new (retrieval as { OutcomeStore: new (database: SqliteDatabase) => OutcomeStore }).OutcomeStore(database);
   return { database, store, outcomes, resolver: new ContextResolver!(store, outcomes) };
 }
