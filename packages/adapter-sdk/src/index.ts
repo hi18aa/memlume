@@ -12,13 +12,18 @@ import {
   createUuidV7,
   redactSensitiveJson,
   redactSensitiveText,
+  type AdapterCallback,
   type AdapterEnvelope,
   type ContextPack,
   type JsonValue,
   type MemoryScope,
 } from '@memlume/contracts';
 
+export * from './outbox.js';
+
 const REQUEST_TIMEOUT_MS = 10_000;
+export const ADAPTER_PROTOCOL_VERSION = '1';
+export const ADAPTER_VERSION = '0.2.0';
 const CONTEXT_REQUEST_TIMEOUT_MS = 250;
 const OUTBOX_FLUSH_GRACE_MS = 50;
 const OUTBOX_LOCK_RETRY_MS = 10;
@@ -205,7 +210,7 @@ export class AdapterClient {
     }
     this.bindOutbox(input.envelope);
     await withTimeout(this.flush(), OUTBOX_FLUSH_GRACE_MS).catch(() => undefined);
-    return this.resolveContext(input);
+    return this.resolveContext(input, 'beforeTask');
   }
 
   async onUserMessage(envelope: AdapterEnvelope, message: AdapterMessage): Promise<WriteResult> {
@@ -247,20 +252,20 @@ export class AdapterClient {
     ) {
       return this.unavailableContext(beforeTaskInput);
     }
-    return this.resolveContext({ ...beforeTaskInput, requestedBrainIds: [projectBrainId] });
+    return this.resolveContext({ ...beforeTaskInput, requestedBrainIds: [projectBrainId] }, 'onSubagentStart');
   }
 
   outboxStatus(): Promise<OutboxStatus> {
     return this.serialize(() => this.readOutboxStatus());
   }
 
-  private async resolveContext(input: BeforeTaskInput): Promise<ContextPack> {
+  private async resolveContext(input: BeforeTaskInput, callback: AdapterCallback): Promise<ContextPack> {
     const { envelope: _envelope, ...requestInput } = input;
     if (redactSensitiveJson(requestInput as unknown as JsonValue).detected) {
       return this.unavailableContext(input);
     }
     try {
-      const response = await this.request('/v1/context/resolve', 'POST', requestInput, CONTEXT_REQUEST_TIMEOUT_MS);
+      const response = await this.request('/v1/context/resolve', 'POST', requestInput, CONTEXT_REQUEST_TIMEOUT_MS, callback);
       if (!response.ok) {
         throw new Error('Context request failed.');
       }
@@ -385,7 +390,7 @@ export class AdapterClient {
 
     try {
       const { endpoint, ...body } = request;
-      const response = await this.request(endpoint, 'POST', body, this.writeTimeoutMs);
+      const response = await this.request(endpoint, 'POST', body, this.writeTimeoutMs, 'onUserMessage');
       if (response.ok) {
         const result = await response.json();
         const memoryStatus = confirmedCapture(result);
@@ -437,14 +442,20 @@ export class AdapterClient {
     }
   }
 
-  private request(path: string, method: 'POST', body: unknown, timeoutMs = REQUEST_TIMEOUT_MS): Promise<Response> {
+  private request(path: string, method: 'POST', body: unknown, timeoutMs = REQUEST_TIMEOUT_MS, callback: AdapterCallback = 'beforeTask'): Promise<Response> {
     if (!hasToken(this.token)) {
       throw new Error('Adapter token is unavailable.');
     }
     return withTimeout(this.fetch(new URL(path, this.daemonUrl), {
       method,
       redirect: 'error',
-      headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
+      headers: {
+        authorization: `Bearer ${this.token}`,
+        'content-type': 'application/json',
+        'x-memlume-callback': callback,
+        'x-memlume-protocol-version': ADAPTER_PROTOCOL_VERSION,
+        'x-memlume-adapter-version': ADAPTER_VERSION,
+      },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     }), timeoutMs);
