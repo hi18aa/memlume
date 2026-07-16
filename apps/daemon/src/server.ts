@@ -1,4 +1,4 @@
-import { createBackup, importBrain, restoreBackup, RestoreRecoveryError } from '@memlume/backup';
+import { createBackup, createMarkdownBundle, importBrain, restoreBackup, RestoreRecoveryError } from '@memlume/backup';
 import { openDatabase, readDatabaseState, setDatabaseAuthority, type SqliteDatabase } from '@memlume/database/internal';
 import { ContextResolver } from '@memlume/context-resolver';
 import { EventJournal } from '@memlume/event-journal';
@@ -71,6 +71,10 @@ export function createDaemon({ databasePath, setupToken, consolePath = defaultCo
       } finally {
         rmSync(directory, { force: true, recursive: true });
       }
+    },
+    async createMarkdown() {
+      requireRuntime(runtime);
+      return createMarkdownBundle({ dataRoot: resolve(dirname(databasePath)) });
     },
     async import({ bundle, password, name }) {
       const current = requireRuntime(runtime);

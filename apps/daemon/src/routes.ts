@@ -29,7 +29,7 @@ import { EventBrainConflictError, EventJournal } from '@memlume/event-journal';
 import { assessMemoryConflict, compileMemory, type MemoryProposal } from '@memlume/memory-compiler';
 import { MemoryStore, OutcomeFeedbackRateLimitError, OutcomeMemoryAccessError, OutcomeReceiptError, OutcomeReceiptRateLimitError, OutcomeStore, SourceEventBrainMismatchError } from '@memlume/retrieval';
 import { BrainStore } from '@memlume/shared-brains';
-import { BrainImportConflictError, BrainImportRequiredError, FullBackupAuthenticationRequiredError, FullRestoreRequiredError, RestoreRecoveryError } from '@memlume/backup';
+import { BrainImportConflictError, BrainImportRequiredError, FullBackupAuthenticationRequiredError, FullRestoreRequiredError, RestoreRecoveryError, verifyMarkdownBundle } from '@memlume/backup';
 import { planCapture, type AtomPlan } from './capture-pipeline.js';
 import { SemanticMemoryService } from './semantic-memory-service.js';
 import { RoutingInboxStore } from '@memlume/shared-brains';
@@ -181,6 +181,8 @@ export interface DaemonServices {
 
 export interface BackupLifecycle {
   create(input: { readonly brainId?: string; readonly password?: string }): Promise<Buffer>;
+  /** Create a Markdown-authority v3 bundle without SQLite credentials. */
+  createMarkdown?(): Promise<Uint8Array>;
   import(input: { readonly bundle: Uint8Array; readonly password?: string; readonly name?: string }): Promise<unknown>;
   beginRestore(): boolean;
   cancelRestore(): void;
@@ -293,6 +295,35 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
       throw error;
     }
   });
+  app.post('/v1/setup/backups/v3', requireSetup, async (_request, response) => {
+    if (services.backup.createMarkdown === undefined) {
+      response.status(503).json({ error: 'markdown_backup_unavailable' });
+      return;
+    }
+    const bundle = await services.backup.createMarkdown();
+    response
+      .status(200)
+      .set('content-type', 'application/vnd.memlume.v3')
+      .set('content-disposition', 'attachment; filename="memlume-v3.memlume"')
+      .send(Buffer.from(bundle));
+  });
+  app.post(
+    '/v1/setup/backups/v3/verify',
+    requireSetup,
+    express.raw({ type: ['application/vnd.memlume.v3', 'application/octet-stream'], limit: '128mb' }),
+    (request: Request, response: Response) => {
+      if (!Buffer.isBuffer(request.body) || request.body.byteLength === 0) {
+        response.status(400).json({ error: 'invalid_backup' });
+        return;
+      }
+      try {
+        const verified = verifyMarkdownBundle(request.body);
+        response.json({ manifest: verified.manifest, files: verified.manifest.files });
+      } catch {
+        response.status(400).json({ error: 'invalid_backup' });
+      }
+    },
+  );
   app.post(
     '/v1/setup/brains/import',
     requireSetup,

@@ -80,6 +80,29 @@ describe('daemon backup maintenance lifecycle', () => {
     expect(rejected.body).toEqual({ error: 'full_backup_password_required' });
   });
 
+  test('creates and verifies a Markdown-first v3 backup through setup API', async () => {
+    const daemon = await startDaemon({ databasePath: databasePath(), port: 0, setupToken: SETUP_TOKEN });
+    daemons.push(daemon);
+
+    const exported = await fetch(`${daemonUrl(daemon)}/v1/setup/backups/v3`, {
+      method: 'POST',
+      headers: setupHeaders(),
+    });
+    expect(exported.status).toBe(200);
+    expect(exported.headers.get('content-type')).toBe('application/vnd.memlume.v3');
+    const bundle = new Uint8Array(await exported.arrayBuffer());
+    expect(bundle.byteLength).toBeGreaterThan(0);
+
+    const verified = await requestJson(daemon, '/v1/setup/backups/v3/verify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/vnd.memlume.v3', 'x-memlume-setup-token': SETUP_TOKEN },
+      body: bundle,
+    });
+    expect(verified.response.status).toBe(200);
+    expect(verified.body).toMatchObject({ manifest: { format: 'memlume', formatVersion: 3 } });
+    expect(verified.body.files).toEqual([]);
+  });
+
   test('exports and restores a live daemon, then reopens it for safe reads and writes', async () => {
     const daemon = await startDaemon({ databasePath: databasePath(), port: 0, setupToken: SETUP_TOKEN });
     daemons.push(daemon);
