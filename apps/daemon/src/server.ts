@@ -3,7 +3,7 @@ import { openDatabase, type SqliteDatabase } from '@memlume/database/internal';
 import { ContextResolver } from '@memlume/context-resolver';
 import { EventJournal } from '@memlume/event-journal';
 import { MemoryStore, OutcomeStore } from '@memlume/retrieval';
-import { BrainStore } from '@memlume/shared-brains';
+import { BrainStore, RoutingInboxStore } from '@memlume/shared-brains';
 import express, { type Express } from 'express';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { type AddressInfo, type Server } from 'node:net';
@@ -12,6 +12,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { registerRoutes, type BackupLifecycle } from './routes.js';
+import { SemanticMemoryService } from './semantic-memory-service.js';
 
 export interface DaemonOptions {
   readonly databasePath: string;
@@ -205,10 +206,12 @@ export function createDaemon({ databasePath, setupToken, consolePath = defaultCo
       const outcomes = new OutcomeStore(database);
       const resolver = new ContextResolver(store, outcomes);
       const brains = new BrainStore(database);
+      const semantic = new SemanticMemoryService({ journal, store });
+      const routingInbox = new RoutingInboxStore({ rootDir: resolve(dirname(databasePath)) });
       const router = express();
       router.disable('x-powered-by');
       router.use(express.json({ limit: '1mb' }));
-      registerRoutes(router, { database, journal, store, resolver, outcomes, brains, setupToken, backup });
+      registerRoutes(router, { database, journal, store, resolver, outcomes, brains, semantic, routingInbox, setupToken, backup });
       return { database, brains, router };
     } catch (error) {
       database.close();

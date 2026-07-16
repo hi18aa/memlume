@@ -18,6 +18,13 @@ export type AtomPlan = {
   readonly atomKey: string;
   readonly route: ReturnType<typeof routeAtom>;
   readonly status: ReturnType<typeof activationPolicy>;
+  readonly text: string;
+  readonly canonicalText: string;
+  readonly scope: 'personal' | 'project';
+  readonly kind: 'fact' | 'preference' | 'decision' | 'event' | 'capability';
+  readonly confidence: number;
+  readonly explicitness: number;
+  readonly evidence: string;
 };
 
 /** Pure admission → routing → activation plan used by every daemon entrypoint. */
@@ -29,7 +36,18 @@ export async function planCapture(input: CapturePipelineInput): Promise<CaptureP
     for (const atom of compilation.atoms) {
       const route = routeAtom({ atom, catalog: input.catalog });
       const status = activationPolicy({ atom, route: route.status });
-      atomPlans.push({ route, atomKey: atom.atomKey, status });
+      atomPlans.push({
+        route,
+        atomKey: atom.atomKey,
+        status,
+        text: atom.text,
+        canonicalText: atom.canonicalText,
+        scope: atom.scope,
+        kind: atom.kind,
+        confidence: atom.confidence,
+        explicitness: atom.explicitness,
+        evidence: atom.evidence,
+      });
     }
   }
   const atoms = atomPlans.map((plan) => ({

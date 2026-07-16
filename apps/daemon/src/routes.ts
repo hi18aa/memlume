@@ -15,6 +15,9 @@ import {
   PolicyDataSchema,
   PreferenceDataSchema,
   UuidV7Schema,
+  createUuidV7,
+  CaptureReceiptSchema,
+  type CaptureReceipt,
   redactSensitiveJson,
   redactSensitiveText,
   type AgentInstallation,
@@ -27,6 +30,9 @@ import { assessMemoryConflict, compileMemory, type MemoryProposal } from '@memlu
 import { MemoryStore, OutcomeFeedbackRateLimitError, OutcomeMemoryAccessError, OutcomeReceiptError, OutcomeReceiptRateLimitError, OutcomeStore, SourceEventBrainMismatchError } from '@memlume/retrieval';
 import { BrainStore } from '@memlume/shared-brains';
 import { BrainImportConflictError, BrainImportRequiredError, FullBackupAuthenticationRequiredError, FullRestoreRequiredError, RestoreRecoveryError } from '@memlume/backup';
+import { planCapture, type AtomPlan } from './capture-pipeline.js';
+import { SemanticMemoryService } from './semantic-memory-service.js';
+import { RoutingInboxStore } from '@memlume/shared-brains';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import express, { type ErrorRequestHandler, type Express, type Request, type RequestHandler, type Response } from 'express';
 import { z, ZodError } from 'zod';
@@ -45,6 +51,17 @@ const AppendEventRequestSchema = z
 const CaptureMemoryRequestSchema = AppendEventRequestSchema.extend({
   brainId: UuidV7Schema,
   scope: MemoryScopeSchema,
+}).strict();
+
+const AutomaticCaptureRequestSchema = z.object({
+  captureId: NonEmptyTextSchema,
+  rawContent: z.string(),
+  eventType: NonEmptyTextSchema.default('user_message'),
+  source: EventSourceSchema.strict(),
+  actor: z.enum(['user', 'assistant', 'tool']).optional(),
+  structuredData: JsonValueSchema.optional(),
+  occurredAt: IsoUtcDateTimeSchema.optional(),
+  workspacePath: NonEmptyTextSchema.optional(),
 }).strict();
 
 const MemoryRequestBaseSchema = z
@@ -157,6 +174,9 @@ export interface DaemonServices {
   readonly brains: BrainStore;
   readonly setupToken?: string;
   readonly backup: BackupLifecycle;
+  /** Unified semantic write boundary. Optional for v0.2-compatible test fixtures. */
+  readonly semantic?: SemanticMemoryService;
+  readonly routingInbox?: RoutingInboxStore;
 }
 
 export interface BackupLifecycle {
@@ -344,6 +364,34 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
   );
 
   const requireAdapter = requireAdapterToken(services.brains);
+
+  /**
+   * Automatic capture is the default Host path.  The request contains only
+   * workspace/evidence; Brain selection happens from the daemon-owned mount
+   * catalog and ambiguous atoms are persisted in the durable Inbox.
+   */
+  app.post('/v1/capture', requireAdapter, async (request, response) => {
+    const input = AutomaticCaptureRequestSchema.parse(request.body);
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const catalog = captureCatalog(services.brains, installation.id);
+    const plan = await planCapture({
+      captureId: input.captureId,
+      rawContent: redactSensitiveText(input.rawContent).redacted,
+      eventType: input.eventType,
+      source: redactEventSource(input.source),
+      actor: input.actor,
+      ...(input.workspacePath === undefined ? {} : { sourceReference: input.workspacePath }),
+      catalog,
+    });
+    const semantic = services.semantic ?? new SemanticMemoryService({ journal: services.journal, store: services.store });
+    const receipt = await persistAutomaticCapture(services, semantic, input, plan.atoms, installation.id);
+    response.status(201).json({ receipt: CaptureReceiptSchema.parse(receipt) });
+  });
+
   app.post('/v1/events', requireAdapter, (request, response) => {
     const input = AppendEventRequestSchema.parse(request.body);
     const brainId = input.brainId;
@@ -353,7 +401,8 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     const rawContent = redactSensitiveText(input.rawContent).redacted;
     const structuredData = input.structuredData === undefined ? undefined : redactSensitiveJson(input.structuredData).redacted;
     const source = redactEventSource(input.source);
-    response.status(201).json({ event: services.journal.append({ ...input, brainId, rawContent, source, ...(structuredData === undefined ? {} : { structuredData }) }) });
+    const semantic = services.semantic ?? new SemanticMemoryService({ journal: services.journal, store: services.store });
+    response.status(201).json({ event: semantic.appendEvent({ ...input, brainId, rawContent, source, ...(structuredData === undefined ? {} : { structuredData }) }) });
   });
 
   app.post('/v1/memories', requireAdapter, (request, response) => {
@@ -373,9 +422,8 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     const requiresCandidate = installation !== undefined
       && inferenceClientTypes.has(installation.clientType)
       && !hasUserMemoryConfirmation(request, services.setupToken, input, userConfirmations);
-    const memory = requiresCandidate
-      ? services.store.saveCandidate({ ...sanitized, brainId })
-      : services.store.save({ ...sanitized, brainId });
+    const semantic = services.semantic ?? new SemanticMemoryService({ journal: services.journal, store: services.store });
+    const memory = semantic.saveMemory({ ...sanitized, brainId }, requiresCandidate ? 'candidate' : 'active');
     response.status(201).json({ memory });
   });
 
@@ -392,7 +440,8 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
       structuredData: redactSensitiveJson(input.structuredData).redacted,
       scope: redactMemoryScope(input.scope),
     });
-    response.status(201).json({ memory: services.store.saveCandidate({ ...sanitized, brainId }) });
+    const semantic = services.semantic ?? new SemanticMemoryService({ journal: services.journal, store: services.store });
+    response.status(201).json({ memory: semantic.saveMemory({ ...sanitized, brainId }, 'candidate') });
   });
 
   app.post('/v1/memories/capture', requireAdapter, (request, response) => {
@@ -831,6 +880,124 @@ function tokensMatch(expected: string, actual: string | undefined): boolean {
 }
 
 const inferenceClientTypes = new Set(['hermes', 'codex', 'openclaw', 'claude-code']);
+
+function captureCatalog(brains: BrainStore, installationId: string): readonly {
+  readonly brainId: string;
+  readonly kind: 'personal' | 'project';
+  readonly role: 'personal' | 'primary' | 'linked';
+  readonly access: 'read' | 'read_write';
+  readonly name: string;
+}[] {
+  const mounted = brains.listMountedBrains(installationId);
+  let primaryAssigned = false;
+  return mounted.map(({ brain, access }) => {
+    if (brain.kind === 'personal') {
+      return { brainId: brain.id, kind: brain.kind, role: 'personal' as const, access, name: brain.name };
+    }
+    const role = primaryAssigned ? 'linked' as const : 'primary' as const;
+    primaryAssigned = true;
+    return { brainId: brain.id, kind: brain.kind, role, access, name: brain.name };
+  });
+}
+
+async function persistAutomaticCapture(
+  services: DaemonServices,
+  semantic: SemanticMemoryService,
+  input: z.infer<typeof AutomaticCaptureRequestSchema>,
+  atoms: readonly AtomPlan[],
+  installationId: string,
+): Promise<CaptureReceipt> {
+  const atomMemoryIds = new Map<string, string>();
+  for (const atom of atoms) {
+    if (atom.route.status === 'routing_required') {
+      if (services.routingInbox !== undefined) {
+        const now = new Date().toISOString();
+        services.routingInbox.addPending({
+          recordType: 'routing_inbox',
+          schemaVersion: '0.3',
+          recordId: createUuidV7(),
+          captureId: input.captureId,
+          atomKey: atom.atomKey,
+          status: 'routing_required',
+          statement: redactSensitiveText(atom.canonicalText).redacted,
+          evidenceRef: atom.evidence,
+          createdAt: now,
+          updatedAt: now,
+          ...(atom.route.status === 'routing_required' && atom.route.reason === 'unknown_project' ? {} : {}),
+        });
+      }
+      continue;
+    }
+    if (atom.route.status !== 'routed' || (atom.status !== 'active' && atom.status !== 'candidate')) continue;
+    const brainId = atom.route.brainId;
+    const event = {
+      brainId,
+      rawContent: atom.text,
+      eventType: input.eventType,
+      source: { ...redactEventSource(input.source), reference: `${input.captureId}:${atom.atomKey}` },
+      ...(input.occurredAt === undefined ? {} : { occurredAt: input.occurredAt }),
+    };
+    if (atom.kind === 'event') {
+      semantic.appendEvent(event);
+      continue;
+    }
+    const kind = atom.kind === 'capability' ? 'fact' : atom.kind;
+    const structuredData = structuredDataForAtom(kind, atom.canonicalText, atom.confidence);
+    const memory = semantic.capture({
+      event,
+      memory: {
+        brainId,
+        kind,
+        canonicalText: atom.canonicalText,
+        structuredData,
+        scope: atom.scope === 'project' ? { level: 'project', projectId: atom.route.brainId } : { level: 'global' },
+        confidence: atom.confidence,
+        explicitness: atom.explicitness,
+      },
+      status: atom.status,
+    }).memory;
+    if (memory !== undefined) atomMemoryIds.set(atom.atomKey, memory.id);
+  }
+  const receipt = { ...servicesReceiptForAtoms(atoms, input.captureId), atoms: servicesReceiptForAtoms(atoms, input.captureId).atoms.map((atom) => {
+    const memoryId = atomMemoryIds.get(atom.atomKey);
+    return memoryId === undefined ? atom : { ...atom, memoryId };
+  }) };
+  return CaptureReceiptSchema.parse(receipt);
+}
+
+function servicesReceiptForAtoms(atoms: readonly AtomPlan[], captureId: string): CaptureReceipt {
+  const now = new Date().toISOString();
+  const receiptAtoms = atoms.map((atom) => ({
+    atomKey: atom.atomKey,
+    status: atom.status,
+    ...(atom.route.status === 'routed' ? { brainId: atom.route.brainId } : {}),
+    ...(atom.status === 'routing_required' ? { reason: 'routing_required' } : {}),
+  }));
+  return CaptureReceiptSchema.parse({
+    captureId,
+    sourceReference: captureId,
+    status: aggregateCaptureStatus(receiptAtoms.map((atom) => atom.status)),
+    atoms: receiptAtoms,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+function aggregateCaptureStatus(statuses: readonly string[]): CaptureReceipt['status'] {
+  if (statuses.length === 0) return 'ignored';
+  const order: readonly CaptureReceipt['status'][] = ['failed', 'rejected', 'routing_required', 'candidate', 'event_only', 'active', 'queued', 'ignored'];
+  return order.find((status) => statuses.includes(status)) ?? 'failed';
+}
+
+function structuredDataForAtom(kind: 'fact' | 'preference' | 'decision', text: string, confidence: number): JsonValue {
+  if (kind === 'preference') {
+    return { domain: 'general', subject: 'user', dimension: text, value: text, strength: confidence, confidence } as JsonValue;
+  }
+  if (kind === 'decision') {
+    return { title: text, status: 'active', rationale: [text] } as JsonValue;
+  }
+  return { subject: 'statement', predicate: 'content', object: text, confidence } as JsonValue;
+}
 
 class UserConfirmationStore {
   constructor(private readonly database: SqliteDatabase) {}
