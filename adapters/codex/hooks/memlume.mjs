@@ -48,18 +48,20 @@ async function beforePrompt(input, configuration) {
   const turnId = text(input.turn_id);
   if (prompt === undefined || turnId === undefined) return {};
   const client = await createClient(configuration.brainId);
-  backgroundWrite('capture', configuration.envelope, {
+  const capture = {
     messageId: `codex:${configuration.envelope.sessionId}:${turnId}`,
     content: prompt,
     brainId: configuration.brainId,
     scope: configuration.scope,
-  });
+  };
   const context = await client.beforeTask({
     intent: 'shared_memory',
     scope: configuration.scope,
     task: prompt,
     contextBudget: CONTEXT_BUDGET,
   });
+  // Read the previous Brain state before enqueueing this turn, so it cannot self-inject.
+  backgroundWrite('capture', configuration.envelope, capture);
   const additionalContext = compactContext(context);
   return additionalContext === undefined
     ? {}

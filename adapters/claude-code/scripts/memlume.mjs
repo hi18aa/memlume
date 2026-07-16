@@ -49,13 +49,14 @@ async function beforePrompt(input, configuration) {
     brainId: configuration.brainId,
     scope: configuration.scope,
   };
-  backgroundWrite('capture', configuration.envelope, message);
   const context = await client.beforeTask({
     intent: 'shared_memory',
     scope: configuration.scope,
     task: prompt,
     contextBudget: CONTEXT_BUDGET,
   });
+  // Read the previous Brain state before enqueueing this turn, so it cannot self-inject.
+  backgroundWrite('capture', configuration.envelope, message);
   const additionalContext = compactContext(context);
   return additionalContext === undefined
     ? {}
