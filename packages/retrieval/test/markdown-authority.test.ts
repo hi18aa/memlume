@@ -76,4 +76,32 @@ describe('MemoryStore Markdown authority mode', () => {
     expect(projection?.record_id).toBeTruthy();
     expect(database.prepare('SELECT source_type FROM events WHERE id = ?').get(projection!.record_id)).toEqual({ source_type: 'markdown' });
   });
+
+  test('returns the existing authority memory when the same source event is retried', () => {
+    const { root, database, brainId } = fixture();
+    const sourceEventId = createUuidV7();
+    database.prepare(`
+      INSERT INTO events (
+        id, event_type, raw_content, structured_data, source_type, source_agent, source_reference,
+        source_data, occurred_at, ingested_at, processing_status, content_hash
+      ) VALUES (?, 'user_message', ?, NULL, 'adapter', 'test', ?, '{}', ?, ?, 'processed', ?)
+    `).run(
+      sourceEventId,
+      '使用 Vue 開發前端。',
+      `capture:${sourceEventId}`,
+      '2026-07-16T00:00:00.000Z',
+      '2026-07-16T00:00:00.000Z',
+      'd'.repeat(64),
+    );
+    database.prepare('INSERT INTO event_brains (event_id, brain_id, created_at) VALUES (?, ?, ?)')
+      .run(sourceEventId, brainId, '2026-07-16T00:00:00.000Z');
+
+    const store = new MemoryStore(database, { markdownRoot: root });
+    const first = store.save({ ...draft(brainId), sourceEventId });
+    const retry = store.save({ ...draft(brainId), sourceEventId });
+
+    expect(retry.id).toBe(first.id);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM record_projections').get()).toEqual({ count: 1 });
+    expect(store.list({ brainIds: [brainId], status: 'active' })).toHaveLength(1);
+  });
 });

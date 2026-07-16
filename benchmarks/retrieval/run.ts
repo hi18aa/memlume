@@ -26,7 +26,7 @@ const now = new Date().toISOString();
 const today = now.slice(0, 10);
 const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
 const database = openDatabase(':memory:');
-const store = new MemoryStore(database);
+const store = new MemoryStore(database, { allowLegacyWrites: true });
 const resolver = new ContextResolver(store);
 
 database.prepare(`INSERT INTO brains (id, kind, name, created_at, updated_at) VALUES (?, 'project', ?, ?, ?)`).run(projectBrainId, 'Benchmark project', now, now);

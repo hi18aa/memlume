@@ -22,7 +22,7 @@ describe('outcome store', () => {
     directories.push(directory);
     const database = openDatabase(join(directory, 'memlume.sqlite'));
     databases.push(database);
-    const store = new MemoryStore(database);
+    const store = new MemoryStore(database, { allowLegacyWrites: true });
     const outcomes = new OutcomeStore(database);
     const memory = store.save({
       brainId: DEFAULT_PERSONAL_BRAIN_ID,
@@ -70,7 +70,7 @@ describe('outcome store', () => {
     directories.push(directory);
     const database = openDatabase(join(directory, 'memlume.sqlite'));
     databases.push(database);
-    const store = new MemoryStore(database);
+    const store = new MemoryStore(database, { allowLegacyWrites: true });
     const outcomes = new OutcomeStore(database);
     const memory = store.save({
       brainId: DEFAULT_PERSONAL_BRAIN_ID,
@@ -112,7 +112,7 @@ describe('outcome store', () => {
     directories.push(directory);
     const database = openDatabase(join(directory, 'memlume.sqlite'));
     databases.push(database);
-    const store = new MemoryStore(database);
+    const store = new MemoryStore(database, { allowLegacyWrites: true });
     const outcomes = new OutcomeStore(database);
     const included = store.save({
       brainId: DEFAULT_PERSONAL_BRAIN_ID,
@@ -188,7 +188,7 @@ describe('outcome store', () => {
     directories.push(directory);
     const database = openDatabase(join(directory, 'memlume.sqlite'));
     databases.push(database);
-    const store = new MemoryStore(database);
+    const store = new MemoryStore(database, { allowLegacyWrites: true });
     const outcomes = new OutcomeStore(database);
     const memory = store.save({
       brainId: DEFAULT_PERSONAL_BRAIN_ID,

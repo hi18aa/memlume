@@ -156,11 +156,16 @@ export class MarkdownMemoryAuthority implements MemoryWriteAuthority {
     if (!isManualMemoryKind(input.kind)) {
       throw new Error('Manual memory must be a policy, preference, fact, or decision.');
     }
+    const brainId = UuidV7Schema.parse(input.brainId);
+    const retry = this.findRetry(input, brainId, status);
+    if (retry !== undefined) {
+      return retry;
+    }
     const now = new Date().toISOString();
     const memory = MemoryItemSchema.parse({
       id: createUuidV7(),
       ...input,
-      brainId: UuidV7Schema.parse(input.brainId),
+      brainId,
       status,
       priority: input.priority ?? 0,
       confidence: input.confidence ?? 1,
@@ -172,6 +177,23 @@ export class MarkdownMemoryAuthority implements MemoryWriteAuthority {
     this.ensureSourceEvent(memory);
     this.persistRecord(memoryRecord(memory));
     return this.requireMemory(memory.id, [memory.brainId]);
+  }
+
+  private findRetry(
+    input: SaveMemoryInput,
+    brainId: string,
+    status: Extract<MemoryStatus, 'active' | 'candidate'>,
+  ): MemoryItem | undefined {
+    if (input.sourceEventId === undefined) {
+      return undefined;
+    }
+    const sourceEventId = UuidV7Schema.parse(input.sourceEventId);
+    return this.query.list({ brainIds: [brainId], status }).find((memory) =>
+      memory.sourceEventId === sourceEventId &&
+      memory.kind === input.kind &&
+      sameScope(memory.scope, input.scope) &&
+      sameCanonicalText(memory.canonicalText, input.canonicalText),
+    );
   }
 
   private persistRecord(record: ReturnType<typeof memoryRecord>): boolean {

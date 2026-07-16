@@ -60,7 +60,10 @@ type MemoryStore = {
   }>;
 };
 
-type MemoryStoreConstructor = new (database: SqliteDatabase) => MemoryStore;
+type MemoryStoreConstructor = new (
+  database: SqliteDatabase,
+  options?: { readonly allowLegacyWrites?: boolean },
+) => MemoryStore;
 const { MemoryStore } = retrieval as { MemoryStore?: MemoryStoreConstructor };
 
 const databases: SqliteDatabase[] = [];
@@ -73,7 +76,7 @@ function createStore(): { database: SqliteDatabase; store: MemoryStore } {
   databases.push(database);
 
   expect(MemoryStore).toBeTypeOf('function');
-  return { database, store: new MemoryStore!(database) };
+  return { database, store: new MemoryStore!(database, { allowLegacyWrites: true }) };
 }
 
 function createBrain(database: SqliteDatabase, id: string): void {
@@ -154,6 +157,18 @@ afterEach(() => {
 });
 
 describe('MemoryStore', () => {
+  test('requires an explicit legacy-write opt-in when no Markdown authority is configured', () => {
+    const { database } = createStore();
+    const store = new MemoryStore!(database);
+    expect(() => store.save({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
+      kind: 'fact',
+      canonicalText: 'Default writes are disabled.',
+      structuredData: { subject: 'writer', predicate: 'mode', object: 'authority', confidence: 1 },
+      scope: { level: 'global' },
+    })).toThrow(/markdown_authority_required/i);
+  });
+
   test('keeps inferred memories as candidates until approval, then supersedes the corrected active memory', () => {
     const { store } = createStore();
     const oldMemory = store.save({

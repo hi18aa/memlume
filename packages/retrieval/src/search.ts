@@ -160,7 +160,9 @@ export class MemoryStore {
     this.authority = options.authority ?? (options.markdownRoot === undefined
       ? undefined
       : new MarkdownMemoryAuthority(database, options.markdownRoot, this));
-    this.allowLegacyWrites = options.allowLegacyWrites ?? this.authority === undefined;
+    // SQLite is a rebuildable read model. Legacy writes remain available only
+    // to explicit v0.2 callers while authority-backed instances write Markdown.
+    this.allowLegacyWrites = options.allowLegacyWrites ?? false;
   }
 
   save(input: SaveMemoryInput): MemoryItem {
