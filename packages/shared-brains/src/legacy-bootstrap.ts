@@ -194,7 +194,7 @@ function buildPlan(snapshot: LegacySnapshot, existing: readonly BrainRecord[], s
     let previousRecordId: string | undefined;
     if (versions.length === 0) {
       const record = semanticRecord({
-        recordId: recordIdFor(existingByAtom, brainId, `legacy-memory:${memory.id}:base`, memory.id),
+        recordId: recordIdFor(existingByAtom, brainId, `legacy-memory:${memory.id}:base`),
         memory,
         brainId,
         kind,
@@ -212,7 +212,7 @@ function buildPlan(snapshot: LegacySnapshot, existing: readonly BrainRecord[], s
       for (const [index, version] of versions.entries()) {
         const atomKey = `legacy-memory:${memory.id}:version:${version.version}`;
         const record = semanticRecord({
-          recordId: recordIdFor(existingByAtom, brainId, atomKey, version.id),
+          recordId: recordIdFor(existingByAtom, brainId, atomKey, version.id, memory.id),
           memory,
           brainId,
           kind,
@@ -258,7 +258,7 @@ function buildPlan(snapshot: LegacySnapshot, existing: readonly BrainRecord[], s
     const eventRecord = SemanticRecordSchema.parse({
       schemaVersion: '0.3',
       recordType: 'semantic',
-      recordId: recordIdFor(existingByAtom, brainId, atomKey, event.id),
+      recordId: recordIdFor(existingByAtom, brainId, atomKey, event.id, eventMemoryId),
       memoryId: eventMemoryId,
       brainId,
       status: 'event_only',
@@ -345,10 +345,10 @@ function tombstoneRecord(input: {
   });
 }
 
-function recordIdFor(existing: Map<string, BrainRecord>, brainId: string, atomKey: string, legacyId?: string): string {
+function recordIdFor(existing: Map<string, BrainRecord>, brainId: string, atomKey: string, legacyId?: string, avoidId?: string): string {
   const previous = existing.get(`${brainId}\u0000${atomKey}`);
   if (previous !== undefined) return previous.recordId;
-  if (legacyId !== undefined && UuidV7Schema.safeParse(legacyId).success) return legacyId;
+  if (legacyId !== undefined && legacyId !== avoidId && UuidV7Schema.safeParse(legacyId).success) return legacyId;
   return createUuidV7();
 }
 

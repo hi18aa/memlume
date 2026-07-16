@@ -115,6 +115,7 @@ describe('legacy Markdown bootstrap', () => {
     assert.equal(memoryRecords[1].memoryId, memoryId);
     assert.equal(eventRecords.length, 1);
     assert.equal(eventRecords[0].status, 'event_only');
+    assert.notEqual(eventRecords[0].recordId, eventRecords[0].memoryId);
     assert.equal(tombstones.length, 1);
     assert.equal(tombstones[0].memoryId, memoryId);
     assert.equal(tombstones[0].supersedesRecordId, versionTwoId);
