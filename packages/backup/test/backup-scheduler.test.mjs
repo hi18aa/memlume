@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { BackupScheduler } from '../dist/index.js';
+import { BackupScheduler, createMarkdownBundle, verifyMarkdownBundle } from '../dist/index.js';
 
 test('coalesces concurrent durable writes and retains seven verified backups', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'memlume-scheduler-'));
@@ -50,5 +50,29 @@ test('write success is independent from a failed background backup and exposes d
     assert.match(scheduler.status().lastError ?? '', /verification/i);
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('reports verified Markdown-first v3 bundles in scheduler status', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'memlume-scheduler-v3-'));
+  try {
+    await mkdir(join(root, 'brains', 'personal'), { recursive: true });
+    await writeFile(join(root, 'brains', 'personal', 'brain.md'), '# Personal\n', 'utf8');
+    const scheduler = new BackupScheduler({
+      directory: root,
+      createAndVerify: async (outputPath) => {
+        const bundle = await createMarkdownBundle({ dataRoot: root });
+        verifyMarkdownBundle(bundle);
+        await writeFile(outputPath, bundle);
+        return { verified: true };
+      },
+    });
+
+    scheduler.notifyDurableWrite();
+    await scheduler.flush();
+
+    assert.equal(scheduler.status().verifiedBackups, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

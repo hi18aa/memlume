@@ -1,3 +1,4 @@
+import { readdirSync } from 'node:fs';
 import { readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -28,11 +29,13 @@ export class BackupScheduler {
   private scheduledDate: string | undefined;
   private lastSuccessDate: string | undefined;
   private lastError: string | undefined;
+  private readonly verifiedBackupNames: Set<string>;
 
   constructor(private readonly options: BackupSchedulerOptions) {
     this.clock = options.clock ?? (() => new Date());
     this.retention = Number.isInteger(options.retention) && (options.retention ?? 0) > 0 ? options.retention! : 7;
     this.prefix = options.prefix ?? 'memlume-backup-';
+    this.verifiedBackupNames = new Set(listScheduledBackupNames(options.directory, this.prefix));
   }
 
   /** Queue at most one background backup for the current local calendar day. */
@@ -41,10 +44,12 @@ export class BackupScheduler {
     if (this.scheduledDate === date || this.pending !== undefined) return;
     this.scheduledDate = date;
     this.pending = Promise.resolve().then(async () => {
-      const outputPath = join(this.options.directory, `${this.prefix}${date}-${Date.now()}.memlume`);
+      const outputName = `${this.prefix}${date}-${Date.now()}.memlume`;
+      const outputPath = join(this.options.directory, outputName);
       try {
         const result = await this.options.createAndVerify(outputPath);
         if (!result.verified) throw new Error('backup_verification_failed');
+        this.verifiedBackupNames.add(outputName);
         this.lastSuccessDate = date;
         this.lastError = undefined;
         await this.pruneVerified();
@@ -65,7 +70,7 @@ export class BackupScheduler {
       ...(this.scheduledDate === undefined ? {} : { lastScheduledDate: this.scheduledDate }),
       ...(this.lastSuccessDate === undefined ? {} : { lastSuccessDate: this.lastSuccessDate }),
       ...(this.lastError === undefined ? {} : { lastError: this.lastError }),
-      verifiedBackups: 0,
+      verifiedBackups: this.verifiedBackupNames.size,
     };
   }
 
@@ -77,14 +82,30 @@ export class BackupScheduler {
       return;
     }
     const candidates = names
-      .filter((name) => name.startsWith(this.prefix) && name.endsWith('.memlume') && /^memlume-backup-\d{4}-\d{2}-\d{2}-\d+\.memlume$/u.test(name))
+      .filter((name) => isScheduledBackupName(name, this.prefix))
       .sort()
       .reverse();
     // Only files created by this scheduler prefix are eligible for retention.
     for (const name of candidates.slice(this.retention)) {
       await rm(join(this.options.directory, name), { force: true }).catch(() => undefined);
+      this.verifiedBackupNames.delete(name);
     }
   }
+}
+
+function listScheduledBackupNames(directory: string, prefix: string): string[] {
+  try {
+    return readdirSync(directory).filter((name) => isScheduledBackupName(name, prefix));
+  } catch {
+    return [];
+  }
+}
+
+function isScheduledBackupName(name: string, prefix: string): boolean {
+  const suffix = '.memlume';
+  if (!name.startsWith(prefix) || !name.endsWith(suffix)) return false;
+  const stamp = name.slice(prefix.length, -suffix.length);
+  return /^\d{4}-\d{2}-\d{2}-\d+$/u.test(stamp);
 }
 
 function localDate(value: Date): string {
@@ -93,4 +114,3 @@ function localDate(value: Date): string {
   const day = String(value.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
 }
-
