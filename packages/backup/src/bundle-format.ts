@@ -3,6 +3,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
+import { redactSensitiveText } from '@memlume/contracts';
 
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 128 * 1024 * 1024;
@@ -37,7 +38,11 @@ export async function createMarkdownBundle(options: CreateMarkdownBundleOptions)
     await collectAuthorityFiles(root, resolve(root, directory), directory, entries);
   }
   if (options.bindings !== undefined) {
-    entries['bindings.json'] = strToU8(canonicalJson(options.bindings));
+    const bindings = canonicalJson(options.bindings);
+    if (containsCredentialKey(bindings) || redactSensitiveText(bindings).detected) {
+      throw new Error('Backup bindings contain sensitive material.');
+    }
+    entries['bindings.json'] = strToU8(bindings);
   }
   if (options.snapshot !== undefined) {
     entries['memlume.sqlite'] = Uint8Array.from(options.snapshot);
@@ -111,8 +116,13 @@ async function collectAuthorityFiles(root: string, directory: string, prefix: st
     if (!isInside(root, canonical)) throw new Error('Backup path escapes data root.');
     const bytes = await readFile(canonical);
     if (bytes.byteLength > MAX_FILE_BYTES) throw new Error('Backup entry exceeds the safety limit.');
+    if (redactSensitiveText(bytes.toString('utf8')).detected) throw new Error('Backup authority record contains sensitive material.');
     output[relativePath] = bytes;
   }
+}
+
+function containsCredentialKey(value: string): boolean {
+  return /["'](?:token|password|secret|api[_-]?key|authorization)["']\s*:/iu.test(value);
 }
 
 function isAuthorityPath(value: string): boolean {
@@ -160,4 +170,3 @@ function canonicalJson(value: unknown): string {
 function sha256(value: Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
 }
-
