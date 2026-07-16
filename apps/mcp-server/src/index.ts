@@ -13,6 +13,7 @@ import {
   PolicyDataSchema,
   PreferenceDataSchema,
   UuidV7Schema,
+  createUuidV7,
 } from '@memlume/contracts';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -201,6 +202,71 @@ export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL, token = proces
     async ({ query }) => daemonTool(safeDaemonUrl, token, `/v1/memories/search?${new URLSearchParams({ q: query })}`, 'GET'),
   );
 
+  // Canonical v0.3 names are intentionally unprefixed.  The v0.2
+  // memlume.* names above remain as one-release compatibility aliases.
+  server.registerTool(
+    'search',
+    { title: 'Search shared memory', description: 'Search active memories through the local daemon.', inputSchema: SearchSchema },
+    async ({ query }) => daemonTool(safeDaemonUrl, token, `/v1/memories/search?${new URLSearchParams({ q: query })}`, 'GET'),
+  );
+  server.registerTool(
+    'remember',
+    {
+      title: 'Capture a memory',
+      description: 'Submit user/agent evidence through the automatic capture pipeline; the daemon decides Brain and activation.',
+      inputSchema: z.object({
+        text: NonEmptyTextSchema,
+        capture_id: NonEmptyTextSchema.optional(),
+        event_type: NonEmptyTextSchema.optional(),
+        source: EventSourceSchema.optional(),
+      }).strict(),
+    },
+    async ({ text, capture_id, event_type, source }) => daemonTool(safeDaemonUrl, token, '/v1/capture', 'POST', {
+      captureId: capture_id ?? UuidV7Schema.parse(createUuidV7()),
+      rawContent: text,
+      eventType: event_type ?? 'user_message',
+      source: source ?? { type: 'mcp', agent: 'mcp' },
+      actor: 'tool',
+    }),
+  );
+  server.registerTool(
+    'forget',
+    { title: 'Forget memory', description: 'Request a tombstone for one memory.', inputSchema: z.object({ memory_id: UuidV7Schema }).strict() },
+    async ({ memory_id }) => daemonTool(safeDaemonUrl, token, `/v1/memories/${encodeURIComponent(memory_id)}`, 'DELETE'),
+  );
+  server.registerTool(
+    'explain',
+    { title: 'Explain memory', description: 'Show source and version history for a memory.', inputSchema: z.object({ memory_id: UuidV7Schema }).strict() },
+    async ({ memory_id }) => daemonTool(safeDaemonUrl, token, `/v1/memories/${encodeURIComponent(memory_id)}/history`, 'GET'),
+  );
+  server.registerTool(
+    'review',
+    {
+      title: 'Review candidate',
+      description: 'Approve or reject a candidate with an auditable reason.',
+      inputSchema: z.object({ memory_id: UuidV7Schema, action: z.enum(['approve', 'reject']), reason: NonEmptyTextSchema, supersede_memory_id: UuidV7Schema.optional() }).strict(),
+    },
+    async ({ memory_id, action, reason, supersede_memory_id }) => daemonTool(safeDaemonUrl, token, `/v1/memories/${encodeURIComponent(memory_id)}/${action}`, 'POST', {
+      actor: 'mcp',
+      reason,
+      ...(supersede_memory_id === undefined ? {} : { supersedeMemoryId: supersede_memory_id }),
+    }),
+  );
+  server.registerTool(
+    'route',
+    {
+      title: 'Route inbox item',
+      description: 'Resolve a durable routing Inbox item to an explicitly selected Brain.',
+      inputSchema: z.object({ record_id: NonEmptyTextSchema, brain_id: UuidV7Schema }).strict(),
+    },
+    async ({ record_id, brain_id }) => daemonTool(safeDaemonUrl, token, `/v1/inbox/${encodeURIComponent(record_id)}/route`, 'POST', { brainId: brain_id }),
+  );
+  server.registerTool(
+    'status',
+    { title: 'Memlume status', description: 'Read daemon health without memory content or tokens.', inputSchema: z.object({}).strict() },
+    async () => daemonTool(safeDaemonUrl, token, '/v1/status', 'GET'),
+  );
+
   return server;
 }
 
@@ -208,7 +274,7 @@ async function daemonTool(
   daemonUrl: string,
   token: string | undefined,
   path: string,
-  method: 'GET' | 'POST',
+  method: 'GET' | 'POST' | 'DELETE',
   body?: unknown,
 ): Promise<CallToolResult> {
   try {
@@ -224,7 +290,7 @@ async function requestDaemon(
   daemonUrl: string,
   token: string | undefined,
   path: string,
-  method: 'GET' | 'POST',
+  method: 'GET' | 'POST' | 'DELETE',
   body?: unknown,
 ): Promise<Record<string, unknown>> {
   const adapterToken = requiredAdapterToken(token);
