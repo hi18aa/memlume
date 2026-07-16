@@ -127,7 +127,8 @@ function dedupeAtoms(atoms: readonly CaptureAtom[]): CaptureAtom[] {
 
 function projectReference(value: string): string | undefined {
   const match = /(?:專案|project|repo(?:sitory)?|公司|company)\s*(?:是|為|叫做|名為|:)?\s*([\p{L}\p{N}][\p{L}\p{N}_.-]*)/iu.exec(value);
-  return match?.[1];
+  const candidate = match?.[1];
+  return candidate !== undefined && !/^(?:使用|採用|選擇|是|為|叫做|名為)$/u.test(candidate) ? candidate : undefined;
 }
 
 function stableSourceReference(input: CompileCaptureInput): string {
