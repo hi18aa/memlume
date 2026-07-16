@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -103,5 +103,21 @@ describe('MemoryStore Markdown authority mode', () => {
     expect(retry.id).toBe(first.id);
     expect(database.prepare('SELECT COUNT(*) AS count FROM record_projections').get()).toEqual({ count: 1 });
     expect(store.list({ brainIds: [brainId], status: 'active' })).toHaveLength(1);
+  });
+
+  test('redacts secrets before authority persistence', () => {
+    const { root, database, brainId } = fixture();
+    const store = new MemoryStore(database, { markdownRoot: root });
+    store.save({
+      ...draft(brainId),
+      canonicalText: 'password = do-not-store',
+      structuredData: { subject: 'config', predicate: 'value', object: 'password = do-not-store', confidence: 1 },
+    });
+
+    const recordFile = readdirSync(join(root, 'brains', brainId, 'records', '2026', '07'))[0];
+    const markdown = readFileSync(join(root, 'brains', brainId, 'records', '2026', '07', recordFile), 'utf8');
+    expect(markdown).not.toContain('do-not-store');
+    expect(database.prepare("SELECT COUNT(*) AS count FROM events WHERE raw_content LIKE '%do-not-store%'").get()).toEqual({ count: 0 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM memory_items WHERE canonical_text LIKE '%do-not-store%'").get()).toEqual({ count: 0 });
   });
 });

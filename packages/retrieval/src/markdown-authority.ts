@@ -4,9 +4,12 @@ import {
   NonEmptyTextSchema,
   UuidV7Schema,
   createUuidV7,
+  redactSensitiveJson,
+  redactSensitiveText,
   type MemoryItem,
   type MemoryScope,
   type MemoryStatus,
+  type JsonValue,
 } from '@memlume/contracts';
 import type { SqliteDatabase } from '@memlume/database/internal';
 import { MarkdownRecordStore, scanMarkdownRecords } from '@memlume/shared-brains';
@@ -55,8 +58,8 @@ export class MarkdownMemoryAuthority implements MemoryWriteAuthority {
     if (candidate.status !== 'candidate') {
       throw new Error('Only candidate memories can be approved.');
     }
-    const changedBy = NonEmptyTextSchema.parse(input.actor);
-    const changeReason = NonEmptyTextSchema.parse(input.reason);
+    const changedBy = safeText(input.actor);
+    const changeReason = safeText(input.reason);
     const active = this.query.list({ brainIds: allowedBrainIds, status: 'active' });
     if (active.some((memory) =>
       memory.brainId === candidate.brainId &&
@@ -110,8 +113,8 @@ export class MarkdownMemoryAuthority implements MemoryWriteAuthority {
     if (candidate.status !== 'candidate') {
       throw new Error('Only candidate memories can be rejected.');
     }
-    const changedBy = NonEmptyTextSchema.parse(input.actor);
-    const changeReason = NonEmptyTextSchema.parse(input.reason);
+    const changedBy = safeText(input.actor);
+    const changeReason = safeText(input.reason);
     const rejected = MemoryItemSchema.parse({ ...candidate, status: 'rejected', updatedAt: new Date().toISOString() });
     const projected = this.persistRecord(memoryRecord(rejected, {
       supersedesRecordId: this.latestRecordId(candidate.id),
@@ -129,11 +132,12 @@ export class MarkdownMemoryAuthority implements MemoryWriteAuthority {
     }
     const { actor, reason, ...unsafeChanges } = input;
     const { brainId: _ignoredBrainId, ...changes } = unsafeChanges as typeof unsafeChanges & { readonly brainId?: unknown };
-    const changedBy = NonEmptyTextSchema.parse(actor);
-    const changeReason = NonEmptyTextSchema.parse(reason);
+    const changedBy = safeText(actor);
+    const changeReason = safeText(reason);
+    const sanitizedChanges = sanitizeChanges(changes);
     const updated = MemoryItemSchema.parse({
       ...existing,
-      ...changes,
+      ...sanitizedChanges,
       id: existing.id,
       kind: existing.kind,
       status: 'active',
@@ -153,15 +157,16 @@ export class MarkdownMemoryAuthority implements MemoryWriteAuthority {
     if (!isManualMemoryKind(input.kind)) {
       throw new Error('Manual memory must be a policy, preference, fact, or decision.');
     }
-    const brainId = UuidV7Schema.parse(input.brainId);
-    const retry = this.findRetry(input, brainId, status);
+    const sanitized = sanitizeInput(input);
+    const brainId = UuidV7Schema.parse(sanitized.brainId);
+    const retry = this.findRetry(sanitized, brainId, status);
     if (retry !== undefined) {
       return retry;
     }
     const now = new Date().toISOString();
     const memory = MemoryItemSchema.parse({
       id: createUuidV7(),
-      ...input,
+      ...sanitized,
       brainId,
       status,
       priority: input.priority ?? 0,
@@ -326,4 +331,31 @@ function sameSupersessionSubject(left: MemoryItem, right: MemoryItem): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function safeText(value: string): string {
+  return NonEmptyTextSchema.parse(redactSensitiveText(value).redacted);
+}
+
+function sanitizeInput(input: SaveMemoryInput): SaveMemoryInput {
+  return {
+    ...input,
+    canonicalText: safeText(input.canonicalText),
+    ...(input.title === undefined ? {} : { title: safeText(input.title) }),
+    structuredData: redactSensitiveJson(input.structuredData).redacted,
+  };
+}
+
+function sanitizeChanges(changes: Record<string, unknown>): Record<string, unknown> {
+  const sanitized = { ...changes };
+  if (typeof sanitized.canonicalText === 'string') {
+    sanitized.canonicalText = safeText(sanitized.canonicalText);
+  }
+  if (typeof sanitized.title === 'string') {
+    sanitized.title = safeText(sanitized.title);
+  }
+  if (Object.hasOwn(sanitized, 'structuredData')) {
+    sanitized.structuredData = redactSensitiveJson(sanitized.structuredData as JsonValue).redacted;
+  }
+  return sanitized;
 }
