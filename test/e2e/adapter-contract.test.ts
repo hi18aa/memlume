@@ -78,6 +78,16 @@ async function resolvesWithin<T>(value: Promise<T>, milliseconds: number): Promi
 }
 
 describe('Adapter compatibility contract', () => {
+  test('ships one byte-identical shared Skill with every Host adapter', () => {
+    const roots = ['codex', 'claude-code', 'openclaw', 'hermes'];
+    const skills = roots.map((root) => readFileSync(new URL(`../../adapters/${root}/skills/memlume/SKILL.md`, import.meta.url), 'utf8'));
+    expect(new Set(skills).size).toBe(1);
+    expect(skills[0]).toContain('search');
+    expect(skills[0]).toContain('remember');
+    expect(skills[0]).toContain('beforeTask');
+    expect(skills[0]).toContain('Skill 不應假設自己會自動保存');
+  });
+
   test('keeps both shared-brain and adapter-contract suites in the root E2E command', () => {
     const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { readonly scripts: Record<string, string> };
 

@@ -169,6 +169,7 @@ test('ships a native OpenClaw package with a declared configuration contract', a
     name: 'Memlume Shared Brain',
     description: 'Connect OpenClaw turns to a local Memlume Shared Brain.',
     activation: { onStartup: true },
+    skills: './skills',
     configSchema: {
       type: 'object',
       additionalProperties: false,

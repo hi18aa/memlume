@@ -177,6 +177,7 @@ describe('Claude Code plugin adapter', () => {
       keywords: ['memlume', 'shared-memory', 'claude-code', 'mcp'],
       hooks: './hooks/hooks.json',
       mcpServers: './.mcp.json',
+      skills: './skills',
       userConfig: {
         memlume_home: { type: 'directory', title: 'Memlume Core directory', description: 'The local Memlume repository containing built Core packages.', required: false },
         daemon_url: { type: 'string', title: 'Memlume daemon URL', description: 'Loopback URL of the local Memlume daemon.', default: 'http://127.0.0.1:3849' },

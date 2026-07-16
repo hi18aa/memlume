@@ -12,6 +12,7 @@
   "keywords": ["memlume", "shared-memory", "claude-code", "mcp"],
   "hooks": "./hooks/hooks.json",
   "mcpServers": "./.mcp.json",
+  "skills": "./skills",
   "userConfig": {
     "memlume_home": {
       "type": "directory",
