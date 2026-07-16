@@ -117,7 +117,15 @@ function downgradeToReceiptMigration005(database) {
     DROP TABLE IF EXISTS user_confirmations;
     DROP INDEX IF EXISTS idx_memory_usage_trace_memory_outcome;
     ALTER TABLE context_receipts DROP COLUMN source_memory_ids;
-    DELETE FROM schema_migrations WHERE id IN ('006_receipt_hardening', '007_project_model', '008_record_projection');
+    DROP INDEX IF EXISTS idx_capture_atoms_status;
+    DROP INDEX IF EXISTS idx_capture_atoms_brain;
+    DROP TABLE IF EXISTS capture_receipts;
+    DROP TABLE IF EXISTS capture_atoms;
+    DROP TABLE IF EXISTS capture_sources;
+    DROP INDEX IF EXISTS idx_adapter_heartbeats_installation;
+    DROP TABLE IF EXISTS adapter_heartbeats;
+    DROP INDEX IF EXISTS idx_outcomes_result_created_at;
+    DELETE FROM schema_migrations WHERE id IN ('006_receipt_hardening', '007_project_model', '008_record_projection', '009_capture_receipts', '010_adapter_heartbeats', '011_outcome_results');
   `);
 }
 
@@ -159,6 +167,32 @@ describe('Memlume backup bundle', () => {
     assert.equal(readFileSync(bundlePath).includes(Buffer.from('adapter-secret-not-in-backup')), false);
     assert.equal(existsSync(restored.rollbackPath), false);
     target.close();
+  });
+
+  test('verifies a daemon database that includes memlume state metadata', async () => {
+    const directory = temporaryDirectory();
+    const sourcePath = join(directory, 'state-source.sqlite');
+    const bundlePath = join(directory, 'state.memlume');
+    const source = seedDatabase(sourcePath);
+
+    assert.ok(source.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memlume_state'").get());
+    await backup.createBackup({ database: source, outputPath: bundlePath, password: fullBackupPassword });
+    source.close();
+
+    await assert.doesNotReject(backup.verifyBackup({ backupPath: bundlePath, password: fullBackupPassword }));
+  });
+
+  test('verifies a legacy database without daemon state metadata', async () => {
+    const directory = temporaryDirectory();
+    const sourcePath = join(directory, 'legacy-state-source.sqlite');
+    const bundlePath = join(directory, 'legacy-state.memlume');
+    const source = seedDatabase(sourcePath);
+    source.exec('DROP TABLE memlume_state');
+
+    await backup.createBackup({ database: source, outputPath: bundlePath, password: fullBackupPassword });
+    source.close();
+
+    await assert.doesNotReject(backup.verifyBackup({ backupPath: bundlePath, password: fullBackupPassword }));
   });
 
   test('verifies and restores a legacy 005 backup before the daemon upgrades it to 006', async () => {

@@ -8,7 +8,7 @@ import Database from 'better-sqlite3';
 import { strFromU8, unzipSync } from 'fflate';
 
 import { DEFAULT_PERSONAL_BRAIN_ID } from '@memlume/contracts';
-import { configureDatabase, migrations } from '@memlume/database/internal';
+import { configureDatabase, ensureStateTable, migrations } from '@memlume/database/internal';
 import { encryptedPrefix, FullBackupAuthenticationRequiredError, readMappings, sha256, type BackupManifest, type BackupMappings, type EncryptionHeader } from './create-backup.js';
 
 const MAX_BACKUP_BYTES = 64 * 1024 * 1024;
@@ -85,7 +85,9 @@ export function inspectSnapshotPath(snapshotPath: string, manifest: BackupManife
     if (JSON.stringify(migrationsInSnapshot) !== JSON.stringify(manifest.schema.migrations)) {
       throw new Error('Backup schema verification failed.');
     }
-    if (JSON.stringify(readSchema(database)) !== JSON.stringify(expectedSchemaObjects(migrationsInSnapshot))) {
+    const snapshotSchema = readSchema(database);
+    const hasStateTable = snapshotSchema.some(({ type, name }) => type === 'table' && name === 'memlume_state');
+    if (JSON.stringify(snapshotSchema) !== JSON.stringify(expectedSchemaObjects(migrationsInSnapshot, hasStateTable))) {
       throw new Error('Backup schema verification failed.');
     }
     if (database.pragma('integrity_check', { simple: true }) !== 'ok') {
@@ -141,8 +143,8 @@ function migrationPrefixLength(migrationIds: readonly string[]): number {
   return migrationIds.length;
 }
 
-function expectedSchemaObjects(migrationIds: readonly string[]): readonly SchemaObject[] {
-  const key = migrationIds.join('|');
+function expectedSchemaObjects(migrationIds: readonly string[], includeStateTable: boolean): readonly SchemaObject[] {
+  const key = `${migrationIds.join('|')}|state:${includeStateTable ? 'yes' : 'no'}`;
   const cached = expectedSchemas.get(key);
   if (cached !== undefined) {
     return cached;
@@ -156,6 +158,10 @@ function expectedSchemaObjects(migrationIds: readonly string[]): readonly Schema
     applied_at TEXT NOT NULL
   );
     `);
+    // `openDatabase` creates this daemon-owned state table before applying
+    // migrations. Legacy snapshots may predate it, so mirror the snapshot's
+    // presence rather than requiring a particular internal metadata version.
+    if (includeStateTable) ensureStateTable(database);
     const recordMigration = database.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)');
     for (let index = 0; index < migrationIds.length; index += 1) {
       migrations[index]!.up(database);
