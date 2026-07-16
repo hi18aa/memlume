@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { DEFAULT_PERSONAL_BRAIN_ID } from '@memlume/contracts';
+import { openDatabase } from '@memlume/database/internal';
 import { afterEach, describe, expect, test } from 'vitest';
 
 import { startDaemon, type RunningDaemon } from '../src/index.js';
@@ -135,6 +136,7 @@ describe('daemon local authentication and setup API', () => {
     const installation = await registerInstallation(daemon, 'governed-agent', 'codex');
     await mountBrain(daemon, installation.id, DEFAULT_PERSONAL_BRAIN_ID, 'read_write');
     const body = {
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       kind: 'fact',
       canonicalText: 'A direct agent write requires review.',
       structuredData: { subject: 'write', predicate: 'requires', object: 'review', confidence: 1 },
@@ -151,6 +153,7 @@ describe('daemon local authentication and setup API', () => {
     const confirmationAt = new Date().toISOString();
     const confirmation = createHmac('sha256', SETUP_TOKEN).update(JSON.stringify({
       body: {
+        brainId: body.brainId,
         canonicalText: body.canonicalText,
         kind: body.kind,
         scope: body.scope,
@@ -348,8 +351,9 @@ describe('daemon local authentication and setup API', () => {
     expect(response.body).toEqual({ error: 'invalid_request' });
   });
 
-  test('defaults mounted writes to the personal brain when brainId is omitted', async () => {
-    const daemon = await start({ setupToken: SETUP_TOKEN });
+  test('rejects mounted writes without an explicit brainId and persists nothing', async () => {
+    const databasePath = createDatabasePath();
+    const daemon = await startAt(databasePath, { setupToken: SETUP_TOKEN });
     const installation = await registerInstallation(daemon);
     await mountBrain(daemon, installation.id, DEFAULT_PERSONAL_BRAIN_ID, 'read_write');
 
@@ -358,8 +362,8 @@ describe('daemon local authentication and setup API', () => {
       headers: adapterHeaders(installation.token),
       body: JSON.stringify({ rawContent: 'Default brain event.', eventType: 'test', source: { type: 'test' } }),
     });
-    expect(event.response.status).toBe(201);
-    expect(event.body).toMatchObject({ event: { brainId: DEFAULT_PERSONAL_BRAIN_ID } });
+    expect(event.response.status).toBe(400);
+    expect(event.body).toEqual({ error: 'invalid_request' });
 
     const memory = await requestJson(daemon, '/v1/memories', {
       method: 'POST',
@@ -371,8 +375,29 @@ describe('daemon local authentication and setup API', () => {
         scope: { level: 'global' },
       }),
     });
-    expect(memory.response.status).toBe(201);
-    expect(memory.body).toMatchObject({ memory: { brainId: DEFAULT_PERSONAL_BRAIN_ID } });
+    expect(memory.response.status).toBe(400);
+    expect(memory.body).toEqual({ error: 'invalid_request' });
+
+    const candidate = await requestJson(daemon, '/v1/memories/candidate', {
+      method: 'POST',
+      headers: adapterHeaders(installation.token),
+      body: JSON.stringify({
+        kind: 'fact',
+        canonicalText: 'Missing brain candidate.',
+        structuredData: { subject: 'memory', predicate: 'requires', object: 'brain', confidence: 1 },
+        scope: { level: 'global' },
+      }),
+    });
+    expect(candidate.response.status).toBe(400);
+    expect(candidate.body).toEqual({ error: 'invalid_request' });
+
+    const database = openDatabase(databasePath);
+    try {
+      expect(database.prepare('SELECT COUNT(*) AS count FROM events').get()).toEqual({ count: 0 });
+      expect(database.prepare('SELECT COUNT(*) AS count FROM memory_items').get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
   });
 
   test('rejects writes for an unmounted or read-only brain without an internal error', async () => {
@@ -382,7 +407,7 @@ describe('daemon local authentication and setup API', () => {
     const unmountedEvent = await requestJson(daemon, '/v1/events', {
       method: 'POST',
       headers: adapterHeaders(installation.token),
-      body: JSON.stringify({ rawContent: 'Must not be stored.', eventType: 'test', source: { type: 'test' } }),
+      body: JSON.stringify({ brainId: DEFAULT_PERSONAL_BRAIN_ID, rawContent: 'Must not be stored.', eventType: 'test', source: { type: 'test' } }),
     });
     expect(unmountedEvent.response.status).toBe(403);
     expect(unmountedEvent.body).toEqual({ error: 'forbidden' });
@@ -392,6 +417,7 @@ describe('daemon local authentication and setup API', () => {
       method: 'POST',
       headers: adapterHeaders(installation.token),
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         kind: 'fact',
         canonicalText: 'Must not be stored either.',
         structuredData: { subject: 'memory', predicate: 'write_access', object: 'denied', confidence: 1 },

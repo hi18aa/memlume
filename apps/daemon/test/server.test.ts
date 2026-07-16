@@ -81,6 +81,47 @@ describe('localhost daemon API', () => {
     }
   });
 
+  test('rejects direct writes without brainId before creating an event or memory', async () => {
+    const { daemon, headers, databasePath } = await startAdapterDaemon();
+    const requests = [
+      ['/v1/events', {
+        rawContent: 'missing brain event',
+        eventType: 'user_statement',
+        source: { type: 'test', reference: 'event:missing-brain' },
+      }],
+      ['/v1/memories', {
+        kind: 'fact',
+        canonicalText: 'missing brain memory',
+        structuredData: { subject: 'memory', predicate: 'requires', object: 'brain', confidence: 1 },
+        scope: { level: 'global' },
+      }],
+      ['/v1/memories/candidate', {
+        kind: 'fact',
+        canonicalText: 'missing brain candidate',
+        structuredData: { subject: 'candidate', predicate: 'requires', object: 'brain', confidence: 1 },
+        scope: { level: 'global' },
+      }],
+    ] as const;
+
+    for (const [path, body] of requests) {
+      const response = await requestJson(daemon, path, {
+        method: 'POST',
+        headers: { ...headers, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      expect(response.response.status).toBe(400);
+      expect(response.body).toEqual({ error: 'invalid_request' });
+    }
+
+    const database = openDatabase(databasePath);
+    try {
+      expect(database.prepare('SELECT COUNT(*) AS count FROM events').get()).toEqual({ count: 0 });
+      expect(database.prepare('SELECT COUNT(*) AS count FROM memory_items').get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
   test('redacts raw and nested structured credentials before direct event and capture writes reach SQLite', async () => {
     const { daemon, headers, databasePath } = await startAdapterDaemon();
     const secret = 'sk-live-never-persist-this';
@@ -89,6 +130,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: `Authorization: Bearer ${secret}`,
         eventType: 'task_completed',
         source: { type: 'test', reference: 'event:redaction' },
@@ -129,6 +171,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'A safe event body.',
         eventType: 'task_completed',
         source: { type: 'test', reference: `Authorization: Bearer ${secret}` },
@@ -338,6 +381,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         kind: 'fact',
         canonicalText: 'This project uses pnpm',
         structuredData: { subject: 'project', predicate: 'package_manager', object: 'pnpm', confidence: 1 },
@@ -365,6 +409,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         kind: 'fact',
         canonicalText: 'The user lives in Taipei.',
         structuredData: { subject: 'user', predicate: 'location', object: 'Taipei', confidence: 1 },
@@ -477,6 +522,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         kind: 'fact',
         canonicalText: 'Memlume Console uses local setup APIs.',
         structuredData: { subject: 'Memlume Console', predicate: 'uses', object: 'local setup APIs', confidence: 1 },
@@ -552,6 +598,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'Use local SQLite for the first release.',
         eventType: 'decision',
         source: { type: 'test', agent: 'daemon-test', reference: 'daemon:event:1' },
@@ -564,6 +611,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         kind: 'fact',
         title: 'Memlume storage',
         canonicalText: 'Memlume uses SQLite FTS5 for the first release.',
@@ -593,6 +641,7 @@ describe('localhost daemon API', () => {
       method: 'POST',
       headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         kind: 'policy',
         canonicalText: 'Use the local image route.',
         structuredData: {

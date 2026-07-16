@@ -1,6 +1,5 @@
 import {
   DecisionDataSchema,
-  DEFAULT_PERSONAL_BRAIN_ID,
   AgentInstallationSchema,
   EventSourceSchema,
   FactDataSchema,
@@ -34,7 +33,7 @@ import { z, ZodError } from 'zod';
 
 const AppendEventRequestSchema = z
   .object({
-    brainId: UuidV7Schema.optional(),
+    brainId: UuidV7Schema,
     rawContent: z.string(),
     eventType: z.string(),
     source: EventSourceSchema.strict(),
@@ -50,7 +49,7 @@ const CaptureMemoryRequestSchema = AppendEventRequestSchema.extend({
 
 const MemoryRequestBaseSchema = z
   .object({
-    brainId: UuidV7Schema.optional(),
+    brainId: UuidV7Schema,
     canonicalText: NonEmptyTextSchema,
     title: NonEmptyTextSchema.optional(),
     scope: MemoryScopeSchema,
@@ -347,7 +346,7 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
   const requireAdapter = requireAdapterToken(services.brains);
   app.post('/v1/events', requireAdapter, (request, response) => {
     const input = AppendEventRequestSchema.parse(request.body);
-    const brainId = input.brainId ?? DEFAULT_PERSONAL_BRAIN_ID;
+    const brainId = input.brainId;
     if (!hasWriteAccess(response, services.brains, brainId)) {
       return;
     }
@@ -359,7 +358,7 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
 
   app.post('/v1/memories', requireAdapter, (request, response) => {
     const input = SaveMemoryRequestSchema.parse(request.body);
-    const brainId = input.brainId ?? DEFAULT_PERSONAL_BRAIN_ID;
+    const brainId = input.brainId;
     if (!hasWriteAccess(response, services.brains, brainId)) {
       return;
     }
@@ -382,7 +381,7 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
 
   app.post('/v1/memories/candidate', requireAdapter, (request, response) => {
     const input = SaveMemoryRequestSchema.parse(request.body);
-    const brainId = input.brainId ?? DEFAULT_PERSONAL_BRAIN_ID;
+    const brainId = input.brainId;
     if (!hasWriteAccess(response, services.brains, brainId)) {
       return;
     }
