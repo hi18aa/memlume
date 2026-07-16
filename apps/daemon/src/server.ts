@@ -1,5 +1,5 @@
 import { createBackup, importBrain, restoreBackup, RestoreRecoveryError } from '@memlume/backup';
-import { openDatabase, type SqliteDatabase } from '@memlume/database/internal';
+import { openDatabase, readDatabaseState, setDatabaseAuthority, type SqliteDatabase } from '@memlume/database/internal';
 import { ContextResolver } from '@memlume/context-resolver';
 import { EventJournal } from '@memlume/event-journal';
 import { MemoryStore, OutcomeStore } from '@memlume/retrieval';
@@ -13,6 +13,8 @@ import { fileURLToPath } from 'node:url';
 
 import { registerRoutes, type BackupLifecycle } from './routes.js';
 import { SemanticMemoryService } from './semantic-memory-service.js';
+import { bootstrapLegacyMemories } from '@memlume/shared-brains';
+import { reindex } from './reindex-service.js';
 
 export interface DaemonOptions {
   readonly databasePath: string;
@@ -201,6 +203,17 @@ export function createDaemon({ databasePath, setupToken, consolePath = defaultCo
   function openRuntime(): DaemonRuntime {
     const database = openDatabase(databasePath);
     try {
+      const dataRoot = resolve(dirname(databasePath));
+      const state = readDatabaseState(database);
+      if (state.authority !== 'markdown') {
+        // The first daemon open is the exclusive cut-over point: export the
+        // legacy rows, validate/project the Markdown set, then flip authority.
+        // If any step fails the database remains SQLite-authoritative and the
+        // open aborts instead of accepting mixed writers.
+        bootstrapLegacyMemories({ database, dataRoot });
+        reindex({ database, dataRoot });
+        setDatabaseAuthority(database, 'markdown');
+      }
       const journal = new EventJournal(database);
       const store = new MemoryStore(database, { markdownRoot: resolve(dirname(databasePath)) });
       const outcomes = new OutcomeStore(database);
