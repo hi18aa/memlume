@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, describe, test } from 'node:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -159,5 +159,13 @@ describe('legacy Markdown bootstrap', () => {
     assert.equal(new MarkdownRecordStore({ rootDir: root }).list().length, 0);
     assert.equal(database.prepare('SELECT 1 FROM memory_brains WHERE memory_id = ?').get(memoryId), undefined);
     assert.equal(now.length, 24);
+  });
+
+  test('reclaims a stale bootstrap lock after a crashed process', () => {
+    const { root, database } = createFixture();
+    const lockPath = join(root, '.memlume-bootstrap.lock');
+    writeFileSync(lockPath, `${Number.MAX_SAFE_INTEGER}\n`, { encoding: 'utf8' });
+    const result = bootstrapLegacyMemories({ database, dataRoot: root, lockPath });
+    assert.equal(result.status, 'completed');
   });
 });

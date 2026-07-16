@@ -1,6 +1,6 @@
 import { createUuidV7, IsoUtcDateTimeSchema, JsonValueSchema, MemoryScopeSchema, SemanticRecordSchema, TombstoneRecordSchema, UuidV7Schema, type BrainRecord, type JsonValue, type MemoryKind, type MemoryScope, type MemoryStatus } from '@memlume/contracts';
-import type { SqliteDatabase } from '@memlume/database/internal';
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, unlinkSync, writeFileSync } from 'node:fs';
+import { setDatabaseAuthority, type SqliteDatabase } from '@memlume/database/internal';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { MarkdownRecordStore } from './markdown-record-store.js';
@@ -99,6 +99,7 @@ export function bootstrapLegacyMemories(options: LegacyBootstrapOptions): Legacy
       store.append(record);
       exported += 1;
     }
+    setDatabaseAuthority(options.database, 'markdown');
     options.onPhase?.('complete');
     return {
       status: exported === 0 && plan.records.length > 0 ? 'already_complete' : 'completed',
@@ -404,17 +405,42 @@ function absolutePath(value: string): string {
 
 function acquireLock(path: string): () => void {
   mkdirSync(dirname(path), { recursive: true });
-  let descriptor: number;
+  let descriptor: number | undefined;
   try {
-    descriptor = openSync(path, 'wx', 0o600);
+    try {
+      descriptor = openSync(path, 'wx', 0o600);
+    } catch (error) {
+      if (!isStaleLock(path)) {
+        throw new Error('bootstrap_locked: another legacy bootstrap is running.', { cause: error });
+      }
+      unlinkSync(path);
+      descriptor = openSync(path, 'wx', 0o600);
+    }
     writeFileSync(descriptor, `${process.pid}\n`, 'utf8');
     fsyncSync(descriptor);
   } catch (error) {
+    if (descriptor !== undefined) closeSync(descriptor);
     throw new Error('bootstrap_locked: another legacy bootstrap is running.', { cause: error });
   }
+  const heldDescriptor = descriptor;
   return () => {
-    try { closeSync(descriptor); } finally {
+    try { closeSync(heldDescriptor); } finally {
       if (existsSync(path)) unlinkSync(path);
     }
   };
+}
+
+function isStaleLock(path: string): boolean {
+  try {
+    const pid = Number.parseInt(readFileSync(path, 'utf8').trim(), 10);
+    if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  } catch {
+    return false;
+  }
 }
