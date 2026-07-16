@@ -43,6 +43,7 @@ export function routeAtom(input: BrainRouterInput): BrainRouteResult {
   }
 
   const projects = catalog.filter((entry) => entry.kind === 'project' && writable(entry));
+  const allProjects = catalog.filter((entry) => entry.kind === 'project');
   const target = normalize(input.atom.targetRef);
   if (target !== undefined) {
     const matches = projects.filter((entry) => matchesReference(entry, target));
@@ -57,7 +58,7 @@ export function routeAtom(input: BrainRouterInput): BrainRouteResult {
   const primary = projects.filter((entry) => entry.role === 'primary');
   if (primary.length === 1) return { status: 'routed', brainId: primary[0].brainId, reason: 'primary_project' };
   return primary.length === 0
-    ? { status: 'routing_required', reason: 'unknown_project', candidates: [] }
+    ? { status: 'routing_required', reason: allProjects.length > 0 && projects.length === 0 ? 'no_writable_brain' : 'unknown_project', candidates: [] }
     : { status: 'routing_required', reason: 'ambiguous_project', candidates: primary.map((entry) => entry.brainId) };
 }
 

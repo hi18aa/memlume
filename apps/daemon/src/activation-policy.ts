@@ -6,6 +6,8 @@ export interface ActivationAtom {
   readonly confidence?: number;
   readonly explicitness?: number;
   readonly text?: string;
+  readonly conflict?: boolean;
+  readonly stable?: boolean;
 }
 
 export interface ActivationInput {
@@ -21,6 +23,7 @@ export function activationPolicy(input: ActivationInput): ActivationStatus {
   if (atom.kind === 'event') return 'event_only';
   if (input.route === 'routing_required') return 'routing_required';
   if (atom.actor !== 'user') return 'candidate';
+  if (atom.conflict === true || atom.stable === false) return 'candidate';
   if ((atom.explicitness ?? 0) < 1 || (atom.confidence ?? 0) < 0.8) return 'candidate';
   return 'active';
 }
