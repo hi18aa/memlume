@@ -7,5 +7,6 @@ import { feedbackReceiptsMigration } from './005_feedback_receipts.js';
 import { receiptHardeningMigration } from './006_receipt_hardening.js';
 import { projectModelMigration } from './007_project_model.js';
 import { recordProjectionMigration } from './008_record_projection.js';
+import { captureReceiptsMigration } from './009_capture_receipts.js';
 
-export const migrations: readonly Migration[] = [initialMigration, eventReferenceDedupMigration, sharedBrainsMigration, memoryOutcomesMigration, feedbackReceiptsMigration, receiptHardeningMigration, projectModelMigration, recordProjectionMigration];
+export const migrations: readonly Migration[] = [initialMigration, eventReferenceDedupMigration, sharedBrainsMigration, memoryOutcomesMigration, feedbackReceiptsMigration, receiptHardeningMigration, projectModelMigration, recordProjectionMigration, captureReceiptsMigration];
