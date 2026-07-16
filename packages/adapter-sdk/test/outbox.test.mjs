@@ -30,3 +30,12 @@ test('tolerates partial last lines and atomically removes delivered entries', as
   assert.equal(await queue.remove('a'), true);
   assert.deepEqual(await queue.list(), []);
 });
+
+test('flushes bounded batches and retains retry/discards with reasons', async () => {
+  const queue = await outbox();
+  await queue.enqueue({ identity: 'done', payload: { text: 'Vue' } });
+  await queue.enqueue({ identity: 'retry', payload: { text: 'pnpm' } });
+  const results = await queue.flush(async (payload) => payload.text === 'Vue' ? 'completed' : 'retry', { maxEntries: 2 });
+  assert.deepEqual(results.map(({ result }) => result), ['completed', 'retry']);
+  assert.equal((await queue.list()).find((entry) => entry.identity === 'retry').state, 'retry');
+});

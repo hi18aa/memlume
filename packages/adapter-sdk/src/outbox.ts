@@ -31,6 +31,8 @@ export interface CaptureOutboxOptions {
   readonly now?: () => string;
 }
 
+export type CaptureDeliveryResult = 'completed' | 'ignored' | 'routing_required' | 'retry' | 'discarded' | 'failed';
+
 /** Durable, secret-safe JSONL queue shared by short-lived host adapters. */
 export class CaptureOutbox<T = unknown> {
   private readonly maxEntries: number;
@@ -94,6 +96,40 @@ export class CaptureOutbox<T = unknown> {
       entries[index] = { ...entries[index], state: 'discarded', reason: reason.trim() || 'discarded' };
       await this.write(entries);
       return true;
+    });
+  }
+
+  async flush(
+    deliver: (payload: T) => Promise<CaptureDeliveryResult> | CaptureDeliveryResult,
+    options: { readonly maxEntries?: number; readonly deadlineMs?: number } = {},
+  ): Promise<readonly { readonly identity: string; readonly result: CaptureDeliveryResult }[]> {
+    const maxEntries = Number.isInteger(options.maxEntries) && (options.maxEntries ?? 0) > 0 ? options.maxEntries! : 32;
+    const deadline = Date.now() + (Number.isInteger(options.deadlineMs) && (options.deadlineMs ?? 0) > 0 ? options.deadlineMs! : 5_000);
+    return withLock(this.options.path, this.lockTimeoutMs, async () => {
+      const entries = [...await this.read()];
+      const results: Array<{ readonly identity: string; readonly result: CaptureDeliveryResult }> = [];
+      let changed = false;
+      for (const entry of entries.filter((candidate) => candidate.state !== 'discarded').slice(0, maxEntries)) {
+        if (Date.now() >= deadline) break;
+        let result: CaptureDeliveryResult;
+        try { result = await deliver(entry.payload); } catch { result = 'retry'; }
+        results.push({ identity: entry.identity, result });
+        if (result === 'completed' || result === 'ignored' || result === 'routing_required') {
+          const index = entries.findIndex((candidate) => candidate.identity === entry.identity);
+          if (index >= 0) entries.splice(index, 1);
+          changed = true;
+        } else if (result === 'retry') {
+          const index = entries.findIndex((candidate) => candidate.identity === entry.identity);
+          if (index >= 0) entries[index] = { ...entries[index], state: 'retry', retryCount: entries[index].retryCount + 1 };
+          changed = true;
+        } else {
+          const index = entries.findIndex((candidate) => candidate.identity === entry.identity);
+          if (index >= 0) entries[index] = { ...entries[index], state: 'discarded', reason: result };
+          changed = true;
+        }
+      }
+      if (changed) await this.write(entries);
+      return results;
     });
   }
 
