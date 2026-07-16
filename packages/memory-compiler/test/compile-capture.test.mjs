@@ -24,7 +24,7 @@ describe('compileCapture', () => {
 
   test('rejects provider output that attempts to select a Brain', async () => {
     const result = await compileCapture({
-      rawContent: 'Please classify this assertion.',
+      rawContent: 'Classify.',
       provider: { extract: async () => ({ atoms: [{ text: 'Use Vue.', scope: 'project', brainId: '018f9d4e-7c2a-7b91-8dc0-61749dbcc01e' }] }) },
     });
     assert.equal(result.status, 'failed');
