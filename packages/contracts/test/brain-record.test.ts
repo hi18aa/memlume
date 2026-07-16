@@ -91,7 +91,7 @@ describe('v0.3 brain record contracts', () => {
       validFrom: '2026-07-16',
       validUntil: '2026-12-31',
     });
-    expect(SemanticRecordSchema.safeParse({ ...record, priority: -1 }).success).toBe(false);
+    expect(SemanticRecordSchema.safeParse({ ...record, confidence: 2 }).success).toBe(false);
   });
 
   test('models tombstones as strict immutable records', () => {
