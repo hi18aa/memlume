@@ -5,8 +5,22 @@ import { IsoUtcDateTimeSchema, JsonValueSchema, NonEmptyTextSchema, UuidV7Schema
 export const MemoryUsageOutcomeSchema = z.enum(['adopted', 'ignored', 'corrected']);
 export type MemoryUsageOutcome = z.infer<typeof MemoryUsageOutcomeSchema>;
 
-export const OutcomeResultSchema = z.enum(['success', 'failure', 'corrected']);
+/** Accept canonical v0.3 values plus legacy input values for migration compatibility. */
+export const OutcomeResultSchema = z.enum(['completed', 'interrupted', 'error', 'unknown', 'success', 'failure', 'corrected']);
 export type OutcomeResult = z.infer<typeof OutcomeResultSchema>;
+
+/** Canonical v0.3 task result. Legacy values are accepted only at the input boundary. */
+export const CanonicalOutcomeResultSchema = z.enum(['completed', 'interrupted', 'error', 'unknown']);
+export type CanonicalOutcomeResult = z.infer<typeof CanonicalOutcomeResultSchema>;
+
+export function normalizeOutcomeResult(value: OutcomeResult | CanonicalOutcomeResult): CanonicalOutcomeResult {
+  switch (value) {
+    case 'success': return 'completed';
+    case 'failure': return 'error';
+    case 'corrected': return 'unknown';
+    default: return CanonicalOutcomeResultSchema.parse(value);
+  }
+}
 
 /**
  * A short-lived receipt issued when an adapter resolves context. Feedback
@@ -41,7 +55,7 @@ export const MemoryOutcomeSchema = z.object({
   id: UuidV7Schema,
   taskId: NonEmptyTextSchema,
   agentId: NonEmptyTextSchema,
-  result: OutcomeResultSchema,
+  result: z.union([OutcomeResultSchema, CanonicalOutcomeResultSchema]),
   correctionType: NonEmptyTextSchema.nullable(),
   correctionData: JsonValueSchema.nullable(),
   usedMemoryIds: z.array(UuidV7Schema).min(1).max(256),

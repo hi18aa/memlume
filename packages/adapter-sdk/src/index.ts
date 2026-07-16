@@ -19,7 +19,10 @@ import {
   type MemoryScope,
 } from '@memlume/contracts';
 
+import { RuntimeState, type RuntimeStateSnapshot } from './runtime-state.js';
+
 export * from './outbox.js';
+export * from './runtime-state.js';
 
 const REQUEST_TIMEOUT_MS = 10_000;
 export const ADAPTER_PROTOCOL_VERSION = '1';
@@ -95,6 +98,7 @@ export interface AdapterClientOptions {
   readonly defaultWriteBrainId?: string;
   readonly outboxPath?: string;
   readonly outboxDirectory?: string;
+  readonly maxOutboxEntries?: number;
   /** Bounded write deadline for short-lived host hooks. Defaults to the normal daemon deadline. */
   readonly writeTimeoutMs?: number;
   readonly fetch?: typeof globalThis.fetch;
@@ -133,11 +137,24 @@ export type WriteResult =
   | { readonly status: 'queued' | 'rejected' };
 
 export interface OutboxStatus {
-  readonly state: 'unbound' | 'unavailable' | 'empty' | 'pending' | 'discarded';
+  readonly state: 'unbound' | 'unavailable' | 'empty' | 'pending' | 'discarded' | 'full';
   readonly pending: number;
   readonly retry: number;
   readonly discarded: number;
 }
+
+export interface AdapterRuntimeStatus {
+  readonly outbox: OutboxStatus;
+  readonly runtime: RuntimeStateSnapshot;
+}
+
+export interface AssistantFinalInput {
+  readonly turnId: string;
+  readonly traceId?: string;
+  readonly finalAnswer: string;
+}
+
+export type AssistantFinalResult = 'saved' | 'rejected' | 'unavailable';
 
 interface BaseWriteRequest {
   readonly rawContent: string;
@@ -189,17 +206,21 @@ export class AdapterClient {
   private readonly writeTimeoutMs: number;
   private readonly warn: (message: string) => void;
   private readonly defaultWriteBrainId: string | undefined;
+  private readonly maxOutboxEntries: number;
+  private readonly runtimeState: RuntimeState;
   private warnedAboutContext = false;
   private warnedAboutLegacyCaptureTarget = false;
   private writeChain: Promise<void> = Promise.resolve();
 
-  constructor({ daemonUrl, token, defaultWriteBrainId, outboxPath, outboxDirectory = join(homedir(), '.memlume'), writeTimeoutMs = REQUEST_TIMEOUT_MS, fetch = globalThis.fetch, warn = console.warn }: AdapterClientOptions) {
+  constructor({ daemonUrl, token, defaultWriteBrainId, outboxPath, outboxDirectory = join(homedir(), '.memlume'), maxOutboxEntries = 256, writeTimeoutMs = REQUEST_TIMEOUT_MS, fetch = globalThis.fetch, warn = console.warn }: AdapterClientOptions) {
     this.daemonUrl = daemonOrigin(daemonUrl);
     this.token = token ?? process.env.MEMLUME_TOKEN;
     this.defaultWriteBrainId = nonEmptyText(defaultWriteBrainId);
     this.fetch = fetch;
     this.outboxPath = outboxPath;
     this.outboxDirectory = outboxDirectory;
+    this.maxOutboxEntries = validTimeout(maxOutboxEntries) ? maxOutboxEntries : 256;
+    this.runtimeState = new RuntimeState();
     this.writeTimeoutMs = validTimeout(writeTimeoutMs) ? writeTimeoutMs : REQUEST_TIMEOUT_MS;
     this.warn = warn;
   }
@@ -255,8 +276,38 @@ export class AdapterClient {
     return this.resolveContext({ ...beforeTaskInput, requestedBrainIds: [projectBrainId] }, 'onSubagentStart');
   }
 
+  /** Internal runtime transport; final text never enters the capture outbox. */
+  async recordAssistantFinal(envelope: AdapterEnvelope, input: AssistantFinalInput): Promise<AssistantFinalResult> {
+    const parsedEnvelope = AdapterEnvelopeSchema.safeParse(envelope);
+    if (!parsedEnvelope.success || input.turnId.trim() === '' || input.finalAnswer.trim() === '' || Buffer.byteLength(input.finalAnswer, 'utf8') > 64 * 1024 || redactSensitiveText(input.finalAnswer).detected) {
+      return 'rejected';
+    }
+    try {
+      const response = await this.runtimeRequest('/v1/runtime/final', {
+        installationId: parsedEnvelope.data.installationId,
+        sessionId: parsedEnvelope.data.sessionId,
+        turnId: input.turnId,
+        ...(input.traceId === undefined ? {} : { traceId: input.traceId }),
+        finalAnswer: input.finalAnswer,
+      });
+      if (!response.ok) {
+        this.runtimeState.markFailure('capture', `runtime final HTTP ${response.status}`);
+        return response.status >= 400 && response.status < 500 ? 'rejected' : 'unavailable';
+      }
+      this.runtimeState.markSuccess('capture');
+      return 'saved';
+    } catch {
+      this.runtimeState.markFailure('capture', 'runtime final unavailable');
+      return 'unavailable';
+    }
+  }
+
   outboxStatus(): Promise<OutboxStatus> {
     return this.serialize(() => this.readOutboxStatus());
+  }
+
+  status(): Promise<AdapterRuntimeStatus> {
+    return this.serialize(async () => ({ outbox: await this.readOutboxStatus(), runtime: this.runtimeState.snapshot() }));
   }
 
   private async resolveContext(input: BeforeTaskInput, callback: AdapterCallback): Promise<ContextPack> {
@@ -270,6 +321,7 @@ export class AdapterClient {
         throw new Error('Context request failed.');
       }
       const result = await response.json();
+      this.runtimeState.markSuccess('context');
       return ContextPackSchema.parse(isRecord(result) ? result.context : undefined);
     } catch {
       return this.unavailableContext(input);
@@ -277,6 +329,7 @@ export class AdapterClient {
   }
 
   private unavailableContext(input: BeforeTaskInput): ContextPack {
+    this.runtimeState.markReadFailure('daemon/context unavailable');
     if (!this.warnedAboutContext) {
       this.warnedAboutContext = true;
       this.warn('Memlume context unavailable; continuing without shared context.');
@@ -294,7 +347,7 @@ export class AdapterClient {
       const pending = entries.filter(isPendingWrite);
       const discarded = entries.filter(isDiscardedWrite).length;
       return {
-        state: pending.length > 0 ? 'pending' : discarded > 0 ? 'discarded' : 'empty',
+        state: pending.length >= this.maxOutboxEntries ? 'full' : pending.length > 0 ? 'pending' : discarded > 0 ? 'discarded' : 'empty',
         pending: pending.length,
         retry: pending.filter(({ state }) => state === 'retry').length,
         discarded,
@@ -395,18 +448,24 @@ export class AdapterClient {
         const result = await response.json();
         const memoryStatus = confirmedCapture(result);
         if (memoryStatus === undefined) {
+          this.runtimeState.markWriteFailure('capture response invalid');
           return { status: 'queued' };
         }
         if (memoryStatus === 'rejected') {
+          this.runtimeState.markFailure('capture', 'capture rejected');
           return { status: 'rejected' };
         }
         if (memoryStatus === 'ignore') {
+          this.runtimeState.markSuccess('capture');
           return { status: 'ignored', memoryStatus };
         }
+        this.runtimeState.markSuccess('capture');
         return { status: 'saved', memoryStatus };
       }
+      this.runtimeState.markWriteFailure(`capture HTTP ${response.status}`);
       return response.status >= 400 && response.status < 500 && response.status !== 429 ? { status: 'rejected' } : { status: 'queued' };
     } catch {
+      this.runtimeState.markWriteFailure('capture unavailable');
       return { status: 'queued' };
     }
   }
@@ -429,6 +488,11 @@ export class AdapterClient {
         const pending = await readOutbox(outboxPath);
         const existing = pending.find((entry): entry is PendingWrite => isPendingWrite(entry) && sameRequest(entry.request, request));
         if (existing === undefined) {
+          if (pending.filter(isPendingWrite).length >= this.maxOutboxEntries) {
+            this.runtimeState.markWriteFailure('capture queue full');
+            this.warn('Memlume outbox is full; capture was not queued.');
+            return { status: 'rejected' };
+          }
           pending.push({ state: 'pending', retryCount: 0, messageId: request.source.messageId, request });
         } else if (existing.request.endpoint === '/v1/memories/capture' && nonEmptyText(existing.request.brainId) === undefined) {
           pending[pending.indexOf(existing)] = { ...existing, request: { ...existing.request, brainId: request.brainId } };
@@ -437,6 +501,7 @@ export class AdapterClient {
         return { status: 'queued' };
       });
     } catch {
+      this.runtimeState.markWriteFailure('capture queue unavailable');
       this.warn(OUTBOX_UNAVAILABLE_WARNING);
       return { status: 'rejected' };
     }
@@ -459,6 +524,23 @@ export class AdapterClient {
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     }), timeoutMs);
+  }
+
+  private runtimeRequest(path: string, body: unknown): Promise<Response> {
+    if (!hasToken(this.token)) throw new Error('Adapter token is unavailable.');
+    return withTimeout(this.fetch(new URL(path, this.daemonUrl), {
+      method: 'POST',
+      redirect: 'error',
+      headers: {
+        authorization: `Bearer ${this.token}`,
+        'content-type': 'application/json',
+        'x-memlume-runtime': 'assistant-final',
+        'x-memlume-protocol-version': ADAPTER_PROTOCOL_VERSION,
+        'x-memlume-adapter-version': ADAPTER_VERSION,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(this.writeTimeoutMs),
+    }), this.writeTimeoutMs);
   }
 
   private bindOutbox(envelope: AdapterEnvelope | undefined): void {

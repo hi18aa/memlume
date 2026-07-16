@@ -9,5 +9,6 @@ import { projectModelMigration } from './007_project_model.js';
 import { recordProjectionMigration } from './008_record_projection.js';
 import { captureReceiptsMigration } from './009_capture_receipts.js';
 import { adapterHeartbeatsMigration } from './010_adapter_heartbeats.js';
+import { outcomeResultsMigration } from './011_outcome_results.js';
 
-export const migrations: readonly Migration[] = [initialMigration, eventReferenceDedupMigration, sharedBrainsMigration, memoryOutcomesMigration, feedbackReceiptsMigration, receiptHardeningMigration, projectModelMigration, recordProjectionMigration, captureReceiptsMigration, adapterHeartbeatsMigration];
+export const migrations: readonly Migration[] = [initialMigration, eventReferenceDedupMigration, sharedBrainsMigration, memoryOutcomesMigration, feedbackReceiptsMigration, receiptHardeningMigration, projectModelMigration, recordProjectionMigration, captureReceiptsMigration, adapterHeartbeatsMigration, outcomeResultsMigration];

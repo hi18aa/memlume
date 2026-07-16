@@ -57,6 +57,15 @@ describe('outcome store', () => {
     expect(outcomes.feedbackScores([memory.id], [DEFAULT_PERSONAL_BRAIN_ID]).get(memory.id)).toBe(3);
     expect(store.get(memory.id, [DEFAULT_PERSONAL_BRAIN_ID])?.canonicalText).toBe('The project uses pnpm.');
 
+    const canonical = outcomes.recordOutcome({
+      taskId: 'task-canonical',
+      agentId: 'codex-installation',
+      result: 'interrupted',
+      usedMemoryIds: [memory.id],
+      usedToolIds: [],
+    }, [DEFAULT_PERSONAL_BRAIN_ID]);
+    expect(canonical.result).toBe('interrupted');
+
     expect(() => outcomes.recordUsage({
       memoryId: memory.id,
       taskId: 'unauthorized',

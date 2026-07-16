@@ -1,4 +1,5 @@
 import {
+  CanonicalOutcomeResultSchema,
   ContextReceiptSchema,
   IsoUtcDateTimeSchema,
   JsonValueSchema,
@@ -7,6 +8,7 @@ import {
   MemoryUsageOutcomeSchema,
   NonEmptyTextSchema,
   OutcomeResultSchema,
+  normalizeOutcomeResult,
   UuidV7Schema,
   createUuidV7,
   type JsonValue,
@@ -32,7 +34,7 @@ export interface RecordMemoryUsageInput {
 export interface RecordMemoryOutcomeInput {
   readonly taskId: string;
   readonly agentId: string;
-  readonly result: OutcomeResult;
+  readonly result: OutcomeResult | 'completed' | 'interrupted' | 'error' | 'unknown';
   readonly correctionType?: string | null;
   readonly correctionData?: JsonValue | null;
   readonly usedMemoryIds: readonly string[];
@@ -222,8 +224,9 @@ export class OutcomeStore {
       const usedMemoryIds = uniqueUuidV7(input.usedMemoryIds);
       this.assertReceipt(traceId, agentId, writableBrainIds, usedMemoryIds);
       const parsedTraceId = UuidV7Schema.parse(traceId);
+      const canonicalResult = normalizeOutcomeResult(OutcomeResultSchema.parse(input.result));
       for (const memoryId of usedMemoryIds) {
-        this.claimFeedback(agentId, memoryId, parsedTraceId, 'task_outcome', input.result);
+        this.claimFeedback(agentId, memoryId, parsedTraceId, 'task_outcome', canonicalResult);
       }
       const outcome = this.recordOutcome({ ...input, usedMemoryIds }, writableBrainIds);
       this.consumeReceipt(traceId, agentId, writableBrainIds);
@@ -309,11 +312,13 @@ export class OutcomeStore {
   recordOutcome(input: RecordMemoryOutcomeInput, writableBrainIds: readonly string[]): MemoryOutcome {
     const usedMemoryIds = uniqueUuidV7(input.usedMemoryIds);
     this.assertMemoriesMounted(usedMemoryIds, normalizeBrainIds(writableBrainIds));
+    const suppliedResult = OutcomeResultSchema.or(CanonicalOutcomeResultSchema).parse(input.result);
+    const canonicalResult = normalizeOutcomeResult(suppliedResult);
     const outcome = MemoryOutcomeSchema.parse({
       id: createUuidV7(),
       taskId: NonEmptyTextSchema.parse(input.taskId),
       agentId: NonEmptyTextSchema.parse(input.agentId),
-      result: OutcomeResultSchema.parse(input.result),
+      result: canonicalResult,
       correctionType: input.correctionType === undefined || input.correctionType === null
         ? null
         : NonEmptyTextSchema.parse(input.correctionType),
@@ -343,7 +348,11 @@ export class OutcomeStore {
         JSON.stringify(outcome.usedToolIds),
         outcome.createdAt,
       );
-    return outcome;
+    // Keep the legacy return vocabulary for callers that still send it. The
+    // persisted row and every subsequent read use the canonical v0.3 value.
+    return suppliedResult === 'success' || suppliedResult === 'failure' || suppliedResult === 'corrected'
+      ? { ...outcome, result: suppliedResult }
+      : outcome;
   }
 
   listUsage(memoryId: string, brainIds: readonly string[]): MemoryUsage[] {
@@ -574,5 +583,5 @@ function usageDelta(outcome: string): number {
 }
 
 function resultDelta(result: string): number {
-  return result === 'success' ? 1 : result === 'corrected' ? -2 : -1;
+  return result === 'success' || result === 'completed' ? 1 : result === 'corrected' ? -2 : -1;
 }
