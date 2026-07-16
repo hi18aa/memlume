@@ -2,12 +2,17 @@ import { createHash, randomBytes } from 'node:crypto';
 
 import {
   AgentInstallationSchema,
+  AdapterCallbackSchema,
+  AdapterHeartbeatSchema,
+  AdapterProtocolVersionSchema,
   BrainMountSchema,
   BrainSchema,
   NonEmptyTextSchema,
   UuidV7Schema,
   createUuidV7,
   type AgentInstallation,
+  type AdapterCallback,
+  type AdapterHeartbeat,
   type Brain,
   type BrainKind,
   type BrainMount,
@@ -30,6 +35,14 @@ type AgentInstallationRow = {
   installation_id: string;
   profile_id: string;
   display_name: string | null;
+};
+type AdapterHeartbeatRow = {
+  agent_installation_id: string;
+  callback: string;
+  protocol_version: string;
+  adapter_version: string;
+  first_seen_at: string;
+  last_seen_at: string;
 };
 
 export type RegisteredInstallation = {
@@ -230,6 +243,85 @@ export class BrainStore {
       })
       .immediate();
     return { token };
+  }
+
+  /** Record a heartbeat only after the caller has authenticated the installation token. */
+  recordHeartbeat(input: {
+    readonly agentInstallationId: string;
+    readonly callback: AdapterCallback;
+    readonly protocolVersion: string;
+    readonly adapterVersion: string;
+    readonly seenAt?: string;
+  }): AdapterHeartbeat {
+    const callback = AdapterCallbackSchema.parse(input.callback);
+    const protocolVersion = AdapterProtocolVersionSchema.parse(input.protocolVersion);
+    const adapterVersion = NonEmptyTextSchema.parse(input.adapterVersion);
+    const agentInstallationId = UuidV7Schema.parse(input.agentInstallationId);
+    const seenAt = input.seenAt === undefined ? new Date().toISOString() : input.seenAt;
+    const existing = this.database
+      .prepare(
+        `SELECT agent_installation_id, callback, protocol_version, adapter_version, first_seen_at, last_seen_at
+         FROM adapter_heartbeats
+         WHERE agent_installation_id = ? AND callback = ? AND protocol_version = ? AND adapter_version = ?`,
+      )
+      .get(agentInstallationId, callback, protocolVersion, adapterVersion) as AdapterHeartbeatRow | undefined;
+    if (existing === undefined) {
+      this.database
+        .prepare(
+          `INSERT INTO adapter_heartbeats
+            (agent_installation_id, callback, protocol_version, adapter_version, first_seen_at, last_seen_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(agentInstallationId, callback, protocolVersion, adapterVersion, seenAt, seenAt);
+      return AdapterHeartbeatSchema.parse({
+        agentInstallationId,
+        callback,
+        protocolVersion,
+        adapterVersion,
+        firstSeenAt: seenAt,
+        lastSeenAt: seenAt,
+      });
+    }
+    this.database
+      .prepare(
+        `UPDATE adapter_heartbeats SET last_seen_at = ?
+         WHERE agent_installation_id = ? AND callback = ? AND protocol_version = ? AND adapter_version = ?`,
+      )
+      .run(seenAt, agentInstallationId, callback, protocolVersion, adapterVersion);
+    return AdapterHeartbeatSchema.parse({
+      agentInstallationId,
+      callback,
+      protocolVersion,
+      adapterVersion,
+      firstSeenAt: existing.first_seen_at,
+      lastSeenAt: seenAt,
+    });
+  }
+
+  listHeartbeats(agentInstallationId?: string): AdapterHeartbeat[] {
+    const id = agentInstallationId === undefined ? undefined : UuidV7Schema.parse(agentInstallationId);
+    const rows = id === undefined
+      ? this.database
+        .prepare(
+          `SELECT agent_installation_id, callback, protocol_version, adapter_version, first_seen_at, last_seen_at
+           FROM adapter_heartbeats ORDER BY agent_installation_id, callback, adapter_version, protocol_version`,
+        )
+        .all() as AdapterHeartbeatRow[]
+      : this.database
+        .prepare(
+          `SELECT agent_installation_id, callback, protocol_version, adapter_version, first_seen_at, last_seen_at
+           FROM adapter_heartbeats WHERE agent_installation_id = ?
+           ORDER BY callback, adapter_version, protocol_version`,
+        )
+        .all(id) as AdapterHeartbeatRow[];
+    return rows.map((row) => AdapterHeartbeatSchema.parse({
+      agentInstallationId: row.agent_installation_id,
+      callback: row.callback,
+      protocolVersion: row.protocol_version,
+      adapterVersion: row.adapter_version,
+      firstSeenAt: row.first_seen_at,
+      lastSeenAt: row.last_seen_at,
+    }));
   }
 }
 

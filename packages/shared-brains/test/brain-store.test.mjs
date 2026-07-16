@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { afterEach, describe, test } from 'node:test';
 
-import { AgentInstallationSchema, BrainMountSchema, BrainSchema } from '@memlume/contracts';
+import { AdapterHeartbeatSchema, AgentInstallationSchema, BrainMountSchema, BrainSchema } from '@memlume/contracts';
 import { openDatabase } from '@memlume/database/internal';
 
 import * as sharedBrains from '../dist/index.js';
@@ -83,6 +83,39 @@ describe('BrainStore', () => {
       .prepare('SELECT revoked_at FROM adapter_tokens WHERE agent_installation_id = ?')
       .all(first.installation.id);
     assert.equal(tokens.filter((token) => token.revoked_at === null).length, 1);
+  });
+
+  test('records verified callback heartbeats by adapter and protocol version', () => {
+    const { store } = createStore();
+    const { installation } = store.registerInstallation({
+      clientType: 'codex',
+      installationId: 'desktop',
+      profileId: 'default',
+    });
+    const first = store.recordHeartbeat({
+      agentInstallationId: installation.id,
+      callback: 'beforeTask',
+      protocolVersion: '1',
+      adapterVersion: '0.2.0',
+      seenAt: '2026-07-16T00:00:00.000Z',
+    });
+    const second = store.recordHeartbeat({
+      agentInstallationId: installation.id,
+      callback: 'beforeTask',
+      protocolVersion: '1',
+      adapterVersion: '0.2.0',
+      seenAt: '2026-07-16T00:00:01.000Z',
+    });
+    assert.deepEqual(AdapterHeartbeatSchema.parse(second), second);
+    assert.equal(first.firstSeenAt, second.firstSeenAt);
+    assert.equal(second.lastSeenAt, '2026-07-16T00:00:01.000Z');
+    assert.equal(store.listHeartbeats(installation.id).length, 1);
+    assert.throws(() => store.recordHeartbeat({
+      agentInstallationId: installation.id,
+      callback: 'onUserMessage',
+      protocolVersion: '1',
+      adapterVersion: '',
+    }), /Too small: expected string/);
   });
 
   test('does not allow a caller-controlled id to replace the generated installation id', () => {

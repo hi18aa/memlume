@@ -881,6 +881,15 @@ describe('AdapterClient', () => {
 
     assert.equal(fake.calls.length, 3);
     assert.equal(fake.calls.every(({ init }) => init.headers.authorization === `Bearer ${token}`), true);
+    assert.deepEqual(fake.calls.map(({ init }) => ({
+      callback: init.headers['x-memlume-callback'],
+      protocol: init.headers['x-memlume-protocol-version'],
+      adapter: init.headers['x-memlume-adapter-version'],
+    })), [
+      { callback: 'beforeTask', protocol: '1', adapter: '0.2.0' },
+      { callback: 'onUserMessage', protocol: '1', adapter: '0.2.0' },
+      { callback: 'onSubagentStart', protocol: '1', adapter: '0.2.0' },
+    ]);
     assert.equal(fake.calls[0].url.endsWith('/v1/context/resolve'), true);
     assert.equal(fake.calls[1].url.endsWith('/v1/memories/capture'), true);
     assert.equal(fake.calls[2].url.endsWith('/v1/context/resolve'), true);

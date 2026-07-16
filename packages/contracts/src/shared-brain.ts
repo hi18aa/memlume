@@ -40,4 +40,21 @@ export const AdapterEnvelopeSchema = z.object({
 });
 export type AdapterEnvelope = z.infer<typeof AdapterEnvelopeSchema>;
 
+/** The only lifecycle callbacks that form the public adapter contract. */
+export const AdapterCallbackSchema = z.enum(['beforeTask', 'onUserMessage', 'onSubagentStart']);
+export type AdapterCallback = z.infer<typeof AdapterCallbackSchema>;
+
+export const AdapterProtocolVersionSchema = NonEmptyTextSchema;
+export type AdapterProtocolVersion = z.infer<typeof AdapterProtocolVersionSchema>;
+
+export const AdapterHeartbeatSchema = z.object({
+  agentInstallationId: UuidV7Schema,
+  callback: AdapterCallbackSchema,
+  protocolVersion: AdapterProtocolVersionSchema,
+  adapterVersion: NonEmptyTextSchema,
+  firstSeenAt: IsoUtcDateTimeSchema,
+  lastSeenAt: IsoUtcDateTimeSchema,
+});
+export type AdapterHeartbeat = z.infer<typeof AdapterHeartbeatSchema>;
+
 export const DEFAULT_PERSONAL_BRAIN_ID = UuidV7Schema.parse('00000000-0000-7000-8000-000000000001');
