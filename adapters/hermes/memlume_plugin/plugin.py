@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping
 
 BridgeRunner = Callable[[dict[str, Any], float | None], Any]
 CHILD_SESSION_LIMIT = 256
+DEFAULT_TIMEOUT_SECONDS = 1.0
 
 
 class MemlumePlugin:
@@ -22,7 +23,7 @@ class MemlumePlugin:
         *,
         environment: Mapping[str, str] | None = None,
         runner: BridgeRunner | None = None,
-        timeout_seconds: float = 0.5,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         self._environment = _with_local_profile(dict(os.environ if environment is None else environment))
         self._runner = runner or _SubprocessBridge(self._environment)

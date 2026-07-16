@@ -19,6 +19,7 @@ node apps/cli/dist/index.js status
 ## Hook 與讀寫
 
 - `before_prompt_build` 呼叫 `beforeTask`，Core 依目前 workspace、任務與 entity 產生 ReadSet。Primary Project 優先，只有命中的 Linked Project 才加入；Personal 需具相關性才注入。
+- Hook 預留 1 秒；SDK 會以有界時間處理本機 outbox 與 daemon context，逾時則 fail-open，不阻塞 OpenClaw 原生流程。
 - `message_received` 呼叫 `onUserMessage`。Core 會過濾 Secret、拆分 atom、解析 Personal／Project、檢查衝突，再以 Markdown authority → SQLite projection 寫入。
 - `subagent_spawned` 是 observer，只記錄 child 啟用訊號；child 第一次 `before_prompt_build` 才呼叫 `onSubagentStart`。沒有 child goal 時只讀 Primary Project，不讀取 Personal 或未匹配 Linked Project，也不寫入。
 

@@ -75,7 +75,7 @@ test('maps OpenClaw native hooks to three shared callbacks and restricts a child
   const context = { sessionId: 'openclaw-session', sessionKey: 'agent:main:openclaw-session' };
 
   assert.deepEqual([...handlers.keys()], ['before_prompt_build', 'message_received', 'subagent_spawned']);
-  assert.equal(handlers.get('before_prompt_build').options.timeoutMs, 350);
+  assert.equal(handlers.get('before_prompt_build').options.timeoutMs, 1_000);
 
   await handlers.get('subagent_spawned').handler({
     childSessionKey: 'agent:child:openclaw-child',

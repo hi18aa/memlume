@@ -61,4 +61,6 @@ Setup token 用於註冊、binding、備份、診斷與 review；Adapter bearer 
 
 讀取失敗 fail-open，Host 會收到空 Context 並繼續任務；寫入失敗只把安全且明確的 capture 放入 installation-specific outbox，沒有 silent eviction，queue full、routing_required、rejected 與 degraded 狀態可由 `memlume status`／`memlume doctor` 查到。
 
+`beforeTask` 的本機 outbox flush 有 500ms 上限，daemon Context 讀取有 250ms 上限；OpenClaw 與 Hermes Adapter 的 Host hook 預留至少 1 秒，忙碌檔案系統不會讓 Host 提前取消共享 Context。超時仍採 fail-open，不阻塞原生 Agent 流程。
+
 Context Pack 的 `traceId`、`sourceMemoryIds`、ReadSet exclusion 與 budget 可稽核。Outcome 只關閉 receipt 與留下稽核，不改變 memory status、權重或檢索排序。Agent native memory 不會被讀取、覆寫或同步。
