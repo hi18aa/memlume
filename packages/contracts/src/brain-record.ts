@@ -2,8 +2,10 @@ import { z } from 'zod';
 
 import {
   IsoUtcDateTimeSchema,
+  IsoDateSchema,
   JsonValueSchema,
   MemoryKindSchema,
+  MemoryScopeSchema,
   MemoryStatusSchema,
   NonEmptyTextSchema,
   UuidV7Schema,
@@ -31,6 +33,14 @@ export const SemanticRecordSchema = CanonicalRecordMetadataSchema.extend({
   recordType: z.literal('semantic'),
   sourceAtom: NonEmptyTextSchema,
   canonicalText: NonEmptyTextSchema,
+  title: NonEmptyTextSchema.optional(),
+  scope: MemoryScopeSchema.optional(),
+  priority: z.number().int().optional(),
+  confidence: z.number().min(0).max(1).optional(),
+  explicitness: z.number().min(0).max(1).optional(),
+  sourceEventId: UuidV7Schema.optional(),
+  validFrom: IsoDateSchema.optional(),
+  validUntil: IsoDateSchema.optional(),
   structuredData: JsonValueSchema.optional(),
   supersedesRecordId: UuidV7Schema.optional(),
 }).strict();

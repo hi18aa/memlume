@@ -15,6 +15,8 @@ import {
 } from '@memlume/contracts';
 import type { SqliteDatabase } from '@memlume/database/internal';
 
+import { MarkdownMemoryAuthority } from './markdown-authority.js';
+
 const manualMemoryKinds = ['policy', 'preference', 'fact', 'decision'] as const;
 const scopeLevels = ['global', 'domain', 'agent', 'workspace', 'project', 'task'] as const;
 const scopeFields = ['domain', 'agentId', 'workspace', 'projectId', 'taskId'] as const;
@@ -46,6 +48,24 @@ export interface ReviewCandidateInput {
   readonly actor: string;
   readonly reason: string;
   readonly supersedeMemoryId?: string;
+}
+
+export interface MemoryWriteAuthority {
+  save(input: SaveMemoryInput): MemoryItem;
+  saveCandidate(input: SaveMemoryInput): MemoryItem;
+  approveCandidate(id: string, input: ReviewCandidateInput, brainIds?: readonly string[]): MemoryItem;
+  rejectCandidate(id: string, input: Omit<ReviewCandidateInput, 'supersedeMemoryId'>, brainIds?: readonly string[]): MemoryItem;
+  update(id: string, input: UpdateMemoryInput, brainIds?: readonly string[]): MemoryItem;
+}
+
+export interface MemoryStoreOptions {
+  readonly authority?: MemoryWriteAuthority;
+  readonly markdownRoot?: string;
+  /**
+   * Compatibility switch for v0.2 fixtures. Production instances must use
+   * `authority`/`markdownRoot`; this switch will be removed after migration.
+   */
+  readonly allowLegacyWrites?: boolean;
 }
 
 export interface MemoryQuery {
@@ -130,17 +150,38 @@ const memorySelectColumns = `${memoryItemColumns}, memory_brains.brain_id`;
 const memoryFrom = 'FROM memory_items JOIN memory_brains ON memory_brains.memory_id = memory_items.id';
 
 export class MemoryStore {
-  constructor(private readonly database: SqliteDatabase) {}
+  private readonly authority?: MemoryWriteAuthority;
+  private readonly allowLegacyWrites: boolean;
+
+  constructor(private readonly database: SqliteDatabase, options: MemoryStoreOptions = {}) {
+    if (options.authority !== undefined && options.markdownRoot !== undefined) {
+      throw new Error('MemoryStore accepts either authority or markdownRoot, not both.');
+    }
+    this.authority = options.authority ?? (options.markdownRoot === undefined
+      ? undefined
+      : new MarkdownMemoryAuthority(database, options.markdownRoot, this));
+    this.allowLegacyWrites = options.allowLegacyWrites ?? this.authority === undefined;
+  }
 
   save(input: SaveMemoryInput): MemoryItem {
+    if (this.authority !== undefined) {
+      return this.authority.save(input);
+    }
     return this.saveWithStatus(input, 'active');
   }
 
   saveCandidate(input: SaveMemoryInput): MemoryItem {
+    if (this.authority !== undefined) {
+      return this.authority.saveCandidate(input);
+    }
     return this.saveWithStatus(input, 'candidate');
   }
 
   approveCandidate(id: string, input: ReviewCandidateInput, brainIds?: readonly string[]): MemoryItem {
+    if (this.authority !== undefined) {
+      return this.authority.approveCandidate(id, input, brainIds);
+    }
+    this.assertLegacyWriter();
     const allowedBrainIds = normalizeBrainIds(brainIds);
     const candidate = this.getStored(id, allowedBrainIds);
     if (candidate === undefined) {
@@ -200,6 +241,10 @@ export class MemoryStore {
   }
 
   rejectCandidate(id: string, input: Omit<ReviewCandidateInput, 'supersedeMemoryId'>, brainIds?: readonly string[]): MemoryItem {
+    if (this.authority !== undefined) {
+      return this.authority.rejectCandidate(id, input, brainIds);
+    }
+    this.assertLegacyWriter();
     const candidate = this.getStored(id, normalizeBrainIds(brainIds));
     if (candidate === undefined) {
       throw new Error(`Memory not found: ${id}`);
@@ -249,6 +294,7 @@ export class MemoryStore {
   }
 
   private saveWithStatus(input: SaveMemoryInput, status: 'active' | 'candidate'): MemoryItem {
+    this.assertLegacyWriter();
     if (!isManualMemoryKind(input.kind)) {
       throw new Error('Manual memory must be a policy, preference, fact, or decision.');
     }
@@ -273,6 +319,10 @@ export class MemoryStore {
   }
 
   update(id: string, input: UpdateMemoryInput, brainIds?: readonly string[]): MemoryItem {
+    if (this.authority !== undefined) {
+      return this.authority.update(id, input, brainIds);
+    }
+    this.assertLegacyWriter();
     const existing = this.getStored(id, normalizeBrainIds(brainIds));
     if (!existing) {
       throw new Error(`Memory not found: ${id}`);
@@ -474,6 +524,12 @@ export class MemoryStore {
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `)
       .run(memory.id, memory.title ?? '', memory.canonicalText, memory.canonicalText, '', '', memory.canonicalText);
+  }
+
+  private assertLegacyWriter(): void {
+    if (!this.allowLegacyWrites) {
+      throw new Error('markdown_authority_required: semantic writes must use Markdown authority.');
+    }
   }
 }
 

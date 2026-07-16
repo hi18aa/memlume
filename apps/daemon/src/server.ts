@@ -8,7 +8,7 @@ import express, { type Express } from 'express';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { type AddressInfo, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { registerRoutes, type BackupLifecycle } from './routes.js';
@@ -201,7 +201,7 @@ export function createDaemon({ databasePath, setupToken, consolePath = defaultCo
     const database = openDatabase(databasePath);
     try {
       const journal = new EventJournal(database);
-      const store = new MemoryStore(database);
+      const store = new MemoryStore(database, { markdownRoot: resolve(dirname(databasePath)) });
       const outcomes = new OutcomeStore(database);
       const resolver = new ContextResolver(store, outcomes);
       const brains = new BrainStore(database);

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -64,6 +65,45 @@ describe('RecordProjector', () => {
     expect(store.search('Vue', { brainIds: [brainId] }).map((item) => item.id)).toEqual([record.memoryId]);
     expect(database.prepare('SELECT COUNT(*) AS count FROM record_projections').get()).toEqual({ count: 1 });
     expect(database.prepare('SELECT source_event_id FROM memory_items WHERE id = ?').pluck().get(record.memoryId)).toBe(record.recordId);
+  });
+
+  test('binds an explicit source event without replacing its captured content', () => {
+    const { database, brainId } = createFixture();
+    const sourceEventId = createUuidV7();
+    const rawContent = '原始對話：前端使用 Vue。';
+    const contentHash = createHash('sha256').update(rawContent, 'utf8').digest('hex');
+    database.prepare(`
+      INSERT INTO events (
+        id, event_type, raw_content, structured_data, source_type, source_agent, source_reference,
+        source_data, occurred_at, ingested_at, processing_status, content_hash
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      sourceEventId,
+      'user_message',
+      rawContent,
+      null,
+      'adapter',
+      'test',
+      'capture://test',
+      '{}',
+      '2026-07-16T00:00:00.000Z',
+      '2026-07-16T00:00:00.000Z',
+      'processed',
+      contentHash,
+    );
+    database.prepare('INSERT INTO event_brains (event_id, brain_id, created_at) VALUES (?, ?, ?)')
+      .run(sourceEventId, brainId, '2026-07-16T00:00:00.000Z');
+
+    const record = semanticRecord(brainId, { sourceEventId });
+    new RecordProjector(database).project({
+      record,
+      relativePath: `brains/${brainId}/records/2026/07/${record.recordId}.md`,
+      checksum: 'e'.repeat(64),
+    });
+
+    expect(database.prepare('SELECT source_event_id FROM memory_items WHERE id = ?').pluck().get(record.memoryId)).toBe(sourceEventId);
+    expect(database.prepare('SELECT raw_content FROM events WHERE id = ?').pluck().get(sourceEventId)).toBe(rawContent);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM events').get()).toEqual({ count: 1 });
   });
 
   test('does not make event_only records searchable and rejects checksum conflicts', () => {

@@ -68,6 +68,32 @@ describe('v0.3 brain record contracts', () => {
     expect(SemanticRecordSchema.safeParse({ ...record, unexpected: true }).success).toBe(false);
   });
 
+  test('preserves optional MemoryItem metadata in authority records', () => {
+    const parsed = SemanticRecordSchema.parse({
+      ...record,
+      title: '前端技術棧',
+      scope: { level: 'project', projectId: 'memlume' },
+      priority: 7,
+      confidence: 0.8,
+      explicitness: 1,
+      sourceEventId: ids.record,
+      validFrom: '2026-07-16',
+      validUntil: '2026-12-31',
+    });
+
+    expect(parsed).toMatchObject({
+      title: '前端技術棧',
+      scope: { level: 'project', projectId: 'memlume' },
+      priority: 7,
+      confidence: 0.8,
+      explicitness: 1,
+      sourceEventId: ids.record,
+      validFrom: '2026-07-16',
+      validUntil: '2026-12-31',
+    });
+    expect(SemanticRecordSchema.safeParse({ ...record, priority: -1 }).success).toBe(false);
+  });
+
   test('models tombstones as strict immutable records', () => {
     const tombstone = {
       recordType: 'tombstone',

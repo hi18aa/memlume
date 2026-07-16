@@ -232,6 +232,9 @@ importers:
       '@memlume/database':
         specifier: workspace:*
         version: link:../database
+      '@memlume/shared-brains':
+        specifier: workspace:*
+        version: link:../shared-brains
     devDependencies:
       '@types/node':
         specifier: ^24.10.1

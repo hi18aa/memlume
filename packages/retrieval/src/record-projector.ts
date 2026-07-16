@@ -172,22 +172,24 @@ export class RecordProjector {
 
     const structuredData = memoryStructuredData(record);
     const createdAt = existingMemory?.created_at ?? record.createdAt;
+    const scope = record.scope ?? { level: 'global' as const };
+    const sourceEventId = record.sourceEventId ?? record.recordId;
     const values = [
       record.memoryId,
       record.kind,
-      null,
+      record.title ?? null,
       record.canonicalText,
       JSON.stringify(structuredData),
-      JSON.stringify({ level: 'global' }),
+      JSON.stringify(scope),
       record.status,
-      0,
-      1,
-      1,
-      record.recordId,
+      record.priority ?? 0,
+      record.confidence ?? 1,
+      record.explicitness ?? 1,
+      sourceEventId,
       createdAt,
       record.updatedAt,
-      null,
-      null,
+      record.validFrom ?? null,
+      record.validUntil ?? null,
       null,
     ] as const;
     if (existingMemory === undefined) {
@@ -214,18 +216,18 @@ export class RecordProjector {
         `)
         .run(
           record.kind,
-          null,
+          record.title ?? null,
           record.canonicalText,
           JSON.stringify(structuredData),
-          JSON.stringify({ level: 'global' }),
+          JSON.stringify(scope),
           record.status,
-          0,
-          1,
-          1,
-          record.recordId,
+          record.priority ?? 0,
+          record.confidence ?? 1,
+          record.explicitness ?? 1,
+          sourceEventId,
           record.updatedAt,
-          null,
-          null,
+          record.validFrom ?? null,
+          record.validUntil ?? null,
           null,
           record.memoryId,
         );
@@ -261,15 +263,23 @@ export class RecordProjector {
   }
 
   private ensureSourceEvent(record: ProjectableRecord, rawContent: string): void {
+    const sourceEventId = 'sourceEventId' in record && record.sourceEventId !== undefined
+      ? record.sourceEventId
+      : record.recordId;
     const contentHash = createHash('sha256').update(rawContent, 'utf8').digest('hex');
     const existing = this.database
       .prepare('SELECT raw_content, content_hash FROM events WHERE id = ?')
-      .get(record.recordId) as { raw_content: string; content_hash: string } | undefined;
+      .get(sourceEventId) as { raw_content: string; content_hash: string } | undefined;
     if (existing !== undefined) {
-      if (existing.raw_content !== rawContent || existing.content_hash !== contentHash) {
+      // Caller-provided source events already contain the captured content;
+      // the semantic record is only a derived reference to that event.
+      if (sourceEventId === record.recordId && (existing.raw_content !== rawContent || existing.content_hash !== contentHash)) {
         throw new Error(`record_conflict: source event ${record.recordId} has different content.`);
       }
     } else {
+      if (sourceEventId !== record.recordId) {
+        throw new Error(`source_event_missing: source event ${sourceEventId} is not available.`);
+      }
       this.database
         .prepare(`
           INSERT INTO events (
@@ -278,7 +288,7 @@ export class RecordProjector {
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `)
         .run(
-          record.recordId,
+          sourceEventId,
           record.recordType,
           rawContent,
           'structuredData' in record && record.structuredData === undefined ? null : JSON.stringify('structuredData' in record ? record.structuredData : {}),
@@ -294,14 +304,14 @@ export class RecordProjector {
     }
     const binding = this.database
       .prepare('SELECT brain_id FROM event_brains WHERE event_id = ?')
-      .get(record.recordId) as { brain_id: string } | undefined;
+      .get(sourceEventId) as { brain_id: string } | undefined;
     if (binding !== undefined && binding.brain_id !== record.brainId) {
-      throw new Error(`cross_brain_event: source event ${record.recordId} is already bound to another Brain.`);
+      throw new Error(`cross_brain_event: source event ${sourceEventId} is already bound to another Brain.`);
     }
     if (binding === undefined) {
       this.database
         .prepare('INSERT INTO event_brains (event_id, brain_id, created_at) VALUES (?, ?, ?)')
-        .run(record.recordId, record.brainId, record.updatedAt);
+        .run(sourceEventId, record.brainId, record.updatedAt);
     }
   }
 
@@ -341,6 +351,9 @@ export class RecordProjector {
       return;
     }
     const placeholders = memoryIds.map(() => '?').join(', ');
+    this.database
+      .prepare(`UPDATE memory_items SET status = 'archived', updated_at = ? WHERE id IN (${placeholders})`)
+      .run(new Date().toISOString(), ...memoryIds);
     this.database.prepare(`DELETE FROM memory_search WHERE memory_id IN (${placeholders})`).run(...memoryIds);
   }
 }
@@ -385,14 +398,17 @@ function memoryStructuredData(record: SemanticRecord): unknown {
     kind: record.kind,
     canonicalText: record.canonicalText,
     structuredData: record.structuredData,
-    scope: { level: 'global' as const },
+    scope: record.scope ?? { level: 'global' as const },
     status: record.status,
-    priority: 0,
-    confidence: 1,
-    explicitness: 1,
-    sourceEventId: record.recordId,
+    priority: record.priority ?? 0,
+    confidence: record.confidence ?? 1,
+    explicitness: record.explicitness ?? 1,
+    sourceEventId: record.sourceEventId ?? record.recordId,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+    ...(record.title === undefined ? {} : { title: record.title }),
+    ...(record.validFrom === undefined ? {} : { validFrom: record.validFrom }),
+    ...(record.validUntil === undefined ? {} : { validUntil: record.validUntil }),
   };
   if (record.structuredData !== undefined && MemoryItemSchema.safeParse(candidate).success) {
     return record.structuredData;

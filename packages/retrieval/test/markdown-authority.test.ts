@@ -1,0 +1,79 @@
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { createUuidV7 } from '@memlume/contracts';
+import { openDatabase, type SqliteDatabase } from '@memlume/database/internal';
+import { afterEach, describe, expect, test } from 'vitest';
+
+import { MemoryStore, RecordProjector } from '../src/index.js';
+
+const databases: SqliteDatabase[] = [];
+const roots: string[] = [];
+
+afterEach(() => {
+  while (databases.length > 0) databases.pop()!.close();
+  while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
+});
+
+function fixture() {
+  const root = mkdtempSync(join(tmpdir(), 'memlume-authority-'));
+  roots.push(root);
+  const database = openDatabase(join(root, 'memlume.sqlite'));
+  databases.push(database);
+  const brainId = createUuidV7();
+  database
+    .prepare('INSERT INTO brains (id, kind, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+    .run(brainId, 'project', 'Memlume', '2026-07-16T00:00:00.000Z', '2026-07-16T00:00:00.000Z');
+  return { root, database, brainId };
+}
+
+function draft(brainId: string) {
+  return {
+    brainId,
+    kind: 'fact' as const,
+    canonicalText: '前端使用 Vue。',
+    structuredData: { subject: 'frontend', predicate: 'framework', object: 'Vue', confidence: 1 },
+    scope: { level: 'project' as const, projectId: 'memlume' },
+    title: '前端技術棧',
+    priority: 7,
+    confidence: 0.8,
+    explicitness: 1,
+  };
+}
+
+describe('MemoryStore Markdown authority mode', () => {
+  test('appends Markdown before projecting and restores metadata through reindex', () => {
+    const { root, database, brainId } = fixture();
+    const store = new MemoryStore(database, { markdownRoot: root });
+    const memory = store.save(draft(brainId));
+
+    const recordPath = join(root, 'brains', brainId, 'records', '2026', '07');
+    expect(existsSync(recordPath)).toBe(true);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM record_projections').get()).toEqual({ count: 1 });
+    expect(store.get(memory.id, [brainId])).toMatchObject({
+      title: '前端技術棧',
+      scope: { level: 'project', projectId: 'memlume' },
+      priority: 7,
+      confidence: 0.8,
+      explicitness: 1,
+    });
+
+    const rebuilt = new RecordProjector(database).rebuild([]);
+    expect(rebuilt).toEqual([]);
+    expect(store.search('Vue', { brainIds: [brainId] })).toHaveLength(0);
+    expect(store.get(memory.id, [brainId])?.status).not.toBe('active');
+  });
+
+  test('does not use the legacy SQLite mutation path when Markdown authority is configured', () => {
+    const { root, database, brainId } = fixture();
+    const store = new MemoryStore(database, { markdownRoot: root });
+    const memory = store.save(draft(brainId));
+    const projection = database
+      .prepare('SELECT record_id FROM record_projections WHERE memory_id = ?')
+      .get(memory.id) as { record_id: string } | undefined;
+
+    expect(projection?.record_id).toBeTruthy();
+    expect(database.prepare('SELECT source_type FROM events WHERE id = ?').get(projection!.record_id)).toEqual({ source_type: 'markdown' });
+  });
+});
