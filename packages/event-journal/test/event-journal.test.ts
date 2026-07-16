@@ -119,6 +119,7 @@ describe('EventJournal', () => {
   test('appends a schema-validated event and reads it back', () => {
     const { database, journal } = createJournal();
     const event = journal.append({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       rawContent: '  我不喜歡亂花錢。  ',
       eventType: 'user_statement',
       occurredAt: '2026-07-12T15:00:00.000Z',
@@ -228,6 +229,7 @@ describe('EventJournal', () => {
 
     expect(() =>
       journal.append({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'A valid event must have a valid source.',
         eventType: 'user_statement',
         source: { type: '' },
@@ -235,6 +237,7 @@ describe('EventJournal', () => {
     ).toThrow();
     expect(() =>
       journal.append({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'Structured data must be JSON.',
         eventType: 'user_statement',
         source: { agent: 'codex-cli' },
@@ -243,6 +246,7 @@ describe('EventJournal', () => {
     ).toThrow();
     expect(() =>
       journal.append({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'Null timestamps must be rejected.',
         eventType: 'user_statement',
         source: { agent: 'codex-cli' },
@@ -251,6 +255,7 @@ describe('EventJournal', () => {
     ).toThrow();
     expect(() =>
       journal.append({
+        brainId: DEFAULT_PERSONAL_BRAIN_ID,
         rawContent: 'Malformed timestamps must be rejected.',
         eventType: 'user_statement',
         source: { agent: 'codex-cli' },
@@ -262,6 +267,7 @@ describe('EventJournal', () => {
   test('deduplicates only matching content with an explicit source reference', () => {
     const { database, journal } = createJournal();
     const input = {
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       rawContent: 'Use local SQLite first.',
       eventType: 'decision',
       source: { agent: 'codex-cli', reference: 'task:4' },
@@ -318,6 +324,7 @@ describe('EventJournal', () => {
   test('database triggers reject direct event updates and deletes', () => {
     const { database, journal } = createJournal();
     const event = journal.append({
+      brainId: DEFAULT_PERSONAL_BRAIN_ID,
       rawContent: 'Never mutate an event.',
       eventType: 'user_statement',
       source: { agent: 'codex-cli', reference: 'immutability-test' },
@@ -327,5 +334,14 @@ describe('EventJournal', () => {
       /append-only/,
     );
     expect(() => database.prepare('DELETE FROM events WHERE id = ?').run(event.id)).toThrow(/append-only/);
+  });
+
+  test('rejects an event write without a Brain instead of falling back to Personal', () => {
+    const { journal } = createJournal();
+    expect(() => journal.append({
+      rawContent: 'This event has no routing target.',
+      eventType: 'user_statement',
+      source: { agent: 'codex-cli', reference: 'missing-brain' },
+    })).toThrow(/brainId/i);
   });
 });

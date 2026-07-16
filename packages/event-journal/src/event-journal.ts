@@ -40,6 +40,13 @@ export class EventBrainConflictError extends Error {
   }
 }
 
+export class EventBrainRequiredError extends Error {
+  constructor() {
+    super('Event writes require an explicit brainId.');
+    this.name = 'EventBrainRequiredError';
+  }
+}
+
 type EventRow = {
   id: string;
   event_type: string;
@@ -146,7 +153,10 @@ export class EventJournal {
 
   private appendInTransaction(input: AppendEventInput): StoredEvent {
     const source = EventSourceSchema.parse(withoutNullSourceReference(input.source));
-    const brainId = UuidV7Schema.parse(input.brainId ?? DEFAULT_PERSONAL_BRAIN_ID);
+    if (input.brainId === undefined) {
+      throw new EventBrainRequiredError();
+    }
+    const brainId = UuidV7Schema.parse(input.brainId);
     const event = EventSchema.parse({
       id: createUuidV7(),
       brainId,
