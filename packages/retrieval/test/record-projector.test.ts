@@ -201,4 +201,75 @@ describe('RecordProjector', () => {
     expect(database.prepare('SELECT COUNT(*) AS count FROM memory_relations').get()).toEqual({ count: 1 });
     expect(database.prepare('SELECT COUNT(*) AS count FROM memory_versions').get()).toEqual({ count: 1 });
   });
+
+  test('rebuild archives active memories without an authority projection and keeps runtime history', () => {
+    const { database, brainId } = createFixture();
+    const authority = semanticRecord(brainId);
+    const input = {
+      record: authority,
+      relativePath: 'brains/authority.md',
+      checksum: 'a'.repeat(64),
+    };
+    const projector = new RecordProjector(database);
+    projector.project(input);
+
+    const legacyMemoryId = createUuidV7();
+    const now = '2026-07-16T00:00:00.000Z';
+    database.prepare(`
+      INSERT INTO memory_items (
+        id, kind, title, canonical_text, structured_data, scope_data, status, priority,
+        confidence, explicitness, source_event_id, created_at, updated_at, valid_from,
+        valid_until, superseded_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      legacyMemoryId,
+      'fact',
+      null,
+      'legacy memory',
+      JSON.stringify({ subject: 'legacy', predicate: 'state', object: 'active' }),
+      JSON.stringify({ level: 'global' }),
+      'active',
+      0,
+      1,
+      1,
+      null,
+      now,
+      now,
+      null,
+      null,
+      null,
+    );
+    database.prepare('INSERT INTO memory_brains (memory_id, brain_id, created_at) VALUES (?, ?, ?)')
+      .run(legacyMemoryId, brainId, now);
+    database.prepare(`
+      INSERT INTO memory_search (memory_id, title, canonical_text, summary, keywords, entities, content)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(legacyMemoryId, '', 'legacy memory', 'legacy memory', '', '', 'legacy memory');
+    database.prepare(`
+      INSERT INTO memory_usage (id, memory_id, task_id, agent_id, retrieval_rank, was_included, outcome, used_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(createUuidV7(), legacyMemoryId, createUuidV7(), createUuidV7(), 1, 1, 'success', now);
+    database.prepare(`
+      INSERT INTO memory_relations (source_id, target_id, relation_type, confidence, source_event_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(legacyMemoryId, authority.memoryId, 'supports', 1, null, now);
+    database.prepare(`
+      INSERT INTO memory_versions (id, memory_id, version, canonical_text, structured_data, changed_by, change_reason, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(createUuidV7(), legacyMemoryId, 1, 'legacy memory', JSON.stringify({}), 'test', 'baseline', now);
+    database.prepare(`
+      INSERT INTO outcomes (id, task_id, agent_id, result, correction_type, correction_data, used_memory_ids, used_tool_ids, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(createUuidV7(), createUuidV7(), createUuidV7(), 'success', null, null, JSON.stringify([legacyMemoryId]), JSON.stringify([]), now);
+
+    projector.rebuild([input]);
+
+    expect(database.prepare('SELECT status FROM memory_items WHERE id = ?').pluck().get(legacyMemoryId)).toBe('archived');
+    expect(database.prepare('SELECT COUNT(*) AS count FROM memory_search WHERE memory_id = ?').get(legacyMemoryId)).toEqual({ count: 0 });
+    expect(new MemoryStore(database).search('legacy', { brainIds: [brainId] })).toHaveLength(0);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM memory_usage WHERE memory_id = ?').get(legacyMemoryId)).toEqual({ count: 1 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM memory_relations WHERE source_id = ?').get(legacyMemoryId)).toEqual({ count: 1 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM memory_versions WHERE memory_id = ?').get(legacyMemoryId)).toEqual({ count: 1 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM outcomes WHERE used_memory_ids LIKE ?').get(`%${legacyMemoryId}%`)).toEqual({ count: 1 });
+  });
 });

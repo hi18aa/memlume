@@ -24,10 +24,12 @@ export function reindex(options: ReindexOptions): ReindexResult {
   const database = options.database ?? openDatabase(options.databasePath ?? join(options.dataRoot, 'memlume.sqlite'));
   const ownsDatabase = options.database === undefined;
   try {
-    ensureRecordBrains(database, state);
-    const projected = new RecordProjector(database).rebuild(
-      state.records.map(({ record, relativePath, checksum }) => ({ record, relativePath, checksum })),
-    );
+    const projected = database.transaction(() => {
+      ensureRecordBrains(database, state);
+      return new RecordProjector(database).rebuildInTransaction(
+        state.records.map(({ record, relativePath, checksum }) => ({ record, relativePath, checksum })),
+      );
+    })();
     return { ...state, projected };
   } finally {
     if (ownsDatabase) database.close();
@@ -38,18 +40,16 @@ function ensureRecordBrains(database: SqliteDatabase, state: ScannedMarkdownStat
   const brainIds = [...new Set(state.records.map(({ record }) => record.brainId))];
   if (brainIds.length === 0) return;
   const now = new Date().toISOString();
-  database.transaction(() => {
-    const insert = database.prepare(
-      'INSERT OR IGNORE INTO brains (id, kind, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+  const insert = database.prepare(
+    'INSERT OR IGNORE INTO brains (id, kind, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+  );
+  for (const brainId of brainIds) {
+    insert.run(
+      brainId,
+      brainId === DEFAULT_PERSONAL_BRAIN_ID ? 'personal' : 'project',
+      brainId === DEFAULT_PERSONAL_BRAIN_ID ? 'Personal Brain' : `Recovered Brain ${brainId}`,
+      now,
+      now,
     );
-    for (const brainId of brainIds) {
-      insert.run(
-        brainId,
-        brainId === DEFAULT_PERSONAL_BRAIN_ID ? 'personal' : 'project',
-        brainId === DEFAULT_PERSONAL_BRAIN_ID ? 'Personal Brain' : `Recovered Brain ${brainId}`,
-        now,
-        now,
-      );
-    }
-  })();
+  }
 }

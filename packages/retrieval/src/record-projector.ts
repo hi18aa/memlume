@@ -62,10 +62,16 @@ export class RecordProjector {
   }
 
   rebuild(inputs: readonly ProjectionInput[]): readonly ProjectionResult[] {
-    return this.database.transaction(() => {
-      this.clearProjectedRows();
-      return orderBySupersession(inputs).map((input) => this.projectOne(input));
-    })();
+    return this.database.transaction(() => this.rebuildInTransaction(inputs))();
+  }
+
+  /**
+   * Rebuild using the caller's transaction. Reindex uses this boundary so
+   * recovered Brain rows and the projection either commit or roll back as one.
+   */
+  rebuildInTransaction(inputs: readonly ProjectionInput[]): readonly ProjectionResult[] {
+    this.clearProjectedRows();
+    return orderBySupersession(inputs).map((input) => this.projectOne(input));
   }
 
   private projectOne(input: ProjectionInput): ProjectionResult {
@@ -342,6 +348,30 @@ export class RecordProjector {
   }
 
   private clearProjectedRows(): void {
+    const orphanedMemoryIds = this.database
+      .prepare(`
+        SELECT memory_items.id
+        FROM memory_items
+        LEFT JOIN record_projections ON record_projections.memory_id = memory_items.id
+        WHERE record_projections.memory_id IS NULL
+      `)
+      .pluck()
+      .all() as string[];
+    if (orphanedMemoryIds.length > 0) {
+      const placeholders = orphanedMemoryIds.map(() => '?').join(', ');
+      this.database
+        .prepare(`DELETE FROM memory_search WHERE memory_id IN (${placeholders})`)
+        .run(...orphanedMemoryIds);
+      this.database
+        .prepare(`
+          UPDATE memory_items
+          SET status = CASE WHEN status IN ('active', 'candidate') THEN 'archived' ELSE status END,
+              updated_at = CASE WHEN status IN ('active', 'candidate') THEN ? ELSE updated_at END
+          WHERE id IN (${placeholders})
+        `)
+        .run(new Date().toISOString(), ...orphanedMemoryIds);
+    }
+
     const memoryIds = this.database
       .prepare('SELECT memory_id FROM record_projections WHERE memory_id IS NOT NULL')
       .pluck()

@@ -93,4 +93,34 @@ describe('reindex service', () => {
     expect(() => reindex({ dataRoot, database })).toThrow(/checksum|integrity/i);
     expect(new MemoryStore(database).search('Vue', { brainIds: [brainId] })).toHaveLength(1);
   });
+
+  test('reindex creates one recovered Brain and one projection across retries', () => {
+    const { dataRoot, database, brainId } = fixture();
+    database.prepare('DELETE FROM brains WHERE id = ?').run(brainId);
+
+    reindex({ dataRoot, database });
+    reindex({ dataRoot, database });
+
+    expect(database.prepare('SELECT COUNT(*) AS count FROM brains WHERE id = ?').get(brainId)).toEqual({ count: 1 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM record_projections').get()).toEqual({ count: 1 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM memory_items').get()).toEqual({ count: 1 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM memory_brains WHERE brain_id = ?').get(brainId)).toEqual({ count: 1 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM events').get()).toEqual({ count: 1 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM event_brains WHERE brain_id = ?').get(brainId)).toEqual({ count: 1 });
+  });
+
+  test('rolls back recovered Brains and projections when rebuild fails', () => {
+    const { dataRoot, database, brainId, record } = fixture();
+    database.prepare('DELETE FROM brains WHERE id = ?').run(brainId);
+    const store = new MarkdownRecordStore({ rootDir: dataRoot });
+    const secondBrainId = createUuidV7();
+    store.append({ ...record, recordId: createUuidV7(), brainId: secondBrainId });
+
+    expect(() => reindex({ dataRoot, database })).toThrow(/cross.*brain|brain.*memory/i);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM brains WHERE id = ?').get(brainId)).toEqual({ count: 0 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM brains WHERE id = ?').get(secondBrainId)).toEqual({ count: 0 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM record_projections').get()).toEqual({ count: 0 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM memory_items').get()).toEqual({ count: 0 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM events').get()).toEqual({ count: 0 });
+  });
 });
