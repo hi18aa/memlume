@@ -342,3 +342,30 @@ export const ContextPackSchema = z.object({
   explanation: ContextPackExplanationSchema,
 });
 export type ContextPack = z.infer<typeof ContextPackSchema>;
+
+/**
+ * Server-planned read grants.  Hosts may provide task/entity evidence, but
+ * they never choose Brain UUIDs; the daemon returns this immutable decision
+ * together with an explanation for diagnostics and sub-agent intersection.
+ */
+export const ReadSetEntrySchema = z.object({
+  brainId: UuidV7Schema,
+  role: z.enum(['primary', 'linked', 'personal']),
+  access: z.enum(['read', 'read_write']),
+  reason: NonEmptyTextSchema,
+}).strict();
+export type ReadSetEntry = z.infer<typeof ReadSetEntrySchema>;
+
+export const ReadSetExclusionSchema = z.object({
+  brainId: UuidV7Schema,
+  reason: NonEmptyTextSchema,
+}).strict();
+export type ReadSetExclusion = z.infer<typeof ReadSetExclusionSchema>;
+
+export const ReadSetSchema = z.object({
+  workspaceKey: NonEmptyTextSchema.optional(),
+  entries: z.array(ReadSetEntrySchema),
+  exclusions: z.array(ReadSetExclusionSchema),
+  parentTraceId: UuidV7Schema.optional(),
+}).strict();
+export type ReadSet = z.infer<typeof ReadSetSchema>;

@@ -6,6 +6,7 @@ import {
   PolicyDataSchema,
   PreferenceDataSchema,
   ProcedureDataSchema,
+  ReadSetSchema,
   UuidV7Schema,
   createUuidV7,
   type ContextPack,
@@ -18,6 +19,7 @@ import {
   type MemoryScope,
   type PolicyData,
   type PolicyTrigger,
+  type ReadSet,
 } from '@memlume/contracts';
 import { compareMemorySpecificity, isScopeApplicable, MemoryStore, OutcomeStore } from '@memlume/retrieval';
 
@@ -34,6 +36,8 @@ export interface ResolveContextInput {
   readonly brainIds?: readonly string[];
   readonly entities?: readonly string[];
   readonly availableTools?: readonly string[];
+  /** Optional daemon-planned grant. When present, Host-supplied brainIds are ignored. */
+  readonly readSet?: ReadSet;
 }
 
 type Candidate = {
@@ -62,8 +66,11 @@ export class ContextResolver {
   resolve(input: ResolveContextInput): ContextPack {
     const intent = NonEmptyTextSchema.parse(input.intent);
     const scope = MemoryScopeSchema.parse(input.scope);
+    const plannedReadSet = input.readSet === undefined ? undefined : ReadSetSchema.parse(input.readSet);
     const brainIds = [...new Set(
-      (input.brainIds === undefined ? [DEFAULT_PERSONAL_BRAIN_ID] : input.brainIds)
+      (plannedReadSet === undefined
+        ? (input.brainIds === undefined ? [DEFAULT_PERSONAL_BRAIN_ID] : input.brainIds)
+        : plannedReadSet.entries.map(({ brainId }) => brainId))
         .map((brainId) => UuidV7Schema.parse(brainId)),
     )];
     if (!Number.isSafeInteger(input.contextBudget) || input.contextBudget < 0) {
@@ -78,10 +85,12 @@ export class ContextResolver {
     const today = new Date().toISOString().slice(0, 10);
 
     const compareContextMemory = compareByBrainThenSpecificity(brainIds);
-    const feedbackScores = this.outcomes?.feedbackScores(
-      this.store.list({ brainIds, status: 'active' }).map((memory) => memory.id),
-      brainIds,
-    ) ?? new Map<string, number>();
+    const feedbackScores = plannedReadSet === undefined
+      ? this.outcomes?.feedbackScores(
+          this.store.list({ brainIds, status: 'active' }).map((memory) => memory.id),
+          brainIds,
+        ) ?? new Map<string, number>()
+      : new Map<string, number>();
     const compareWithFeedback = (left: MemoryItem, right: MemoryItem): number =>
       (feedbackScores.get(right.id) ?? 0) - (feedbackScores.get(left.id) ?? 0) || compareContextMemory(left, right);
     const applicable = this.store
