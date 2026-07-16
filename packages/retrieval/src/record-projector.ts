@@ -341,12 +341,7 @@ export class RecordProjector {
       return;
     }
     const placeholders = memoryIds.map(() => '?').join(', ');
-    this.database.prepare(`DELETE FROM memory_usage WHERE memory_id IN (${placeholders})`).run(...memoryIds);
-    this.database.prepare(`DELETE FROM memory_relations WHERE source_id IN (${placeholders}) OR target_id IN (${placeholders})`).run(...memoryIds, ...memoryIds);
-    this.database.prepare(`DELETE FROM memory_versions WHERE memory_id IN (${placeholders})`).run(...memoryIds);
     this.database.prepare(`DELETE FROM memory_search WHERE memory_id IN (${placeholders})`).run(...memoryIds);
-    this.database.prepare(`DELETE FROM memory_brains WHERE memory_id IN (${placeholders})`).run(...memoryIds);
-    this.database.prepare(`DELETE FROM memory_items WHERE id IN (${placeholders})`).run(...memoryIds);
   }
 }
 

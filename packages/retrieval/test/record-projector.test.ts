@@ -130,4 +130,35 @@ describe('RecordProjector', () => {
     expect(store.search('Vue', { brainIds: [brainId] })).toHaveLength(0);
     expect(database.prepare('SELECT COUNT(*) AS count FROM record_projections').get()).toEqual({ count: 3 });
   });
+
+  test('rebuild preserves runtime usage, relation, and version rows', () => {
+    const { database, brainId } = createFixture();
+    const first = semanticRecord(brainId);
+    const second = semanticRecord(brainId, { canonicalText: '使用 TypeScript 開發前端。' });
+    const inputs = [
+      { record: first, relativePath: 'brains/first.md', checksum: '8'.repeat(64) },
+      { record: second, relativePath: 'brains/second.md', checksum: '9'.repeat(64) },
+    ];
+    const projector = new RecordProjector(database);
+    projector.projectRecords(inputs);
+
+    database.prepare(`
+      INSERT INTO memory_usage (id, memory_id, task_id, agent_id, retrieval_rank, was_included, outcome, used_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(createUuidV7(), first.memoryId, createUuidV7(), createUuidV7(), 1, 1, 'success', '2026-07-16T00:01:00.000Z');
+    database.prepare(`
+      INSERT INTO memory_relations (source_id, target_id, relation_type, confidence, source_event_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(first.memoryId, second.memoryId, 'supports', 1, first.recordId, '2026-07-16T00:01:00.000Z');
+    database.prepare(`
+      INSERT INTO memory_versions (id, memory_id, version, canonical_text, structured_data, changed_by, change_reason, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(createUuidV7(), first.memoryId, 1, first.canonicalText, JSON.stringify(first.structuredData), 'test', 'baseline', '2026-07-16T00:01:00.000Z');
+
+    projector.rebuild(inputs);
+
+    expect(database.prepare('SELECT COUNT(*) AS count FROM memory_usage').get()).toEqual({ count: 1 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM memory_relations').get()).toEqual({ count: 1 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM memory_versions').get()).toEqual({ count: 1 });
+  });
 });
