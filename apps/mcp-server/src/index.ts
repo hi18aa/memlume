@@ -237,14 +237,20 @@ export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL, token = proces
         capture_id: NonEmptyTextSchema.optional(),
         event_type: NonEmptyTextSchema.optional(),
         source: EventSourceSchema.optional(),
+        workspace_path: NonEmptyTextSchema.optional(),
+        session_id: NonEmptyTextSchema.optional(),
+        turn_id: NonEmptyTextSchema.optional(),
       }).strict(),
     },
-    async ({ text, capture_id, event_type, source }) => daemonTool(safeDaemonUrl, token, '/v1/capture', 'POST', {
+    async ({ text, capture_id, event_type, source, workspace_path, session_id, turn_id }) => daemonTool(safeDaemonUrl, token, '/v1/capture', 'POST', {
       captureId: capture_id ?? UuidV7Schema.parse(createUuidV7()),
       rawContent: text,
       eventType: event_type ?? 'user_message',
       source: source ?? { type: 'mcp', agent: 'mcp' },
       actor: 'tool',
+      ...(workspace_path === undefined ? {} : { workspacePath: workspace_path }),
+      ...(session_id === undefined ? {} : { sessionId: session_id }),
+      ...(turn_id === undefined ? {} : { turnId: turn_id }),
     }),
   );
   server.registerTool(

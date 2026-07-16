@@ -94,6 +94,19 @@ describe('Memlume MCP server', () => {
     await server.close();
   });
 
+  test('canonical remember exposes workspace and turn identity for automatic capture', async () => {
+    const { client, server } = await connect();
+    const { tools } = await client.listTools();
+    const remember = tools.find((tool) => tool.name === 'remember');
+    const properties = (remember?.inputSchema as { readonly properties?: Record<string, unknown> }).properties;
+    expect(properties).toEqual(expect.objectContaining({
+      workspace_path: expect.anything(),
+      session_id: expect.anything(),
+      turn_id: expect.anything(),
+    }));
+    await server.close();
+  });
+
   test('exposes the remember object schema to MCP clients', async () => {
     const { client, server } = await connect();
     const { tools } = await client.listTools();
