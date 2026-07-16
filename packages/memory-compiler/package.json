@@ -14,7 +14,8 @@
     "typecheck": "pnpm --filter @memlume/contracts build && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@memlume/contracts": "workspace:*"
+    "@memlume/contracts": "workspace:*",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^24.10.1"
