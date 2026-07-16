@@ -99,8 +99,8 @@ export function bootstrapLegacyMemories(options: LegacyBootstrapOptions): Legacy
       store.append(record);
       exported += 1;
     }
-    setDatabaseAuthority(options.database, 'markdown');
     options.onPhase?.('complete');
+    setDatabaseAuthority(options.database, 'markdown');
     return {
       status: exported === 0 && plan.records.length > 0 ? 'already_complete' : 'completed',
       exported,
@@ -248,11 +248,14 @@ function buildPlan(snapshot: LegacySnapshot, existing: readonly BrainRecord[], s
     const brainId = UuidV7Schema.parse(event.brain_id);
     if (event.brain_name !== null && event.brain_name.trim() !== '') brainNames.set(brainId, event.brain_name);
     const atomKey = `legacy-event:${event.id}`;
+    const previous = existingByAtom.get(`${brainId}\u0000${atomKey}`);
+    const eventMemoryId = validUuid(event.id)
+      ?? (previous !== undefined && 'memoryId' in previous ? previous.memoryId : createUuidV7());
     const eventRecord = SemanticRecordSchema.parse({
       schemaVersion: '0.3',
       recordType: 'semantic',
       recordId: recordIdFor(existingByAtom, brainId, atomKey, event.id),
-      memoryId: validUuid(event.id) ?? createUuidV7(),
+      memoryId: eventMemoryId,
       brainId,
       status: 'event_only',
       kind: 'event',
