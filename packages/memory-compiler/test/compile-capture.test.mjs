@@ -22,6 +22,15 @@ describe('compileCapture', () => {
     assert.equal(calls, 0);
   });
 
+  test('rejects provider output that attempts to select a Brain', async () => {
+    const result = await compileCapture({
+      rawContent: 'Please classify this assertion.',
+      provider: { extract: async () => ({ atoms: [{ text: 'Use Vue.', scope: 'project', brainId: '018f9d4e-7c2a-7b91-8dc0-61749dbcc01e' }] }) },
+    });
+    assert.equal(result.status, 'failed');
+    assert.equal(result.reason, 'provider_failed');
+  });
+
   test('greetings are ignored and assistant assertions stay low-confidence', async () => {
     assert.equal((await compileCapture({ rawContent: 'Hello!' })).status, 'ignored');
     assert.equal((await compileCapture({ rawContent: 'Thanks, that helps.' })).status, 'ignored');
