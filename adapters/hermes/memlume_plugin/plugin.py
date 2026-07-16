@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import threading
 from typing import Any, Callable, Mapping
-from uuid import uuid4
 
 
 BridgeRunner = Callable[[dict[str, Any], float | None], Any]
@@ -39,7 +39,7 @@ class MemlumePlugin:
         if is_child:
             return child_context
 
-        message_id = f"hermes-{uuid4()}"
+        message_id = f"hermes:{session_id}:{hashlib.sha256(user_message.encode('utf-8')).hexdigest()[:24]}"
         scope = {"level": "project", "projectId": envelope["projectId"]}
         self._background({
             "operation": "onUserMessage",
@@ -48,7 +48,7 @@ class MemlumePlugin:
         })
         context = self._bounded_invoke({
             "operation": "beforeTask",
-            "input": {"envelope": envelope, "intent": "shared_memory", "scope": scope, "task": None, "contextBudget": 600},
+            "input": {"envelope": envelope, "intent": "shared_memory", "scope": scope, "task": user_message, "contextBudget": 600},
         })
         return _ephemeral_context(context)
 

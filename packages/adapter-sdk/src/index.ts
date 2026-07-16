@@ -284,7 +284,6 @@ export class AdapterClient {
     }
     try {
       const response = await this.runtimeRequest('/v1/runtime/final', {
-        installationId: parsedEnvelope.data.installationId,
         sessionId: parsedEnvelope.data.sessionId,
         turnId: input.turnId,
         ...(input.traceId === undefined ? {} : { traceId: input.traceId }),

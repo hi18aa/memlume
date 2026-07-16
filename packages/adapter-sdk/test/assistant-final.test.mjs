@@ -27,7 +27,7 @@ test('assistant final uses an internal runtime transport and never the capture o
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url.endsWith('/v1/runtime/final'), true);
   const body = JSON.parse(calls[0].init.body);
-  assert.deepEqual(body, { installationId: 'desktop', sessionId: 'session-1', turnId: 'turn-1', finalAnswer: 'Use Vue.' });
+  assert.deepEqual(body, { sessionId: 'session-1', turnId: 'turn-1', finalAnswer: 'Use Vue.' });
   assert.equal(calls[0].init.headers['x-memlume-runtime'], 'assistant-final');
   assert.equal(calls[0].init.headers['x-memlume-callback'], undefined);
 });
