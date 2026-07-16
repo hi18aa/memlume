@@ -384,7 +384,6 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
       eventType: input.eventType,
       source: redactEventSource(input.source),
       actor: input.actor,
-      ...(input.workspacePath === undefined ? {} : { sourceReference: input.workspacePath }),
       catalog,
     });
     const semantic = services.semantic ?? new SemanticMemoryService({ journal: services.journal, store: services.store });
