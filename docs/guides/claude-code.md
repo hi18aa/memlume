@@ -2,6 +2,14 @@
 
 Claude Code 使用 `adapters/claude-code/.claude-plugin` 與 hooks/MCP 接入 Memlume。v0.3 由 daemon 依 workspace binding 產生 ReadSet；Adapter 不持有靜態 Project Brain，也不同步 Claude Code native memory。
 
+## 什麼時候值得使用
+
+如果你會在 Claude Code 與其他 Agent 之間切換，或希望多個專案共用個人偏好但不混用專案決策，這個 Plugin 會把 Memlume 接到每一回合。你只需設定一次 workspace；之後 Claude Code 會在工作前讀取相關 Context，使用者訊息則交給 Core 判斷是否保存，不需要每次說「記錄到 Memlume」。公司、團隊或產品請建立成 Project，不需要另一種 Brain。
+
+實際結果是：Personal Brain 保存個人長期偏好，當前 workspace 的 Primary／Linked Project 保存專案內容；Claude 原生記憶、`CLAUDE.md` 與 transcript 仍完全由 Claude Code 自己管理。
+
+最短流程：啟動 daemon → 執行 `setup adapter claude-code` → 審閱並信任 hooks → 正常工作 → 用 `memlume doctor` 檢查啟用狀態。
+
 ## 設定
 
 ```powershell

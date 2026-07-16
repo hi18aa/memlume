@@ -11,9 +11,7 @@
     "additionalProperties": false,
     "required": [
       "installationId",
-      "profileId",
-      "projectId",
-      "brainId"
+      "profileId"
     ],
     "properties": {
       "installationId": {

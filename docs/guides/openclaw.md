@@ -2,6 +2,14 @@
 
 OpenClaw Adapter 透過 `adapters/openclaw` 的 typed hooks 連到 loopback daemon。v0.3 的 workspace binding 與 Brain Router 由 daemon 管理，OpenClaw 不需要把 Project Brain UUID 寫入 prompt 或 adapter 程式。
 
+## 什麼時候值得使用
+
+如果 OpenClaw 需要與其他 Agent 共用專案決策、工具偏好或個人設定，這個 Plugin 會在 prompt 建立前讀取相關 Context，並把使用者訊息交給同一條 Core capture pipeline。你只要提供 installation、profile 與 workspace；公司、團隊或產品內容直接建立成 Project。OpenClaw 原生記憶與 transcript 不會被 Memlume 讀取或覆寫。
+
+v0.3 的重點不是讓 OpenClaw 看到更多內容，而是讓 daemon 選對 Personal／Primary Project／命中的 Linked Project，並且在不確定時進 Inbox，不污染其他 Brain。
+
+最短流程：啟動 daemon → 執行 `setup adapter openclaw` → link、enable 並重啟 Plugin → 開啟 `allowPromptInjection` → 正常工作 → 用 `memlume doctor` 檢查 hook heartbeat。
+
 ## 設定
 
 ```powershell

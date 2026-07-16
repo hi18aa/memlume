@@ -2,6 +2,14 @@
 
 Hermes Adapter 使用 `adapters/hermes/bridge.mjs` 與 Python plugin，把 Hermes 的生命週期事件轉成 Memlume Core 的三個共用 callback。它不維護第二份 Brain，也不需要在每次訊息中手動說「記錄到 Memlume」。
 
+## 什麼時候值得使用
+
+如果 Hermes 是你的主要 Agent，但你也會使用 Codex、Claude Code 或 OpenClaw，這個 Adapter 讓它們共用同一個 Personal Brain 與目前 workspace 的 Project Brain。設定一次後，`pre_llm_call` 會先讀取相關 Context，使用者訊息會自動送進 Core；Core 再決定保存、候選、等待路由或忽略。公司、團隊或產品直接視為一個 Project。
+
+你不需要手動同步 Hermes 的 `MemoryProvider`。Hermes 原生記憶仍由 Hermes 管理，Memlume 只保存應跨 Host 延續的內容，並提供可備份與可稽核的版本。
+
+最短流程：啟動 daemon → 執行 `setup adapter hermes` → 載入 General Plugin → 正常對話 → 用 `memlume status`／`doctor` 檢查 heartbeat 與讀寫。
+
 ## 設定
 
 先啟動 daemon，初始化 workspace binding，再建立不含靜態 Brain UUID 的 v0.3 profile：

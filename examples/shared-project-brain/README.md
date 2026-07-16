@@ -2,6 +2,8 @@
 
 此範例展示同一台電腦上的 Hermes 與 Codex 共用一個 project Brain，且不碰任何 Agent native memory。
 
+它適合用來驗證最常見的場景：個人偏好放在 Personal Brain，專案、產品、公司或團隊內容放在 Project Brain；切換 Agent 時仍讀到同一份已核准 Context。v0.3 新安裝應使用 workspace routing，不必把 Project Brain UUID 寫入 Host 設定；本範例保留明確 Project 綁定，方便測試隔離與權限。
+
 1. 建置並啟動 daemon，使用 setup token。
 2. 建立一個 project Brain，分別註冊 Hermes（`read_write`）與 Codex（`read`）installation。
 3. Hermes 收到「記住，這個專案使用 pnpm」後，Adapter 將 user event 捕捉到 project Brain；重送同一 `messageId` 不會產生第二份 memory。

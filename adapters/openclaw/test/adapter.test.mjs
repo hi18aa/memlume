@@ -173,7 +173,7 @@ test('ships a native OpenClaw package with a declared configuration contract', a
     configSchema: {
       type: 'object',
       additionalProperties: false,
-      required: ['installationId', 'profileId', 'projectId', 'brainId'],
+      required: ['installationId', 'profileId'],
       properties: {
         installationId: { type: 'string', minLength: 1 },
         profileId: { type: 'string', minLength: 1 },

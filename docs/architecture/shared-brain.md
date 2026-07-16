@@ -4,6 +4,17 @@ Memlume Core 是 MIT 授權的本機共享記憶控制平面。Hermes、Codex、
 
 v0.3 的 Brain 選擇由 daemon 依 workspace binding 決定。Host 不再傳入或信任靜態 Brain UUID；每個 workspace 可有一個 Primary Project、零個以上 Linked Project，以及一個 Personal Brain。Markdown records 是語意 authority，SQLite/FTS5 是可重建投影與查詢索引。
 
+## 先理解 Memlume 解決什麼
+
+Memlume 解決的是「同一個人切換不同 Agent 後，重要記憶仍分散在各 Host」的問題。它適合保存跨回合、跨工具仍有效的個人偏好、專案決策、技術事實與已審核規則；公司、團隊或產品不需要特殊 Brain，直接建立一個 Project 即可。
+
+- **讀取**：任務開始時，daemon 依 workspace、任務與實體規劃最小 ReadSet，只注入相關的 active Context。
+- **寫入**：使用者訊息進入同一條 capture pipeline，Core 過濾 Secret、拆分主題、決定 Personal／Project 路由，再判斷 `active`、`candidate`、`routing_required` 或 `ignored`。
+- **治理**：明確使用者內容優先；Agent 推論不能直接升格為 active。未知專案進 Routing Inbox，不會偷偷寫入 Personal。
+- **資料**：Markdown record 是可閱讀、可備份、可重建的權威；SQLite／FTS5 只負責投影、索引與快速搜尋。
+
+因此 Memlume 不是另一個 Host memory provider，也不是把所有歷史對話塞進 prompt；它是共用記憶的本機控制平面。
+
 ```mermaid
 flowchart LR
   H[Hermes Adapter] --> D[localhost daemon]

@@ -2,6 +2,14 @@
 
 Codex Adapter 由 `adapters/codex/hooks/memlume.mjs` 呼叫共用 Adapter SDK，並透過官方 Plugin manifest 安裝。v0.3 不把 Project Brain UUID 寫死在 hook；daemon 依目前 workspace binding 產生正確 ReadSet。
 
+## 什麼時候值得使用
+
+如果你在 Codex、Hermes、Claude Code 或 OpenClaw 之間切換，想讓「我偏好 Vue」這類個人資訊與「這個專案使用 pnpm」這類專案資訊被正確分開，Codex Plugin 就是自動入口。設定一次 workspace 後，Codex 在每個 prompt 前讀取相關 Context，使用者訊息由 Core 自動判斷是否保存；不需要手動指定 Brain，也不需要每次說「記錄到 Memlume」。公司、團隊或產品內容請當成 Project。
+
+Codex 原生記憶與設定仍保持不變。Memlume 只提供可追溯、可備份、可與其他 Host 共用的外部記憶層。
+
+最短流程：啟動 daemon → 執行 `setup adapter codex` → 安裝並信任 Plugin → 正常工作 → 用 `memlume status`／`doctor` 檢查讀寫。
+
 ## 設定
 
 ```powershell

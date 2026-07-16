@@ -2,6 +2,8 @@
 
 此 Plugin 讓 Claude Code 讀寫同一台電腦上的 Memlume Shared Brain。它不會讀取、修改或取代 Claude 的 `CLAUDE.md`、原生設定、session transcript 或其他原生記憶；Memlume 是獨立、可掛載、可備份、可由其他 Agent 共用的外部記憶層。
 
+適合在你需要跨 Claude Code、Codex、Hermes 或 OpenClaw 共用個人偏好與專案決策時使用。設定 workspace 後，Plugin 會自動在工作前讀取相關 Context，並把使用者訊息交給 Core 判斷；公司、團隊或產品直接建立成 Project，不需要另一種 Company Brain。
+
 ## 本機測試與安裝
 
 先建置 Memlume Core。開發時可用 Claude Code 的 `--plugin-dir` 載入本資料夾，而不需要先建立 Marketplace：
@@ -20,8 +22,8 @@ claude --plugin-dir ./adapters/claude-code
 
 | Claude Code hook | Memlume 行為 |
 | --- | --- |
-| `UserPromptSubmit` | 以 `beforeTask` 讀取已掛載的 **Project → Domain（Company）→ Personal** Shared Context，使用官方 `additionalContext` 暫時提供給主 Agent；同時在獨立本機工作中以 `onUserMessage` 送出使用者訊息。 |
-| `SubagentStart` | 直接呼叫只讀的 `onSubagentStart`，以官方 `additionalContext` 注入受限的 Project Brain Context；不寫入記憶，也不會讀取 Domain 或 Personal。 |
+| `UserPromptSubmit` | 以 `beforeTask` 讀取已掛載的 **Primary Project → 命中的 Linked Project → 相關 Personal** Shared Context，使用官方 `additionalContext` 暫時提供給主 Agent；同時在獨立本機工作中以 `onUserMessage` 送出使用者訊息。 |
+| `SubagentStart` | 直接呼叫只讀的 `onSubagentStart`，以官方 `additionalContext` 注入受限的 Project Brain Context；不寫入記憶，也不會讀取未匹配的 Project 或 Personal。 |
 
 非敏感使用者訊息會以設定的 Project scope 與 Brain 送到 Memlume Core，並追加 immutable event。依治理規則，非明確陳述可成為待審核 `candidate`；例如使用者說「`記住專案使用 pnpm`」時，明確要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。敏感資料過濾、衝突治理與 mount 權限都只能由 Core 決定。
 

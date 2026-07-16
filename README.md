@@ -10,9 +10,24 @@ Memlume is a local external Shared Brain for AI agents and developer tools. On o
 
 Public guides: [architecture](docs/architecture/shared-brain.md) · [Hermes](docs/guides/hermes.md) · [Codex](docs/guides/codex.md) · [OpenClaw](docs/guides/openclaw.md) · [Claude Code](docs/guides/claude-code.md) · [backup/restore](docs/guides/backup-restore.md) · [shared project example](examples/shared-project-brain/README.md).
 
+## Why use Memlume?
+
+AI tools usually keep separate memories. That works until you switch from Codex to Hermes, open a different project, or need to recover a decision months later. Memlume is the shared, local layer that keeps durable context in the right place and gives each Agent only what the current task needs.
+
+| Situation | What Memlume solves |
+| --- | --- |
+| You switch between Hermes, Codex, OpenClaw, Claude Code, and MCP | One Personal Brain and the relevant Project Brain are available to every mounted host on the same computer. |
+| You work on several projects | Each project has its own Project Brain; a company, team, or organization can simply be represented as a Project. |
+| You want memory without prompt clutter | `beforeTask` reads a bounded, task-relevant ReadSet instead of injecting the whole database. |
+| You do not want to say “save this to Memlume” every time | Host hooks send the lifecycle event; Core filters, classifies, routes, and decides whether it is worth storing. |
+| You need to trust or correct what was remembered | Explicit user statements can become `active`; inferences stay `candidate`; conflicts, approvals, and corrections remain auditable. |
+| You need local ownership and recovery | Markdown is human-readable authority, SQLite is rebuildable search projection, and backups stay on the local machine. |
+
+The user-facing model is intentionally small: **Personal Brain** for durable personal preferences and identity, plus one or more **Project Brains** for projects, products, companies, or teams. Hooks are timing adapters—not separate brains—and native Agent memory remains untouched.
+
 ## Shared Brain routing
 
-Use Memlume for durable context that should survive switching among Hermes, Codex, OpenClaw, Claude Code, and direct MCP clients: project decisions, company conventions, personal preferences, or reviewed facts. It keeps those memories mountable, backup-friendly, and maintainable in one local SQLite database; each host's native memory remains its own.
+Use Memlume for durable context that should survive switching among Hermes, Codex, OpenClaw, Claude Code, and direct MCP clients: project decisions, company conventions, personal preferences, or reviewed facts. It keeps those memories mountable, backup-friendly, and maintainable in one local data root: Markdown records are authoritative, while SQLite/FTS5 provides the rebuildable search projection. Each host's native memory remains its own.
 
 The Adapter SDK has three shared callbacks:
 
@@ -64,9 +79,9 @@ This means an agent should not automatically save whole transcripts, assistant o
 
 - **Relevant context, not more context:** retrieve only what applies to the current task instead of filling a prompt with every past conversation.
 - **Structured and durable:** keep policies, preferences, facts, decisions, and raw events distinct rather than mixing them in a chat log.
-- **Scope prevents contamination:** a task, project, workspace, agent, domain, or global memory can be selected independently.
+- **Scope prevents contamination:** Personal and Project memories remain separate; task and workspace constraints narrow what can be read for the current turn.
 - **Traceable decisions:** context packs include source memory IDs, exclusions, and budget information so an agent can explain what affected a result.
-- **Local and shared:** mounted clients use one localhost daemon and one SQLite store, which can be backed up and maintained without cloud sync.
+- **Local and shared:** mounted clients use one localhost daemon and one local data root; Markdown remains the authority and SQLite is a rebuildable search projection that can be backed up without cloud sync.
 - **Explainable feedback:** usage and task outcomes affect future ordering with fixed, inspectable score deltas; memory history stays immutable.
 
 ## Status and scope
@@ -79,7 +94,7 @@ Implemented:
 
 - An append-only event journal, Markdown authority records, durable routing Inbox, and a local SQLite projection.
 - Structured `policy`, `preference`, `fact`, and `decision` memories.
-- Global, domain, agent, workspace, project, and task scopes.
+- Personal and Project Brains with workspace bindings, plus task-level ReadSet constraints.
 - SQLite FTS5 search and a deterministic context resolver with source memory IDs and a context budget.
 - Workspace initialization and explicit Project bindings, server-planned ReadSets, per-installation mounts, a localhost-only daemon, a CLI, and an MCP stdio server.
 - Bearer-token authentication for adapter APIs; `/v1/health` remains a public local health check.

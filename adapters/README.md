@@ -2,6 +2,14 @@
 
 這個目錄提供 Hermes、Codex、OpenClaw、Claude Code 的最小 Host 整合。四個 Adapter 共用同一個 `@memlume/adapter-sdk` 與本機 daemon；差異只在各 Host 的 hook／plugin 事件，不在記憶資料或 Brain 路由。
 
+## 先理解使用方式
+
+Memlume 適合「同一台電腦使用多個 Agent，且重要內容要跨工具延續」的情境。Personal Brain 放個人偏好與身分；每個 Project Brain 放一個專案、產品、公司或團隊的內容。Adapter 讓 Host 在正確時機呼叫 Core，但不建立第二個大腦，也不讀取 Host 原生記憶。
+
+完成一次 `setup adapter` 後，主 Agent 的工作流程是：`beforeTask` 讀取相關 ReadSet → `onUserMessage` 自動送出使用者訊息 → Core 過濾、分類、路由與治理 → 下次任務再讀回已確認的 Context。使用者不需要每次說「記錄到 Memlume」。
+
+最短流程：啟動 daemon → 執行 `setup adapter <host>` → 審閱並信任 Host hook／Plugin → 正常工作 → 用 `memlume status` 與 `memlume doctor` 檢查實際啟用。
+
 ## v0.3 共用原則
 
 Adapter 不再把固定 Project Brain UUID 當成寫入目標。Host 只送出 callback、workspace、session、task 與證據；daemon 依 workspace binding 與 mount 權限產生 ReadSet 或選擇寫入 Brain。
