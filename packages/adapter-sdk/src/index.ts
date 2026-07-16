@@ -32,9 +32,9 @@ export const ADAPTER_VERSION = '0.3.0';
 const CONTEXT_REQUEST_TIMEOUT_MS = 250;
 // Give the local JSONL lock/write a short but deterministic window before the
 // context request.  This is still bounded (the read itself has a 250 ms
-// deadline), while avoiding a race where `beforeTask` returns before a
-// targetless legacy entry has been marked for retry.
-const OUTBOX_FLUSH_GRACE_MS = 100;
+// deadline), while avoiding a race where a busy filesystem makes `beforeTask`
+// return before a targetless legacy entry has been marked for retry.
+const OUTBOX_FLUSH_GRACE_MS = 500;
 const OUTBOX_FLUSH_LOCK_TIMEOUT_MS = 50;
 const OUTBOX_LOCK_RETRY_MS = 10;
 const OUTBOX_LOCK_TIMEOUT_MS = 15_000;
