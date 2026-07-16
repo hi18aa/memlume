@@ -54,7 +54,7 @@ export async function compileCapture(input: CompileCaptureInput): Promise<Compil
   if (greetingPattern.test(normalized)) return { status: 'ignored', sourceReference, atoms: [], reason: 'greeting' };
   const actor = input.actor ?? (input.eventType === 'agent_inference' ? 'assistant' : 'user');
   const explicit = actor === 'user' && explicitPattern.test(rawContent);
-  const chunks = normalized.split(splitPattern).map(normalizeText).filter(Boolean);
+  const chunks = normalized.split(splitPattern).map(normalizeText).filter((text) => text !== '' && (explicit || hasMemorySignal(text)));
   const atoms = chunks.map((text, occurrence) => deterministicAtom(text, {
     sourceReference,
     occurrence,
@@ -64,7 +64,7 @@ export async function compileCapture(input: CompileCaptureInput): Promise<Compil
   if (atoms.length > 0) {
     return { status: 'accepted', sourceReference, atoms: dedupeAtoms(atoms) };
   }
-  if (input.provider === undefined) return { status: 'routing_required', sourceReference, atoms: [], reason: 'ambiguous' };
+  if (input.provider === undefined) return { status: 'ignored', sourceReference, atoms: [], reason: 'ambiguous' };
   try {
     const output = StructuredProviderResponseSchema.parse(await input.provider.extract({ sourceReference, content: redacted.redacted, actor }));
     const providerAtoms = output.atoms.map((atom: (typeof output.atoms)[number], occurrence: number) => providerAtom(atom, { sourceReference, occurrence, actor, explicit }));
@@ -129,6 +129,11 @@ function projectReference(value: string): string | undefined {
   const match = /(?:專案|project|repo(?:sitory)?|公司|company)\s*(?:是|為|叫做|名為|:)?\s*([\p{L}\p{N}][\p{L}\p{N}_.-]*)/iu.exec(value);
   const candidate = match?.[1];
   return candidate !== undefined && !/^(?:使用|採用|選擇|是|為|叫做|名為)$/u.test(candidate) ? candidate : undefined;
+}
+
+function hasMemorySignal(value: string): boolean {
+  if (/^(?:thanks?|thank you|ok(?:ay)?|sure|好的?|好啊|謝謝|感謝|了解|收到|嗯|沒問題|no problem)[!！。、,.\s]*$/iu.test(value)) return false;
+  return /(?:\b(?:i|my|we|our|this|that)\b|\b(?:project|repo(?:sitory)?|company|prefer|preference|remember|use|uses|adopt|decide|decision|choose|born|joined|founded|work)\b|我|我的|我們|這個|該|專案|公司|偏好|喜歡|使用|採用|決定|選擇|出生|加入|成立|任職|時間軸)/iu.test(value);
 }
 
 function stableSourceReference(input: CompileCaptureInput): string {

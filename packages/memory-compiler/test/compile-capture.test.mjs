@@ -24,6 +24,7 @@ describe('compileCapture', () => {
 
   test('greetings are ignored and assistant assertions stay low-confidence', async () => {
     assert.equal((await compileCapture({ rawContent: 'Hello!' })).status, 'ignored');
+    assert.equal((await compileCapture({ rawContent: 'Thanks, that helps.' })).status, 'ignored');
     const result = await compileCapture({ rawContent: 'The project uses pnpm.', actor: 'assistant' });
     assert.equal(result.atoms[0].confidence, 0.25);
   });
