@@ -132,8 +132,8 @@ function projectReference(value: string): string | undefined {
 }
 
 function hasMemorySignal(value: string): boolean {
-  if (/^(?:thanks?|thank you|ok(?:ay)?|sure|好的?|好啊|謝謝|感謝|了解|收到|嗯|沒問題|no problem)[!！。、,.\s]*$/iu.test(value)) return false;
-  return /(?:\b(?:i|my|we|our|this|that)\b|\b(?:project|repo(?:sitory)?|company|prefer|preference|remember|use|uses|adopt|decide|decision|choose|born|joined|founded|work)\b|我|我的|我們|這個|該|專案|公司|偏好|喜歡|使用|採用|決定|選擇|出生|加入|成立|任職|時間軸)/iu.test(value);
+  if (/^(?:thanks?|thank you|ok(?:ay)?|sure|好的?|好啊|謝謝|感謝|了解|收到|嗯|沒問題|no problem)(?:[!！。、,.\s]|$)/iu.test(value)) return false;
+  return /(?:\b(?:i|my|we|our|this)\b|\b(?:project|repo(?:sitory)?|company|prefer|preference|remember|use|uses|adopt|decide|decision|choose|born|joined|founded|work)\b|我|我的|我們|這個|該|專案|公司|偏好|喜歡|使用|採用|決定|選擇|出生|加入|成立|任職|時間軸)/iu.test(value);
 }
 
 function stableSourceReference(input: CompileCaptureInput): string {
