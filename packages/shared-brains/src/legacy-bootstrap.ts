@@ -11,6 +11,8 @@ export type LegacyBootstrapOptions = {
   readonly database: SqliteDatabase;
   readonly dataRoot: string;
   readonly lockPath?: string;
+  /** Set only when the caller has already completed reindex/verification. */
+  readonly markAuthority?: boolean;
   readonly onPhase?: (phase: LegacyBootstrapPhase) => void;
 };
 
@@ -100,7 +102,9 @@ export function bootstrapLegacyMemories(options: LegacyBootstrapOptions): Legacy
       exported += 1;
     }
     options.onPhase?.('complete');
-    setDatabaseAuthority(options.database, 'markdown');
+    if (options.markAuthority === true) {
+      setDatabaseAuthority(options.database, 'markdown');
+    }
     return {
       status: exported === 0 && plan.records.length > 0 ? 'already_complete' : 'completed',
       exported,
