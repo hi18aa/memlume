@@ -715,4 +715,43 @@ describe('memlume CLI', () => {
     expect(commands).toEqual([]);
     expect(`${result.stdout}${result.stderr}`).not.toContain('codex-token-not-for-confirmation');
   });
+
+  test('init and project commands use protected daemon workflows', async () => {
+    responseForRequest = (request) => {
+      if (request.url === '/v1/setup/init') return { status: 200, body: { personal: { id: 'personal-1' } } };
+      if (request.url === '/v1/setup/projects') return { status: 201, body: { project: { id: 'project-1', name: 'Memlume' } } };
+      if (request.url === '/v1/setup/projects/project-1/bindings') return { status: 201, body: { binding: { brainId: 'project-1', role: 'primary', access: 'read_write' } } };
+      if (request.url === '/v1/setup/projects/project-1/aliases') return { status: 201, body: { alias: 'frontend' } };
+      if (request.url?.startsWith('/v1/setup/projects/inspect?')) return { status: 200, body: { bindings: [{ brainId: 'project-1', role: 'primary', access: 'read_write' }] } };
+      throw new Error(`unexpected request ${request.method} ${request.url}`);
+    };
+    const args = ['--url', url, '--setup-token', 'setup-token'];
+    expect((await run([...args, 'init', '--path', 'C:/work'])).code).toBe(0);
+    expect((await run([...args, 'project', 'create', 'Memlume'])).code).toBe(0);
+    expect((await run([...args, 'project', 'bind', 'project-1', '--path', 'C:/work', '--role', 'primary'])).code).toBe(0);
+    expect((await run([...args, 'project', 'alias', 'project-1', 'frontend'])).code).toBe(0);
+    expect((await run([...args, 'project', 'inspect', '--path', 'C:/work'])).code).toBe(0);
+    expect(requests.map((request) => request.url)).toEqual([
+      '/v1/setup/init',
+      '/v1/setup/projects',
+      '/v1/setup/projects/project-1/bindings',
+      '/v1/setup/projects/project-1/aliases',
+      '/v1/setup/projects/inspect?workspacePath=C%3A%2Fwork',
+    ]);
+    expect(requests[0]?.body).toEqual({ workspacePath: 'C:/work', name: 'Personal' });
+    expect(requests[2]?.body).toEqual({ workspacePath: 'C:/work', role: 'primary' });
+  });
+
+  test('edit and reindex are daemon maintenance requests with explicit repair mode', async () => {
+    responseForRequest = (request) => {
+      if (request.url === '/v1/setup/records/record-1/edit') return { status: 200, body: { recordId: 'record-2' } };
+      if (request.url === '/v1/setup/reindex') return { status: 200, body: { projected: [{ recordId: 'record-2' }] } };
+      throw new Error(`unexpected request ${request.method} ${request.url}`);
+    };
+    const args = ['--url', url, '--setup-token', 'setup-token'];
+    expect((await run([...args, 'edit', 'record-1', '--text', 'Updated.', '--repair'])).code).toBe(0);
+    expect((await run([...args, 'reindex', '--repair'])).code).toBe(0);
+    expect(requests[0]?.body).toEqual({ text: 'Updated.', repair: true });
+    expect(requests[1]?.body).toEqual({ repair: true });
+  });
 });

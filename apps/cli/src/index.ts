@@ -430,6 +430,133 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
       io.stdout(`已匯入 Brain ${brainId ?? 'brain'}。\n`);
     });
 
+  program
+    .command('init')
+    .description('初始化本機 Memlume workspace。')
+    .option('--path <path>', 'workspace 路徑，預設為目前目錄')
+    .option('--name <name>', 'Personal Brain 名稱', 'Personal')
+    .action(async (options: InitOptions, command: Command) => {
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const result = await requestSetupJson(
+        global.url,
+        setupToken(global.setupToken, environment),
+        '/v1/setup/init',
+        'POST',
+        compact({ workspacePath: options.path ?? runtime.cwd(), name: options.name }),
+        runtime,
+      );
+      printResult(result, global.json, io.stdout, initSummary);
+    });
+
+  const project = program.command('project').description('建立與綁定 Project Brain。');
+  project
+    .command('create <name>')
+    .description('建立 Project Brain。')
+    .action(async (name: string, _options: unknown, command: Command) => {
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const result = await requestSetupJson(
+        global.url,
+        setupToken(global.setupToken, environment),
+        '/v1/setup/projects',
+        'POST',
+        { name },
+        runtime,
+      );
+      printResult(result, global.json, io.stdout, projectCreateSummary);
+    });
+  project
+    .command('bind <brainId>')
+    .description('將 Project Brain 綁定到 workspace。')
+    .requiredOption('--path <path>', 'workspace 路徑')
+    .option('--role <role>', 'primary 或 linked', 'linked')
+    .option('--access <access>', 'read 或 read_write')
+    .action(async (brainId: string, options: ProjectBindOptions, command: Command) => {
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const role = options.role === 'primary' || options.role === 'linked' ? options.role : (() => { throw new Error('--role must be primary or linked.'); })();
+      const access = options.access === undefined || options.access === 'read' || options.access === 'read_write'
+        ? options.access
+        : (() => { throw new Error('--access must be read or read_write.'); })();
+      const result = await requestSetupJson(
+        global.url,
+        setupToken(global.setupToken, environment),
+        `/v1/setup/projects/${encodeURIComponent(required(brainId, '<brainId>'))}/bindings`,
+        'POST',
+        compact({ workspacePath: required(options.path, '--path'), role, access }),
+        runtime,
+      );
+      printResult(result, global.json, io.stdout, bindingSummary);
+    });
+  project
+    .command('alias <brainId> <alias>')
+    .description('為 Project Brain 新增 alias。')
+    .action(async (brainId: string, alias: string, _options: unknown, command: Command) => {
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const result = await requestSetupJson(
+        global.url,
+        setupToken(global.setupToken, environment),
+        `/v1/setup/projects/${encodeURIComponent(required(brainId, '<brainId>'))}/aliases`,
+        'POST',
+        { alias: required(alias, '<alias>') },
+        runtime,
+      );
+      printResult(result, global.json, io.stdout, aliasSummary);
+    });
+  project
+    .command('inspect')
+    .description('檢視 Project Brain 與目前 workspace 綁定。')
+    .option('--path <path>', 'workspace 路徑，預設為目前目錄')
+    .action(async (options: ProjectInspectOptions, command: Command) => {
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const query = new URLSearchParams({ workspacePath: options.path ?? runtime.cwd() });
+      const result = await requestSetupJson(
+        global.url,
+        setupToken(global.setupToken, environment),
+        `/v1/setup/projects/inspect?${query}`,
+        'GET',
+        undefined,
+        runtime,
+      );
+      printResult(result, global.json, io.stdout, projectInspectSummary);
+    });
+
+  program
+    .command('edit <recordId>')
+    .description('透過 daemon 安全修正 Markdown record；不直接開啟 SQLite。')
+    .option('--text <text>', '新的 canonical text')
+    .option('--file <path>', '讀取新的 canonical text 檔案')
+    .option('--repair', '建立 superseding record')
+    .action(async (recordId: string, options: EditRecordOptions, command: Command) => {
+      if (options.text !== undefined && options.file !== undefined) throw new Error('--text 與 --file 只能擇一。');
+      const text = options.text ?? (options.file === undefined ? undefined : new TextDecoder().decode(await requiredFile(options.file, runtime)));
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const result = await requestSetupJson(
+        global.url,
+        setupToken(global.setupToken, environment),
+        `/v1/setup/records/${encodeURIComponent(required(recordId, '<recordId>'))}/edit`,
+        'POST',
+        compact({ text, repair: options.repair ?? false }),
+        runtime,
+      );
+      printResult(result, global.json, io.stdout, editSummary);
+    });
+
+  program
+    .command('reindex')
+    .description('透過 daemon maintenance gate 重新建立 SQLite projection。')
+    .option('--repair', '將檢測到的原地修改轉為 superseding records')
+    .action(async (options: ReindexOptions, command: Command) => {
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const result = await requestSetupJson(
+        global.url,
+        setupToken(global.setupToken, environment),
+        '/v1/setup/reindex',
+        'POST',
+        { repair: options.repair ?? false },
+        runtime,
+      );
+      printResult(result, global.json, io.stdout, reindexSummary);
+    });
+
   const backup = program.command('backup').description('管理本機 .memlume 備份。');
   backup
     .command('create')
@@ -588,6 +715,31 @@ interface AdapterSetupOptions {
   readonly installHost?: boolean;
   readonly dryRun?: boolean;
   readonly yes?: boolean;
+}
+
+interface InitOptions {
+  readonly path?: string;
+  readonly name?: string;
+}
+
+interface ProjectBindOptions {
+  readonly path: string;
+  readonly role?: string;
+  readonly access?: string;
+}
+
+interface ProjectInspectOptions {
+  readonly path?: string;
+}
+
+interface EditRecordOptions {
+  readonly text?: string;
+  readonly file?: string;
+  readonly repair?: boolean;
+}
+
+interface ReindexOptions {
+  readonly repair?: boolean;
 }
 
 const supportedAdapters = ['hermes', 'codex', 'openclaw', 'claude-code'] as const;
@@ -1251,6 +1403,47 @@ function brainsSummary(result: unknown): string {
     const name = objectString(brain, 'name');
     return name === undefined ? id : `${id}: ${name}`;
   }).join('\n');
+}
+
+function initSummary(result: unknown): string {
+  const personal = objectValue(result, 'personal') ?? objectValue(result, 'brain');
+  const id = objectString(personal, 'id');
+  return id === undefined ? 'Memlume workspace initialized.' : `Memlume workspace initialized with Personal Brain ${id}.`;
+}
+
+function projectCreateSummary(result: unknown): string {
+  const project = objectValue(result, 'project') ?? objectValue(result, 'brain');
+  const id = objectString(project, 'id') ?? 'project';
+  const name = objectString(project, 'name');
+  return name === undefined ? `Created Project Brain ${id}.` : `Created Project Brain ${id}: ${name}.`;
+}
+
+function bindingSummary(result: unknown): string {
+  const binding = objectValue(result, 'binding');
+  return binding === undefined ? 'Project workspace binding updated.' : `Project ${objectString(binding, 'brainId') ?? 'brain'} bound as ${objectString(binding, 'role') ?? 'linked'}.`;
+}
+
+function aliasSummary(result: unknown): string {
+  const alias = objectString(result, 'alias') ?? objectString(objectValue(result, 'alias'), 'alias');
+  return alias === undefined ? 'Project alias updated.' : `Project alias ${alias} added.`;
+}
+
+function projectInspectSummary(result: unknown): string {
+  const bindings = arrayValue(result, 'bindings');
+  const projects = arrayValue(result, 'projects');
+  if (bindings.length === 0 && projects.length === 0) return 'No project binding found.';
+  const lines = bindings.map((binding) => `${objectString(binding, 'brainId') ?? 'brain'}: ${objectString(binding, 'role') ?? 'linked'} (${objectString(binding, 'access') ?? 'read'})`);
+  return lines.length > 0 ? lines.join('\n') : `${projects.length} project(s).`;
+}
+
+function editSummary(result: unknown): string {
+  const recordId = objectString(result, 'recordId') ?? objectString(objectValue(result, 'record'), 'recordId');
+  return recordId === undefined ? 'Record edit accepted.' : `Record ${recordId} edit accepted.`;
+}
+
+function reindexSummary(result: unknown): string {
+  const projected = arrayValue(result, 'projected');
+  return `Reindex completed${projected.length === 0 ? '.' : `: ${projected.length} record(s) projected.`}`;
 }
 
 function objectValue(value: unknown, key: string): unknown {
