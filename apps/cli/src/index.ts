@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { verifyBackup, type BackupManifest } from '@memlume/backup';
+import { ensureDaemon } from './daemon-process.js';
 
 type Writer = (text: string) => void;
 
@@ -242,6 +243,25 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
         throw new Error('設定已還原，診斷檢查失敗。');
       }
       io.stdout('設定已套用並通過診斷檢查。\n');
+    });
+
+  const daemon = program.command('daemon').description('管理本機 Memlume daemon。');
+  daemon
+    .command('ensure')
+    .description('確保本機 daemon 正在執行；健康時不重複啟動。')
+    .option('--data-root <path>', 'Memlume data root')
+    .option('--database <path>', 'SQLite database path')
+    .option('--port <port>', 'daemon port', '3849')
+    .action(async (options: { readonly dataRoot?: string; readonly database?: string; readonly port: string }, command: Command) => {
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const result = await ensureDaemon({
+        dataRoot: options.dataRoot,
+        databasePath: options.database,
+        daemonUrl: global.url,
+        port: nonNegativeInteger(options.port, '--port'),
+        ...(global.setupToken === undefined && environment.MEMLUME_SETUP_TOKEN === undefined ? {} : { setupToken: global.setupToken ?? environment.MEMLUME_SETUP_TOKEN }),
+      });
+      io.stdout(`${result.started ? 'Memlume daemon started' : 'Memlume daemon already healthy'} at ${result.paths.url}.\n`);
     });
 
   setup

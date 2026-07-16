@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, test } from 'vitest';
 
-import { main, parseStartOptions, startFromArgs, type RunningDaemon } from '../src/start.js';
+import { DEFAULT_DATABASE_PATH, main, parseStartOptions, startFromArgs, type RunningDaemon } from '../src/start.js';
 
 const directories: string[] = [];
 const daemons: RunningDaemon[] = [];
@@ -36,7 +36,7 @@ afterEach(async () => {
 
 describe('memlume daemon start entrypoint', () => {
   test('uses the documented database path and port defaults', () => {
-    expect(parseStartOptions([])).toEqual({ databasePath: 'data/memlume.sqlite', port: 3849 });
+    expect(parseStartOptions([])).toEqual({ databasePath: DEFAULT_DATABASE_PATH, port: 3849 });
   });
 
   test('parses documented database and port options', () => {

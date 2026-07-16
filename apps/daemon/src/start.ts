@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 
 import { startDaemon, type RunningDaemon } from './server.js';
 
 export type { RunningDaemon } from './server.js';
 
-const DEFAULT_DATABASE_PATH = 'data/memlume.sqlite';
+export const DEFAULT_DATABASE_PATH = join(homedir(), '.memlume', 'memlume.sqlite');
 const DEFAULT_PORT = 3849;
 const usage = `Usage: memlume-daemon [--database <path>] [--port <port>]
 
