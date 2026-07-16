@@ -35,11 +35,12 @@ async function handle(input) {
   if (configuration === undefined) return {};
 
   if (input.hook_event_name === 'SessionStart') {
-    await createClient(configuration.brainId);
+    await createClient(configuration);
     return {};
   }
   if (input.hook_event_name === 'UserPromptSubmit') return beforePrompt(input, configuration);
   if (input.hook_event_name === 'SubagentStart') return beforeSubagent(input, configuration);
+  if (input.hook_event_name === 'Stop') return assistantFinal(input, configuration);
   return {};
 }
 
@@ -47,18 +48,24 @@ async function beforePrompt(input, configuration) {
   const prompt = text(input.prompt);
   const turnId = text(input.turn_id);
   if (prompt === undefined || turnId === undefined) return {};
-  const client = await createClient(configuration.brainId);
+  const client = await createClient(configuration);
   const capture = {
     messageId: `codex:${configuration.envelope.sessionId}:${turnId}`,
+    turnId,
     content: prompt,
-    brainId: configuration.brainId,
-    scope: configuration.scope,
+    ...(configuration.brainId === undefined ? {} : { brainId: configuration.brainId }),
+    ...(configuration.scope === undefined ? {} : { scope: configuration.scope }),
   };
   const context = await client.beforeTask({
+    envelope: configuration.envelope,
     intent: 'shared_memory',
     scope: configuration.scope,
     task: prompt,
     contextBudget: CONTEXT_BUDGET,
+    ...(automaticConfiguration(configuration) ? {
+      workspacePath: configuration.envelope.workspacePath,
+      agentType: 'codex',
+    } : {}),
   });
   // Read the previous Brain state before enqueueing this turn, so it cannot self-inject.
   backgroundWrite('capture', configuration.envelope, capture);
@@ -69,8 +76,9 @@ async function beforePrompt(input, configuration) {
 }
 
 async function beforeSubagent(input, configuration) {
-  const client = await createClient(configuration.brainId);
+  const client = await createClient(configuration);
   const subagentId = text(input.agent_id);
+  const childGoal = text(input.child_goal) ?? text(input.goal);
   const context = await client.onSubagentStart({
     envelope: configuration.envelope,
     parentTaskId: configuration.envelope.sessionId,
@@ -79,7 +87,12 @@ async function beforeSubagent(input, configuration) {
     scope: configuration.scope,
     task: null,
     contextBudget: CONTEXT_BUDGET,
-    requestedBrainIds: [configuration.brainId],
+    ...(automaticConfiguration(configuration) ? {
+      workspacePath: configuration.envelope.workspacePath,
+      agentType: 'codex',
+    } : {}),
+    ...(childGoal === undefined ? {} : { childGoal }),
+    ...(configuration.brainId === undefined ? {} : { requestedBrainIds: [configuration.brainId] }),
   });
   const additionalContext = compactContext(context);
   return additionalContext === undefined
@@ -87,9 +100,23 @@ async function beforeSubagent(input, configuration) {
     : { hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext } };
 }
 
+async function assistantFinal(input, configuration) {
+  // v0.3 profiles have no static Brain target.  A Stop event only retains a
+  // bounded final turn in the daemon runtime buffer; it is never captured as
+  // an active memory by itself.  Keep the legacy static profile behaviour
+  // unchanged while hosts migrate their configuration.
+  if (configuration.brainId !== undefined || configuration.envelope.projectId !== undefined) return {};
+  const turnId = text(input.turn_id);
+  const finalAnswer = text(input.last_assistant_message);
+  if (turnId === undefined || finalAnswer === undefined) return {};
+  const client = await createClient(configuration);
+  await client.recordAssistantFinal(configuration.envelope, { turnId, finalAnswer });
+  return {};
+}
+
 async function handleBackgroundWrite(input) {
   if (!isRecord(input) || !isRecord(input.envelope) || !isRecord(input.message)) return;
-  const client = await createClient(validBrainId(input.message.brainId));
+  const client = await createClient({ envelope: input.envelope, brainId: validBrainId(input.message.brainId) });
   if (input.operation === 'capture') {
     await client.onUserMessage(input.envelope, input.message);
   }
@@ -104,6 +131,10 @@ function backgroundWrite(operation, envelope, message) {
   });
   child.stdin.on('error', () => undefined);
   child.stdin.end(JSON.stringify({ operation, envelope, message }));
+  // On Windows an inherited pipe can keep the hook process alive even after
+  // the detached child has been unref'ed.  The child has its own stdin data
+  // already queued, so the stream itself need not keep the parent referenced.
+  child.stdin.unref?.();
   child.unref();
 }
 
@@ -113,23 +144,27 @@ function envelopeFor(input) {
   const profileId = environmentText('MEMLUME_PROFILE_ID');
   const projectId = environmentText('MEMLUME_PROJECT_ID');
   const brainId = environmentText('MEMLUME_BRAIN_ID');
-  if (sessionId === undefined || installationId === undefined || profileId === undefined || projectId === undefined || brainId === undefined || !uuidV7.test(brainId)) return undefined;
+  if (sessionId === undefined || installationId === undefined || profileId === undefined) return undefined;
   const workspacePath = text(input.cwd) ?? environmentText('MEMLUME_WORKSPACE_PATH');
   const envelope = {
     clientType: 'codex',
     installationId,
     profileId,
     sessionId,
-    projectId,
+    ...(projectId === undefined ? {} : { projectId }),
     ...(workspacePath === undefined ? {} : { workspacePath }),
   };
-  return { envelope, brainId, scope: { level: 'project', projectId } };
+  return {
+    envelope,
+    ...(brainId !== undefined && uuidV7.test(brainId) ? { brainId } : {}),
+    ...(projectId === undefined ? { scope: { level: 'global' } } : { scope: { level: 'project', projectId } }),
+  };
 }
 
-async function createClient(brainId) {
+async function createClient(configuration) {
   const { AdapterClient } = await loadAdapterSdk();
   const directory = outboxDirectory();
-  const defaultWriteBrainId = validBrainId(brainId);
+  const defaultWriteBrainId = validBrainId(configuration?.brainId);
   return new AdapterClient({
     daemonUrl: process.env.MEMLUME_DAEMON_URL ?? 'http://127.0.0.1:3849',
     token: process.env.MEMLUME_TOKEN,
@@ -188,6 +223,10 @@ function environmentText(name) {
 function validBrainId(value) {
   const candidate = text(value);
   return candidate !== undefined && uuidV7.test(candidate) ? candidate : undefined;
+}
+
+function automaticConfiguration(configuration) {
+  return configuration.brainId === undefined && configuration.envelope.projectId === undefined;
 }
 
 function text(value) {

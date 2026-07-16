@@ -6,7 +6,7 @@
 
 [English](README.md) | [繁體中文](docs/README.zh-TW.md) | [简体中文](docs/README.zh-CN.md)
 
-Memlume is a local external Shared Brain for AI agents and developer tools. On one computer, mounted clients use the same existing SQLite-backed store: it records immutable events, stores structured memories, searches them with FTS5, and resolves a traceable context pack for a task. It complements—never replaces, overwrites, or synchronizes into—an agent's native memory.
+Memlume is a local external Shared Brain for AI agents and developer tools. On one computer, Hermes, Codex, OpenClaw, Claude Code, MCP clients, and future adapters can use the same Brain. Markdown records are the human-readable authority; SQLite is the searchable projection. Memlume records immutable events, stores structured memories, searches them with FTS5, and resolves a traceable context pack for a task. It complements—never replaces, overwrites, or synchronizes into—an agent's native memory.
 
 Public guides: [architecture](docs/architecture/shared-brain.md) · [Hermes](docs/guides/hermes.md) · [Codex](docs/guides/codex.md) · [OpenClaw](docs/guides/openclaw.md) · [Claude Code](docs/guides/claude-code.md) · [backup/restore](docs/guides/backup-restore.md) · [shared project example](examples/shared-project-brain/README.md).
 
@@ -18,15 +18,26 @@ The Adapter SDK has three shared callbacks:
 
 | Callback | What it does |
 | --- | --- |
-| `beforeTask` | A main Agent reads mounted Context before work. Its default priority is **Project → Domain (Company) → Personal**; a caller may request only a smaller authorized subset. |
-| `onUserMessage` | Memlume's single automatic capture entry point. It sends eligible user messages to Core for governed capture. |
-| `onSubagentStart` | A child Agent receives read-only Context from its configured Project Brain only. It never falls back to Domain or Personal, writes no memory, and does not flush the outbox. |
+| `beforeTask` | The daemon plans a workspace ReadSet and injects only relevant active Context before work. A host does not choose Brain UUIDs. |
+| `onUserMessage` | Memlume's single automatic capture entry point. It filters secrets, splits mixed statements, routes each atom to Personal or the workspace Project Brain, and puts unknown projects in the durable Inbox. |
+| `onSubagentStart` | A child Agent receives a restricted read-only ReadSet. It cannot widen the parent grant, write memory, or flush the outbox. |
 
 Capture governance: eligible, non-sensitive user messages are appended as immutable events. Normal statements can become reviewable `candidate` memories; an explicit request such as “remember” can take the `active` path, still subject to conflict review. Blank or unsupported events are ignored, and sensitive content is redacted or rejected.
 
-For a main Agent, a write target is selected in this order: an explicit Brain, then the profile's Project Brain, otherwise the write is rejected. Memlume never guesses a target or falls back to Personal. Brains—not hooks—are the data-ownership and permission boundary.
+For v0.3 automatic capture, the host sends workspace and session identity, not a Brain UUID. The daemon owns Brain routing and permissions. An explicit v0.2 Brain target remains supported for compatibility, but automatic mode never guesses a target or silently falls back from an unknown Project to Personal. Brains—not hooks—are the data-ownership and permission boundary.
 
 The local outbox accepts explicit-memory captures only; queued captures are retried by the next `beforeTask` or `onUserMessage` call. The callback lifecycle does not retain complete transcripts, assistant output, temporary reasoning, or secrets.
+
+## When Memlume writes and reads
+
+Memlume is useful when the same durable fact must survive a host switch without copying one host's private memory into another:
+
+1. **Before a task:** `beforeTask` sends the workspace path, task text, entities, and intent. Core resolves a deterministic ReadSet (Primary Project, task-matched Linked Projects, and relevant Personal memory) and returns only active, budget-fitting context.
+2. **When the user sends a message:** `onUserMessage` sends the message after local validation. Greetings, small talk, secrets, and unsupported transcript text are ignored or rejected. Explicit requests such as “remember that I use Vue” can become active after conflict checks; ordinary inferred statements remain candidates.
+3. **When a project is unclear:** the atom is written to `inbox/pending` as `routing_required`. It is never guessed into another Brain. A maintainer can route it later with an explicit Brain and audit trail.
+4. **After an assistant final:** adapters may place only the bounded final answer in a 24-hour runtime buffer. A short user approval such as “可以”, “同意”, or “修正：…” authorizes that text through the normal capture pipeline; the approval word itself is never stored as the memory.
+
+This is why users do not need to say “save this to Memlume” every time. The hook supplies the event; the Core decides whether it is worth storing, where it belongs, and whether it is safe to read back.
 
 ### Host child-Agent support
 
@@ -60,25 +71,25 @@ This means an agent should not automatically save whole transcripts, assistant o
 
 ## Status and scope
 
-This repository is the `0.2.0` source workspace. Its packages are currently private, so it is installed by cloning and building the repository rather than from a public package registry.
+This repository is the `0.3.0` source workspace. Its packages are currently private, so it is installed by cloning and building the repository rather than from a public package registry.
 
 All functionality belongs to the MIT-licensed Memlume Core. The official website is only a download, installer, update, and documentation entry point; it does not provide a stronger closed edition.
 
 Implemented:
 
-- An append-only event journal and a local SQLite database.
+- An append-only event journal, Markdown authority records, durable routing Inbox, and a local SQLite projection.
 - Structured `policy`, `preference`, `fact`, and `decision` memories.
 - Global, domain, agent, workspace, project, and task scopes.
 - SQLite FTS5 search and a deterministic context resolver with source memory IDs and a context budget.
-- Shared brains with per-installation mounts, a localhost-only daemon, a CLI, and an MCP stdio server.
+- Workspace initialization and explicit Project bindings, server-planned ReadSets, per-installation mounts, a localhost-only daemon, a CLI, and an MCP stdio server.
 - Bearer-token authentication for adapter APIs; `/v1/health` remains a public local health check.
-- Governed memory compilation, candidate review, and conflict-aware replacement.
-- Verifiable local backups and restore maintenance, plus a local Shared Brain Console.
+- Governed memory compilation, candidate review, conflict-aware replacement, secret filtering, and approval of bounded assistant finals.
+- Verifiable local backups and restore maintenance, including Markdown-first v3 bundles, plus a local Shared Brain Console.
 - Official local adapters for Hermes, Codex, OpenClaw, and Claude Code, all using the same mounted Brain rather than copying native agent memory.
 - Outcome usage records, deterministic feedback ranking, retrieval benchmark, and reproducible backup/restore verification.
 - Public architecture, adapter, backup, and shared-project guides; CI and tag-release workflows run the same checks as local development.
 
-Not implemented in v0.2.0:
+Not implemented in v0.3.0:
 
 - Vector/embedding search, remote sync, cloud hosting, or multi-user access.
 - A public npm package.
@@ -122,12 +133,11 @@ $env:MEMLUME_SETUP_TOKEN = '<long-random-secret>'
 pnpm --filter @memlume/daemon start -- --database ./data/memlume.sqlite --port 3849
 ```
 
-Prefer the protected `memlume setup adapter` command instead of manually copying an adapter token. It registers one local Agent installation, mounts its Project Brain with `read_write`, makes a loopback read smoke test, and keeps the token only in the current user's Memlume configuration. For example, the following also installs the Codex Plugin through its official marketplace flow:
+Prefer the protected `memlume setup adapter` command instead of manually copying an adapter token. In v0.3, omit `--project-id` and `--brain-id` to use workspace-owned routing; pass `--workspace-path` to initialize and mount that workspace's Project Brain. The command mounts the Personal Brain, makes a loopback read smoke test, and keeps the token only in the current user's Memlume configuration. For example, the following also installs the Codex Plugin through its official marketplace flow:
 
 ```powershell
 node apps/cli/dist/index.js --setup-token $env:MEMLUME_SETUP_TOKEN setup adapter codex `
-  --installation-id codex-desktop --project-id memlume `
-  --brain-id '<project-brain-uuidv7>' --core-path $PWD --install-host --yes
+  --installation-id codex-desktop --workspace-path $PWD --core-path $PWD --install-host --yes
 ```
 
 Use `hermes`, `openclaw`, or `claude-code` in place of `codex` for the other supported hosts. In a non-interactive shell, `--yes` is required before Memlume changes host Plugin configuration; an interactive terminal asks instead. Run the same command with `--install-host --dry-run` after the profile exists to preview non-secret host commands without changing the host. Codex and Claude Code still require the user to review and trust their hooks; Memlume never bypasses that platform control. `memlume doctor` lists local profiles and performs a read-only Context check without printing tokens.
@@ -138,7 +148,7 @@ Check its health from another terminal:
 
 ```sh
 curl http://127.0.0.1:3849/v1/health
-# {"status":"ok"}
+# {"status":"ok","service":"memlume"}
 ```
 
 ## CLI
@@ -227,17 +237,19 @@ MCP uses `available_tools` (snake case); the daemon receives it as `availableToo
 
 ## Privacy and local operation
 
-Memlume stores data in the SQLite file selected with `--database`; the default is `data/memlume.sqlite`. v0.2.0 has no remote sync or cloud service, and the daemon binds only to loopback. Adapter APIs require a bearer token, while setup APIs require `MEMLUME_SETUP_TOKEN`; `/v1/health` is intentionally public. Never commit a real token or paste one into logs. Authentication does not encrypt the database at rest: protect it with normal operating-system permissions and do not store secrets you would not keep in a local plaintext SQLite file.
+Memlume stores Markdown authority records and the SQLite projection beneath the data root selected with `--database`; the default is `data/memlume.sqlite`. v0.3.0 has no remote sync or cloud service, and the daemon binds only to loopback. Adapter APIs require a bearer token, while setup APIs require `MEMLUME_SETUP_TOKEN`; `/v1/health` is intentionally public. Runtime buffers are short-lived and excluded from the Brain and backups. Never commit a real token or paste one into logs. Authentication does not encrypt the database at rest: protect it with normal operating-system permissions and do not store secrets you would not keep in a local plaintext SQLite file.
 
 ## Architecture
 
 ```text
 CLI ───────────┐
-               ├─> localhost daemon (127.0.0.1) ─> SQLite + FTS5
+               ├─> localhost daemon (127.0.0.1)
 MCP stdio ─────┘               │
-                               ├─> append-only event journal
-                               ├─> structured memory store
-                               └─> context resolver
+Adapters/hooks ────────────────┤
+                               ├─> Markdown authority + routing Inbox
+                               ├─> SQLite projection + FTS5
+                               ├─> Brain Router + ReadSet Planner
+                               └─> context resolver / receipts
 ```
 
 The CLI and MCP server do not open SQLite themselves; they send requests to the daemon. The resolver returns a context pack with directives, preferences, facts, decisions, source memory IDs, exclusions, and context-budget information where applicable.
@@ -254,7 +266,7 @@ pnpm benchmark:retrieval
 
 ## Contributing
 
-Keep changes small, add or update the nearest Vitest coverage for non-trivial behavior, and run the commands above before opening a pull request. Do not add remote storage or vector search as incidental changes to v0.2.0.
+Keep changes small, add or update the nearest Vitest coverage for non-trivial behavior, and run the commands above before opening a pull request. Do not add remote storage or vector search as incidental changes to v0.3.0.
 
 ## License
 

@@ -14,6 +14,8 @@ export interface ActivationInput {
   readonly atom: ActivationAtom;
   readonly route: 'routed' | 'routing_required';
   readonly admitted?: boolean;
+  /** A buffered assistant final explicitly authorized by the user. */
+  readonly authorized?: boolean;
 }
 
 /** A single policy shared by daemon, CLI and adapters. */
@@ -23,6 +25,7 @@ export function activationPolicy(input: ActivationInput): ActivationStatus {
   if (atom.kind === 'event') return 'event_only';
   if (input.route === 'routing_required') return 'routing_required';
   if (atom.actor !== 'user') return 'candidate';
+  if (input.authorized === true) return 'active';
   if (atom.conflict === true || atom.stable === false) return 'candidate';
   if ((atom.explicitness ?? 0) < 1 || (atom.confidence ?? 0) < 0.8) return 'candidate';
   return 'active';

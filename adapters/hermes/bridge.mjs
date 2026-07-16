@@ -37,6 +37,8 @@ async function invoke(client, request) {
       return client.onUserMessage(request.envelope, request.message);
     case 'onSubagentStart':
       return client.onSubagentStart(request.input);
+    case 'recordAssistantFinal':
+      return client.recordAssistantFinal(request.envelope, request.input);
     default:
       throw new Error('Unsupported bridge operation.');
   }

@@ -350,6 +350,43 @@ describe('AdapterClient', () => {
     assert.equal(JSON.parse(fake.calls[0].init.body).brainId, explicitBrainId);
   });
 
+  test('sends a v0.3 workspace capture without selecting a Brain locally', async () => {
+    const automaticEnvelope = {
+      clientType: 'codex',
+      installationId: 'desktop-automatic',
+      profileId: 'default',
+      sessionId: 'session-automatic',
+      workspacePath: 'C:/work/memlume',
+    };
+    const fake = fakeFetch({
+      status: 201,
+      body: {
+        receipt: {
+          captureId: 'capture-automatic',
+          sourceReference: 'codex-reference',
+          status: 'active',
+          atoms: [{ atomKey: 'atom-1', status: 'active', brainId }],
+          createdAt: '2026-07-16T00:00:00.000Z',
+          updatedAt: '2026-07-16T00:00:00.000Z',
+        },
+      },
+    });
+    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, fetch: fake.fetch });
+    const result = await client.onUserMessage(automaticEnvelope, {
+      messageId: 'message-automatic',
+      turnId: 'turn-automatic',
+      content: '記住我使用 Vue 開發前端',
+    });
+    assert.deepEqual(result, { status: 'saved', memoryStatus: 'active' });
+    assert.equal(new URL(fake.calls[0].url).pathname, '/v1/capture');
+    const body = JSON.parse(fake.calls[0].init.body);
+    assert.equal(body.brainId, undefined);
+    assert.equal(body.workspacePath, automaticEnvelope.workspacePath);
+    assert.equal(body.sessionId, automaticEnvelope.sessionId);
+    assert.equal(body.turnId, 'turn-automatic');
+    assert.equal(body.actor, 'user');
+  });
+
   test('rejects a new user-memory capture without a target Brain before any network or outbox work', async () => {
     const outboxPath = temporaryOutbox();
     const fake = fakeFetch({ status: 201, body: savedCapture() });

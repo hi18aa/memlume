@@ -40,6 +40,11 @@ export function registerMemlumeOpenClawPlugin(api, { createClient = createAdapte
         scope: configuration.scope,
         task,
         contextBudget: CONTEXT_BUDGET,
+        ...(automaticConfiguration(configuration) ? {
+          workspacePath: configuration.envelope.workspacePath,
+          agentType: 'openclaw',
+          ...(child?.task === undefined ? {} : { childGoal: child.task }),
+        } : {}),
       };
       const sharedContext = child === undefined
         ? await adapter.beforeTask(input)
@@ -47,7 +52,7 @@ export function registerMemlumeOpenClawPlugin(api, { createClient = createAdapte
           ...input,
           parentTaskId: child.parentTaskId,
           ...(child.subagentId === undefined ? {} : { subagentId: child.subagentId }),
-          requestedBrainIds: [configuration.brainId],
+          ...(configuration.brainId === undefined ? {} : { requestedBrainIds: [configuration.brainId] }),
         });
       const prependContext = compactContext(sharedContext);
       return prependContext === undefined ? undefined : { prependContext };
@@ -58,11 +63,27 @@ export function registerMemlumeOpenClawPlugin(api, { createClient = createAdapte
 
   api.on('message_received', (event, context) => {
     const configuration = configurationFor(api, context, event, environment);
+    if (isAssistantMessage(event)) {
+      void captureAssistantFinal(client, configuration, event, context);
+      return;
+    }
     const content = text(event?.content);
     const messageId = text(event?.messageId) ?? messageIdFor('user', configuration?.envelope.sessionId, event?.runId ?? context?.runId);
     if (configuration === undefined || content === undefined || messageId === undefined) return;
-    void captureUserMessage(client, configuration, { messageId, content, brainId: configuration.brainId, scope: configuration.scope });
+    void captureUserMessage(client, configuration, {
+      messageId,
+      ...(automaticConfiguration(configuration) ? { turnId: text(event?.turnId) ?? text(event?.runId) ?? messageId } : {}),
+      content,
+      ...(configuration.brainId === undefined ? {} : { brainId: configuration.brainId }),
+      ...(configuration.scope === undefined ? {} : { scope: configuration.scope }),
+    });
   });
+
+  if (typeof api.supportsHook === 'function' && api.supportsHook('agent_end')) {
+    api.on('agent_end', async (event, context) => {
+      await captureAssistantFinal(client, configurationFor(api, context, event, environment), event, context);
+    });
+  }
 
   api.on('subagent_spawned', (event, context) => {
     const childSessionId = childSessionIdFor(event);
@@ -90,6 +111,20 @@ async function captureUserMessage(client, configuration, message) {
   }
 }
 
+async function captureAssistantFinal(client, configuration, event, context) {
+  if (configuration === undefined || configuration.brainId !== undefined || configuration.envelope.projectId !== undefined) return;
+  const finalAnswer = text(event?.finalMessage) ?? text(event?.content) ?? text(event?.message?.content);
+  const turnId = text(event?.turnId) ?? text(event?.runId) ?? text(context?.runId);
+  if (finalAnswer === undefined || turnId === undefined) return;
+  const adapter = await client(configuration);
+  if (adapter === undefined) return;
+  try {
+    await adapter.recordAssistantFinal(configuration.envelope, { turnId, finalAnswer });
+  } catch {
+    // Runtime buffering is best effort and must not block OpenClaw.
+  }
+}
+
 function configurationFor(api, context, event, environment) {
   const pluginConfig = isRecord(context?.pluginConfig) ? context.pluginConfig : isRecord(api?.config) ? api.config : undefined;
   if (pluginConfig === undefined) return undefined;
@@ -98,20 +133,20 @@ function configurationFor(api, context, event, environment) {
   const projectId = text(pluginConfig.projectId);
   const brainId = text(pluginConfig.brainId);
   const sessionId = sessionIdFor(event, context);
-  if (installationId === undefined || profileId === undefined || projectId === undefined || brainId === undefined || sessionId === undefined || !uuidV7.test(brainId)) return undefined;
+  if (installationId === undefined || profileId === undefined || sessionId === undefined) return undefined;
   const workspacePath = text(pluginConfig.workspacePath) ?? text(context?.workspaceDir);
   const envelope = {
     clientType: 'openclaw',
     installationId,
     profileId,
-    projectId,
+    ...(projectId === undefined ? {} : { projectId }),
     sessionId,
     ...(workspacePath === undefined ? {} : { workspacePath }),
   };
   return {
     envelope,
-    brainId,
-    scope: { level: 'project', projectId },
+    ...(brainId !== undefined && uuidV7.test(brainId) ? { brainId } : {}),
+    scope: projectId === undefined ? { level: 'global' } : { level: 'project', projectId },
     corePath: text(pluginConfig.corePath) ?? text(environment.MEMLUME_HOME),
     daemonUrl: text(pluginConfig.daemonUrl) ?? text(environment.MEMLUME_DAEMON_URL) ?? 'http://127.0.0.1:3849',
     outboxDirectory: text(pluginConfig.outboxDirectory) ?? text(environment.MEMLUME_OUTBOX_DIRECTORY),
@@ -132,7 +167,7 @@ async function createAdapterClient(environment, configuration) {
   return new module.AdapterClient({
     daemonUrl: configuration.daemonUrl,
     token: text(environment.MEMLUME_TOKEN) ?? profile?.token,
-    defaultWriteBrainId: configuration.brainId,
+    ...(configuration.brainId === undefined ? {} : { defaultWriteBrainId: configuration.brainId }),
     ...(configuration.outboxDirectory === undefined ? {} : { outboxDirectory: configuration.outboxDirectory }),
     warn: () => undefined,
   });
@@ -159,6 +194,14 @@ function childSessionIdFor(event) {
 function messageIdFor(kind, sessionId, runId) {
   if (sessionId === undefined || runId === undefined) return undefined;
   return `openclaw:${sessionId}:${runId}:${kind}`;
+}
+
+function isAssistantMessage(event) {
+  return event?.role === 'assistant' || event?.author === 'assistant' || event?.messageType === 'assistant';
+}
+
+function automaticConfiguration(configuration) {
+  return configuration.brainId === undefined && configuration.envelope.projectId === undefined;
 }
 
 function collectText(lines, values, key) {

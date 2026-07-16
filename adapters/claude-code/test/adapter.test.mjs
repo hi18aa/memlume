@@ -168,7 +168,7 @@ describe('Claude Code plugin adapter', () => {
 
     assert.deepEqual(manifest, {
       name: 'memlume-claude-code',
-      version: '0.2.0',
+      version: '0.3.0',
       description: 'Connect Claude Code turns to a local Memlume Shared Brain.',
       author: { name: 'hi18aa', url: 'https://github.com/hi18aa' },
       homepage: 'https://github.com/hi18aa/memlume',

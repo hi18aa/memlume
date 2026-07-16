@@ -19,6 +19,8 @@ export interface ApprovalResolution {
   readonly status: ApprovalResolutionStatus;
   readonly mode?: ApprovalResolutionMode;
   readonly approvalKey: string;
+  /** Sanitized text that was authorized and may be routed as a new capture. */
+  readonly content?: string;
   readonly sourceReference?: string;
   readonly atoms: readonly CaptureAtom[];
   readonly reason?: 'no_buffer' | 'expired' | 'not_approval' | 'secret_detected' | 'ambiguous' | 'provider_failed';
@@ -63,7 +65,7 @@ export async function resolveApproval(input: ApprovalResolverInput): Promise<App
   // The approval itself is the user authorization. Do not carry assistant
   // confidence into the active record, but preserve the atom's evidence.
   const atoms = compiled.atoms.map((atom) => ({ ...atom, actor: 'user' as const, confidence: 1, explicitness: 1 }));
-  return { status: 'active', mode, approvalKey, sourceReference: compiled.sourceReference, atoms };
+  return { status: 'active', mode, approvalKey, content, sourceReference: compiled.sourceReference, atoms };
 }
 
 export function stableApprovalKey(finalAnswer: string, approval: string): string {

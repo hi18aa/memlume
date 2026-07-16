@@ -50,11 +50,17 @@ export interface ReviewCandidateInput {
   readonly supersedeMemoryId?: string;
 }
 
+export interface ForgetMemoryInput {
+  readonly actor: string;
+  readonly reason: string;
+}
+
 export interface MemoryWriteAuthority {
   save(input: SaveMemoryInput): MemoryItem;
   saveCandidate(input: SaveMemoryInput): MemoryItem;
   approveCandidate(id: string, input: ReviewCandidateInput, brainIds?: readonly string[]): MemoryItem;
   rejectCandidate(id: string, input: Omit<ReviewCandidateInput, 'supersedeMemoryId'>, brainIds?: readonly string[]): MemoryItem;
+  forget(id: string, input: ForgetMemoryInput, brainIds?: readonly string[]): MemoryItem;
   update(id: string, input: UpdateMemoryInput, brainIds?: readonly string[]): MemoryItem;
 }
 
@@ -526,6 +532,22 @@ export class MemoryStore {
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `)
       .run(memory.id, memory.title ?? '', memory.canonicalText, memory.canonicalText, '', '', memory.canonicalText);
+  }
+
+  forget(id: string, input: ForgetMemoryInput, brainIds?: readonly string[]): MemoryItem {
+    if (this.authority !== undefined) {
+      return this.authority.forget(id, input, brainIds);
+    }
+    this.assertLegacyWriter();
+    const allowedBrainIds = normalizeBrainIds(brainIds);
+    const existing = this.getStored(id, allowedBrainIds);
+    if (existing === undefined) throw new Error(`Memory not found: ${id}`);
+    const forgotten = MemoryItemSchema.parse({ ...existing, status: 'superseded', updatedAt: new Date().toISOString() });
+    this.database.transaction(() => {
+      this.insertVersion(existing, NonEmptyTextSchema.parse(input.actor), NonEmptyTextSchema.parse(input.reason), forgotten.updatedAt);
+      this.replace(forgotten);
+    }).immediate();
+    return forgotten;
   }
 
   private assertLegacyWriter(): void {

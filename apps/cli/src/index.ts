@@ -15,6 +15,7 @@ type Writer = (text: string) => void;
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const DAEMON_URL_ERROR = 'daemon URL must be an http://127.0.0.1 or http://[::1] origin.';
+const DEFAULT_PERSONAL_BRAIN_ID = '00000000-0000-7000-8000-000000000001';
 const execFileAsync = promisify(execFile);
 
 interface Io {
@@ -269,8 +270,8 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
     .description('註冊、掛載並驗證 Agent 的本機 Shared Brain profile。')
     .requiredOption('--installation-id <id>', 'Agent 的穩定本機 installation ID')
     .option('--profile-id <id>', 'Agent profile ID', 'default')
-    .requiredOption('--project-id <id>', 'Shared Brain 專案 ID')
-    .requiredOption('--brain-id <id>', '要掛載的 Project Brain UUIDv7')
+    .option('--project-id <id>', '相容 v0.2 的 Project ID（v0.3 可省略）')
+    .option('--brain-id <id>', '相容 v0.2 的 Project Brain UUIDv7（v0.3 可省略）')
     .option('--workspace-path <path>', '選填：Agent workspace 路徑')
     .option('--core-path <path>', 'Memlume Core repository 路徑')
     .option('--install-host', '使用 Agent 官方 Plugin 流程安裝此 profile')
@@ -324,13 +325,38 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
       const installation = objectValue(registration, 'installation');
       const agentInstallationId = requiredResponseString(installation, 'id', 'installation registration');
       const token = requiredResponseString(registration, 'token', 'installation registration');
-      const brainId = required(options.brainId, '--brain-id');
-      const projectId = required(options.projectId, '--project-id');
-      await requestSetupJson(global.url, setupSecret, '/v1/setup/mounts', 'POST', {
-        agentInstallationId,
-        brainId,
-        access: 'read_write',
-      }, runtime);
+      const brainId = options.brainId === undefined ? undefined : required(options.brainId, '--brain-id');
+      const projectId = options.projectId === undefined ? undefined : required(options.projectId, '--project-id');
+      if ((brainId === undefined) !== (projectId === undefined)) {
+        throw new Error('--project-id and --brain-id must be supplied together, or both omitted for v0.3 workspace routing.');
+      }
+      let automaticProjectId: string | undefined;
+      if (brainId !== undefined) {
+        await requestSetupJson(global.url, setupSecret, '/v1/setup/mounts', 'POST', {
+          agentInstallationId,
+          brainId,
+          access: 'read_write',
+        }, runtime);
+      } else {
+        await requestSetupJson(global.url, setupSecret, '/v1/setup/mounts', 'POST', {
+          agentInstallationId,
+          brainId: DEFAULT_PERSONAL_BRAIN_ID,
+          access: 'read_write',
+        }, runtime);
+        if (options.workspacePath !== undefined) {
+          const initialized = await requestSetupJson(global.url, setupSecret, '/v1/setup/init', 'POST', {
+            workspacePath: options.workspacePath,
+          }, runtime);
+          automaticProjectId = objectString(objectValue(initialized, 'project'), 'id');
+          if (automaticProjectId !== undefined) {
+            await requestSetupJson(global.url, setupSecret, '/v1/setup/mounts', 'POST', {
+              agentInstallationId,
+              brainId: automaticProjectId,
+              access: 'read_write',
+            }, runtime);
+          }
+        }
+      }
 
       const desired: CliConfig = {
         ...existing.config,
@@ -340,8 +366,8 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
             clientType,
             installationId: required(options.installationId, '--installation-id'),
             profileId: required(options.profileId, '--profile-id'),
-            projectId,
-            brainId,
+            ...(projectId === undefined ? {} : { projectId }),
+            ...(brainId === undefined ? {} : { brainId }),
             token,
             corePath: options.corePath ?? runtime.cwd(),
             workspacePath: options.workspacePath,
@@ -358,11 +384,12 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
       try {
         await request(global.url, token, '/v1/context/resolve', 'POST', {
           intent: 'shared_memory',
-          scope: { level: 'project', projectId },
+          scope: projectId === undefined ? { level: 'global' } : { level: 'project', projectId },
           task: 'Memlume adapter setup smoke test.',
           contextBudget: 1,
           availableTools: [],
           entities: [],
+          ...(options.workspacePath === undefined ? {} : { workspacePath: options.workspacePath }),
         }, runtime);
       } catch {
         if (existing.raw === undefined) {
@@ -717,8 +744,9 @@ interface AdapterProfile {
   readonly clientType: SupportedAdapter;
   readonly installationId: string;
   readonly profileId: string;
-  readonly projectId: string;
-  readonly brainId: string;
+  /** Deprecated v0.2 static target; v0.3 routing is workspace-owned. */
+  readonly projectId?: string;
+  readonly brainId?: string;
   readonly token: string;
   readonly corePath: string;
   readonly workspacePath?: string;
@@ -729,7 +757,7 @@ interface DoctorAdapterProfile {
   readonly clientType: SupportedAdapter;
   readonly installationId: string;
   readonly profileId: string;
-  readonly brainId: string;
+  readonly brainId?: string;
   readonly mount: 'read' | 'read_write' | 'not_mounted' | 'not_checked';
   readonly readCheck: 'ok' | 'failed';
 }
@@ -737,8 +765,8 @@ interface DoctorAdapterProfile {
 interface AdapterSetupOptions {
   readonly installationId: string;
   readonly profileId: string;
-  readonly projectId: string;
-  readonly brainId: string;
+  readonly projectId?: string;
+  readonly brainId?: string;
   readonly workspacePath?: string;
   readonly corePath?: string;
   readonly installHost?: boolean;
@@ -1278,8 +1306,8 @@ function openClawConfiguration(profile: AdapterProfile): Record<string, string> 
   return compact({
     installationId: profile.installationId,
     profileId: profile.profileId,
-    projectId: profile.projectId,
-    brainId: profile.brainId,
+    ...(profile.projectId === undefined ? {} : { projectId: profile.projectId }),
+    ...(profile.brainId === undefined ? {} : { brainId: profile.brainId }),
     corePath: profile.corePath,
     daemonUrl: profile.daemonUrl,
     workspacePath: profile.workspacePath,
@@ -1316,8 +1344,8 @@ function isAdapterProfile(value: unknown): value is AdapterProfile {
     && (supportedAdapters as readonly string[]).includes(profile.clientType)
     && typeof profile.installationId === 'string' && profile.installationId.trim() !== ''
     && typeof profile.profileId === 'string' && profile.profileId.trim() !== ''
-    && typeof profile.projectId === 'string' && profile.projectId.trim() !== ''
-    && typeof profile.brainId === 'string' && profile.brainId.trim() !== ''
+    && (profile.projectId === undefined || typeof profile.projectId === 'string' && profile.projectId.trim() !== '')
+    && (profile.brainId === undefined || typeof profile.brainId === 'string' && profile.brainId.trim() !== '')
     && typeof profile.token === 'string' && profile.token.trim() !== ''
     && typeof profile.corePath === 'string' && profile.corePath.trim() !== ''
     && (profile.workspacePath === undefined || typeof profile.workspacePath === 'string')
@@ -1354,7 +1382,7 @@ function configuredMounts(profiles: readonly AdapterProfile[], installations: un
   }
   return new Map(profiles.map((profile) => {
     const installationId = installationIds.get(adapterInstallationKey(profile.clientType, profile.installationId, profile.profileId));
-    const access = installationId === undefined ? undefined : mountAccess.get(`${installationId}\u0000${profile.brainId}`);
+    const access = installationId === undefined || profile.brainId === undefined ? undefined : mountAccess.get(`${installationId}\u0000${profile.brainId}`);
     return [adapterProfileKey(profile), access ?? 'not_mounted'];
   }));
 }
@@ -1378,11 +1406,12 @@ async function doctorAdapterProfiles(
     try {
       await request(profile.daemonUrl, profile.token, '/v1/context/resolve', 'POST', {
         intent: 'shared_memory',
-        scope: { level: 'project', projectId: profile.projectId },
+        scope: profile.projectId === undefined ? { level: 'global' } : { level: 'project', projectId: profile.projectId },
         task: 'Memlume doctor read check.',
         contextBudget: 1,
         availableTools: [],
         entities: [],
+        ...(profile.workspacePath === undefined ? {} : { workspacePath: profile.workspacePath }),
       }, runtime);
     } catch {
       readCheck = 'failed';
@@ -1416,7 +1445,7 @@ function doctorSummary(health: unknown, diagnostics: unknown, profiles: readonly
   if (profiles.length > 0) {
     lines.push(`Adapter profiles: ${profiles.length}.`);
     lines.push(...profiles.map((profile) => (
-      `${adapterDisplayName(profile.clientType)} ${profile.installationId}/${profile.profileId} -> Brain ${profile.brainId}: mount ${profile.mount}; token configured; read check: ${profile.readCheck}.`
+      `${adapterDisplayName(profile.clientType)} ${profile.installationId}/${profile.profileId} -> ${profile.brainId === undefined ? 'workspace-routed' : `Brain ${profile.brainId}`}: mount ${profile.mount}; token configured; read check: ${profile.readCheck}.`
     )));
   }
   return lines.join('\n').concat('\n');

@@ -17,23 +17,29 @@ import {
   UuidV7Schema,
   createUuidV7,
   CaptureReceiptSchema,
+  ReadSetSchema,
+  SemanticRecordSchema,
+  AdapterCallbackSchema,
+  AdapterProtocolVersionSchema,
+  DEFAULT_PERSONAL_BRAIN_ID,
   type CaptureReceipt,
+  type ReadSet,
   redactSensitiveJson,
   redactSensitiveText,
   type AgentInstallation,
   type JsonValue,
 } from '@memlume/contracts';
-import { ContextResolver } from '@memlume/context-resolver';
+import { ContextResolver, planReadSet } from '@memlume/context-resolver';
 import type { SqliteDatabase } from '@memlume/database/internal';
 import { EventBrainConflictError, EventJournal } from '@memlume/event-journal';
-import { assessMemoryConflict, compileMemory, type MemoryProposal } from '@memlume/memory-compiler';
+import { assessMemoryConflict, compileMemory, resolveApproval, type MemoryProposal } from '@memlume/memory-compiler';
 import { MemoryStore, OutcomeFeedbackRateLimitError, OutcomeMemoryAccessError, OutcomeReceiptError, OutcomeReceiptRateLimitError, OutcomeStore, SourceEventBrainMismatchError } from '@memlume/retrieval';
-import { BrainStore } from '@memlume/shared-brains';
+import { BrainStore, MarkdownRecordStore, ProjectBindingStore, RoutingInboxStore, scanMarkdownRecords } from '@memlume/shared-brains';
 import { BrainImportConflictError, BrainImportRequiredError, FullBackupAuthenticationRequiredError, FullRestoreRequiredError, RestoreRecoveryError, verifyMarkdownBundle } from '@memlume/backup';
 import { planCapture, type AtomPlan } from './capture-pipeline.js';
 import { SemanticMemoryService } from './semantic-memory-service.js';
-import { RoutingInboxStore } from '@memlume/shared-brains';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { TurnRuntimeStore } from './turn-runtime-store.js';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import express, { type ErrorRequestHandler, type Express, type Request, type RequestHandler, type Response } from 'express';
 import { z, ZodError } from 'zod';
 
@@ -62,6 +68,8 @@ const AutomaticCaptureRequestSchema = z.object({
   structuredData: JsonValueSchema.optional(),
   occurredAt: IsoUtcDateTimeSchema.optional(),
   workspacePath: NonEmptyTextSchema.optional(),
+  sessionId: NonEmptyTextSchema.optional(),
+  turnId: NonEmptyTextSchema.optional(),
 }).strict();
 
 const MemoryRequestBaseSchema = z
@@ -106,6 +114,13 @@ const ResolveContextRequestSchema = z
     contextBudget: z.number().int().nonnegative(),
     entities: z.array(NonEmptyTextSchema).optional(),
     availableTools: z.array(NonEmptyTextSchema).optional(),
+    workspacePath: NonEmptyTextSchema.optional(),
+    taskId: NonEmptyTextSchema.optional(),
+    agentType: NonEmptyTextSchema.optional(),
+    subagentId: NonEmptyTextSchema.optional(),
+    childGoal: z.string().nullable().optional(),
+    parentReadSet: ReadSetSchema.optional(),
+    /** Deprecated v0.2 compatibility input; v0.3 callback requests ignore it. */
     requestedBrainIds: z.array(UuidV7Schema).min(1).optional(),
   })
   .strict();
@@ -145,6 +160,23 @@ const CreateBrainRequestSchema = z
     name: NonEmptyTextSchema,
   })
   .strict();
+const SetupInitRequestSchema = z.object({
+  workspacePath: NonEmptyTextSchema,
+  name: NonEmptyTextSchema.optional(),
+}).strict();
+const CreateProjectRequestSchema = z.object({ name: NonEmptyTextSchema }).strict();
+const BindProjectRequestSchema = z.object({
+  workspacePath: NonEmptyTextSchema,
+  role: z.enum(['primary', 'linked']).default('linked'),
+  access: z.enum(['read', 'read_write']).optional(),
+}).strict();
+const AddProjectAliasRequestSchema = z.object({ alias: NonEmptyTextSchema }).strict();
+const InspectProjectQuerySchema = z.object({ workspacePath: NonEmptyTextSchema }).strict();
+const EditRecordRequestSchema = z.object({
+  text: NonEmptyTextSchema.optional(),
+  repair: z.boolean().default(false),
+}).strict();
+const ReindexRequestSchema = z.object({ repair: z.boolean().default(false) }).strict();
 
 const RegisterInstallationRequestSchema = z
   .object({
@@ -164,6 +196,16 @@ const CreateBackupRequestSchema = z.object({
 const ImportBrainQuerySchema = z.object({
   name: z.string().trim().min(1).max(256).optional(),
 }).strict();
+const RouteInboxRequestSchema = z.object({
+  brainId: UuidV7Schema,
+  activate: z.boolean().default(false),
+}).strict();
+const RuntimeFinalRequestSchema = z.object({
+  sessionId: NonEmptyTextSchema,
+  turnId: NonEmptyTextSchema,
+  traceId: UuidV7Schema.optional(),
+  finalAnswer: z.string().min(1).max(65536),
+}).strict();
 
 export interface DaemonServices {
   readonly database: SqliteDatabase;
@@ -177,6 +219,12 @@ export interface DaemonServices {
   /** Unified semantic write boundary. Optional for v0.2-compatible test fixtures. */
   readonly semantic?: SemanticMemoryService;
   readonly routingInbox?: RoutingInboxStore;
+  /** Server-owned project bindings used to derive ReadSet grants. */
+  readonly projects?: ProjectBindingStore;
+  /** Markdown root used by maintenance and explicit Inbox routing. */
+  readonly dataRoot?: string;
+  readonly reindex?: (options?: { readonly repair?: boolean }) => unknown;
+  readonly runtime?: TurnRuntimeStore;
 }
 
 export interface BackupLifecycle {
@@ -196,7 +244,48 @@ export interface AuthenticatedRequestLocals {
 
 export function registerRoutes(app: Express, services: DaemonServices): void {
   app.get('/v1/health', (_request, response) => {
-    response.json({ status: 'ok' });
+    response.json({ status: 'ok', service: 'memlume' });
+  });
+  app.get('/v1/status', (_request, response) => {
+    const hosts = services.brains.listInstallations().map((installation) => {
+      const heartbeats = services.brains.listHeartbeats(installation.id);
+      const current = currentAdapterVersion(installation.clientType);
+      const callbacks = new Set(heartbeats
+        .filter((heartbeat) => heartbeat.protocolVersion === current.protocolVersion && heartbeat.adapterVersion === current.adapterVersion)
+        .map((heartbeat) => heartbeat.callback));
+      const state = callbacks.has('beforeTask') && callbacks.has('onUserMessage')
+        ? 'active'
+        : installation.clientType === 'codex'
+          ? 'pending_trust'
+          : 'degraded';
+      return {
+        clientType: installation.clientType,
+        installationId: installation.installationId,
+        profileId: installation.profileId,
+        state,
+        protocolVersion: current.protocolVersion,
+        adapterVersion: current.adapterVersion,
+        callbacks: Object.fromEntries(['beforeTask', 'onUserMessage', 'onSubagentStart'].map((callback) => {
+          const latest = heartbeats
+            .filter((heartbeat) => heartbeat.callback === callback && heartbeat.protocolVersion === current.protocolVersion && heartbeat.adapterVersion === current.adapterVersion)
+            .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))[0];
+          return [callback, latest === undefined ? {} : { lastSeen: latest.lastSeenAt }];
+        })),
+        ...(state === 'active' ? {} : { reason: installation.clientType === 'codex' ? 'Trust the Codex hooks, then send one task and one user message.' : 'Send the missing lifecycle callback to confirm activation.' }),
+      };
+    });
+    const pendingInbox = services.routingInbox?.listPending().length ?? 0;
+    const captureCounts = services.database.prepare('SELECT status, COUNT(*) AS count FROM capture_atoms GROUP BY status').all() as Array<{ status: string; count: number }>;
+    response.json({
+      daemon: 'ok',
+      service: 'memlume',
+      hosts,
+      brains: services.brains.listBrains().length,
+      routingRequired: pendingInbox,
+      captures: Object.fromEntries(captureCounts.map(({ status, count }) => [status, count])),
+      runtime: { available: services.runtime !== undefined, ttlHours: 24, maxBytes: 64 * 1024 },
+      backup: { markdownV3: services.backup.createMarkdown !== undefined },
+    });
   });
 
   const requireSetup = requireSetupToken(services.setupToken);
@@ -206,6 +295,102 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
   });
   app.get('/v1/setup/brains', requireSetup, (_request, response) => {
     response.json({ brains: services.brains.listBrains() });
+  });
+  app.post('/v1/setup/init', requireSetup, (request, response) => {
+    const projects = services.projects;
+    if (projects === undefined) {
+      response.status(503).json({ error: 'project_bindings_unavailable' });
+      return;
+    }
+    const input = SetupInitRequestSchema.parse(request.body);
+    const existingBindings = projects.resolveWorkspace(input.workspacePath);
+    const existingPrimary = existingBindings.find((binding) => binding.role === 'primary');
+    if (existingPrimary !== undefined) {
+      response.json({
+        personalBrainId: DEFAULT_PERSONAL_BRAIN_ID,
+        project: services.brains.listBrains().find(({ id }) => id === existingPrimary.brainId),
+        binding: existingPrimary,
+        created: false,
+      });
+      return;
+    }
+    const project = projects.findByProjectKey('canonical_path', input.workspacePath)
+      ?? projects.createProject(input.name ?? projectNameFromWorkspace(input.workspacePath));
+    if (projects.findByProjectKey('canonical_path', input.workspacePath) === undefined) {
+      projects.addProjectKey({ brainId: project.id, keyType: 'canonical_path', value: input.workspacePath });
+    }
+    const binding = projects.bindWorkspace({ workspacePath: input.workspacePath, brainId: project.id, role: 'primary', access: 'read_write' });
+    response.status(201).json({ personalBrainId: DEFAULT_PERSONAL_BRAIN_ID, project, binding, created: true });
+  });
+  app.post('/v1/setup/projects', requireSetup, (request, response) => {
+    const projects = services.projects;
+    if (projects === undefined) {
+      response.status(503).json({ error: 'project_bindings_unavailable' });
+      return;
+    }
+    response.status(201).json({ project: projects.createProject(CreateProjectRequestSchema.parse(request.body).name) });
+  });
+  app.post('/v1/setup/projects/:brainId/bindings', requireSetup, (request, response) => {
+    const projects = services.projects;
+    if (projects === undefined) {
+      response.status(503).json({ error: 'project_bindings_unavailable' });
+      return;
+    }
+    const { brainId } = z.object({ brainId: UuidV7Schema }).strict().parse(request.params);
+    response.status(201).json({ binding: projects.bindWorkspace({ brainId, ...BindProjectRequestSchema.parse(request.body) }) });
+  });
+  app.post('/v1/setup/projects/:brainId/aliases', requireSetup, (request, response) => {
+    const projects = services.projects;
+    if (projects === undefined) {
+      response.status(503).json({ error: 'project_bindings_unavailable' });
+      return;
+    }
+    const { brainId } = z.object({ brainId: UuidV7Schema }).strict().parse(request.params);
+    response.status(201).json({ alias: projects.addAlias(brainId, AddProjectAliasRequestSchema.parse(request.body).alias) });
+  });
+  app.get('/v1/setup/projects/inspect', requireSetup, (request, response) => {
+    const projects = services.projects;
+    if (projects === undefined) {
+      response.status(503).json({ error: 'project_bindings_unavailable' });
+      return;
+    }
+    const { workspacePath } = InspectProjectQuerySchema.parse(request.query);
+    response.json({ projects: projects.inspect(), bindings: projects.listWorkspace(workspacePath) });
+  });
+  app.post('/v1/setup/reindex', requireSetup, (request, response) => {
+    if (services.reindex === undefined) {
+      response.status(503).json({ error: 'reindex_unavailable' });
+      return;
+    }
+    const result = services.reindex(ReindexRequestSchema.parse(request.body));
+    response.json({ projected: (result as { readonly projected?: unknown }).projected ?? [] });
+  });
+  app.post('/v1/setup/records/:recordId/edit', requireSetup, (request, response) => {
+    const input = EditRecordRequestSchema.parse(request.body);
+    if (input.text === undefined) {
+      response.json({ recordId: request.params.recordId, status: 'inspected' });
+      return;
+    }
+    if (!input.repair || services.dataRoot === undefined) {
+      response.status(409).json({ error: 'repair_required' });
+      return;
+    }
+    const record = scanMarkdownRecords(services.dataRoot).find(({ record }) => record.recordId === request.params.recordId)?.record;
+    if (record === undefined || record.recordType !== 'semantic') {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const existing = services.store.get(record.memoryId, [record.brainId]);
+    if (existing === undefined) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const memory = services.store.update(record.memoryId, {
+      canonicalText: input.text,
+      actor: 'memlume-cli',
+      reason: 'Explicit Markdown record repair.',
+    }, [record.brainId]);
+    response.status(201).json({ recordId: memory.id, memory });
   });
   app.get('/v1/setup/memories', requireSetup, (_request, response) => {
     response.json({ memories: services.store.list({ brainIds: services.brains.listBrains().map(({ id }) => id) }) });
@@ -276,7 +461,16 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     response.status(201).json(services.brains.rotateToken(agentInstallationId));
   });
   app.get('/v1/setup/diagnostics', requireSetup, (_request, response) => {
-    response.json(services.backup.diagnostics());
+    response.json({
+      ...asRecord(services.backup.diagnostics()),
+      heartbeats: services.brains.listHeartbeats(),
+      routingInbox: {
+        pending: services.routingInbox?.listPending().length ?? 0,
+        resolved: services.routingInbox?.listResolved().length ?? 0,
+        quarantine: services.routingInbox?.listQuarantine().length ?? 0,
+      },
+      captures: services.database.prepare('SELECT status, COUNT(*) AS count FROM capture_atoms GROUP BY status').all(),
+    });
   });
   app.post('/v1/setup/backups', requireSetup, async (request, response) => {
     const input = CreateBackupRequestSchema.parse(request.body);
@@ -396,6 +590,76 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
 
   const requireAdapter = requireAdapterToken(services.brains);
 
+  app.post('/v1/runtime/final', requireAdapter, async (request, response) => {
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    if (services.runtime === undefined) {
+      response.status(503).json({ error: 'runtime_unavailable' });
+      return;
+    }
+    const input = RuntimeFinalRequestSchema.parse(request.body);
+    const status = await services.runtime.save({
+      installationId: installation.id,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      ...(input.traceId === undefined ? {} : { traceId: input.traceId }),
+      finalAnswer: input.finalAnswer,
+    });
+    response.status(status === 'saved' ? 201 : 400).json({ status });
+  });
+
+  app.post('/v1/inbox/:recordId/route', requireAdapter, (request, response) => {
+    const { recordId } = z.object({ recordId: UuidV7Schema }).strict().parse(request.params);
+    const input = RouteInboxRequestSchema.parse(request.body);
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    if (services.routingInbox === undefined || services.dataRoot === undefined || services.reindex === undefined) {
+      response.status(503).json({ error: 'routing_unavailable' });
+      return;
+    }
+    if (!hasWriteAccess(response, services.brains, input.brainId)) return;
+    const pending = services.routingInbox.readPending(recordId);
+    if (pending === undefined) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const brain = services.brains.listBrains().find(({ id }) => id === input.brainId);
+    if (brain === undefined) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const now = new Date().toISOString();
+    const target = SemanticRecordSchema.parse({
+      schemaVersion: '0.3',
+      recordType: 'semantic',
+      recordId: createUuidV7(),
+      memoryId: createUuidV7(),
+      brainId: input.brainId,
+      status: input.activate ? 'active' : 'candidate',
+      kind: 'fact',
+      createdAt: now,
+      updatedAt: now,
+      captureId: pending.captureId,
+      atomKey: pending.atomKey,
+      sourceAtom: pending.statement,
+      canonicalText: pending.statement,
+      scope: brain.kind === 'project' ? { level: 'project', projectId: brain.id } : { level: 'global' },
+      confidence: 1,
+      explicitness: 1,
+      structuredData: { subject: 'routed', predicate: 'content', object: pending.statement, confidence: 1 },
+    });
+    const markdown = new MarkdownRecordStore({ rootDir: services.dataRoot });
+    const resolution = services.routingInbox.resolve(recordId, target, (record) => markdown.append(record));
+    services.reindex({ repair: false });
+    response.status(201).json({ resolution, record: target });
+  });
+
   /**
    * Automatic capture is the default Host path.  The request contains only
    * workspace/evidence; Brain selection happens from the daemon-owned mount
@@ -408,17 +672,67 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
       response.status(401).json({ error: 'unauthorized' });
       return;
     }
-    const catalog = captureCatalog(services.brains, installation.id);
+    const runtimeSessionId = input.sessionId ?? input.source.conversationId;
+    const runtimeTurnId = input.turnId ?? input.source.messageId;
+    let captureInput = input;
+    let approvalConsumed = false;
+    if (services.runtime !== undefined && input.actor === 'user' && runtimeSessionId !== undefined && runtimeTurnId !== undefined) {
+      const buffered = await services.runtime.read({ installationId: installation.id, sessionId: runtimeSessionId, turnId: runtimeTurnId });
+      if (buffered !== undefined) {
+        const resolution = await resolveApproval({
+          finalAnswer: buffered.finalAnswer,
+          approval: input.rawContent,
+          finalCapturedAt: buffered.savedAt,
+        });
+        if (resolution.status === 'rejected') {
+          const now = new Date().toISOString();
+          response.status(201).json({ receipt: CaptureReceiptSchema.parse({
+            captureId: resolution.approvalKey,
+            sourceReference: input.source.reference ?? resolution.approvalKey,
+            status: 'rejected',
+            atoms: [],
+            createdAt: now,
+            updatedAt: now,
+          }) });
+          return;
+        }
+        if (resolution.status === 'active' && resolution.content !== undefined) {
+          // A short approval authorizes the buffered final; it is the
+          // authorized text, not the word "可以", that enters atomization.
+          captureInput = { ...input, captureId: resolution.approvalKey, rawContent: resolution.content, actor: 'user' };
+          approvalConsumed = true;
+        }
+      }
+    }
+    const redaction = redactSensitiveText(captureInput.rawContent);
+    if (redaction.detected) {
+      const now = new Date().toISOString();
+      response.status(201).json({ receipt: CaptureReceiptSchema.parse({
+        captureId: captureInput.captureId,
+        sourceReference: captureInput.source.reference ?? captureInput.captureId,
+        status: 'rejected',
+        atoms: [],
+        createdAt: now,
+        updatedAt: now,
+      }) });
+      return;
+    }
+    const safeInput = { ...captureInput, rawContent: redaction.redacted };
+    const catalog = captureCatalog(services, installation.id, safeInput.workspacePath);
     const plan = await planCapture({
-      captureId: input.captureId,
-      rawContent: redactSensitiveText(input.rawContent).redacted,
-      eventType: input.eventType,
-      source: redactEventSource(input.source),
-      actor: input.actor,
+      captureId: safeInput.captureId,
+      rawContent: redaction.redacted,
+      eventType: safeInput.eventType,
+      source: redactEventSource(safeInput.source),
+      actor: safeInput.actor,
+      ...(approvalConsumed ? { authorized: true } : {}),
       catalog,
     });
     const semantic = services.semantic ?? new SemanticMemoryService({ journal: services.journal, store: services.store });
-    const receipt = await persistAutomaticCapture(services, semantic, input, plan.atoms, installation.id);
+    const receipt = await persistAutomaticCapture(services, semantic, safeInput, plan.receipt.sourceReference, plan.atoms, installation.id);
+    if (services.runtime !== undefined && approvalConsumed && receipt.status !== 'rejected' && receipt.status !== 'failed' && runtimeSessionId !== undefined && runtimeTurnId !== undefined) {
+      await services.runtime.clearAfterCapture({ installationId: installation.id, sessionId: runtimeSessionId, turnId: runtimeTurnId }, 'saved');
+    }
     response.status(201).json({ receipt: CaptureReceiptSchema.parse(receipt) });
   });
 
@@ -632,6 +946,34 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     response.json({ memories });
   });
 
+  app.delete('/v1/memories/:memoryId', requireAdapter, (request, response) => {
+    const { memoryId } = MemoryParametersSchema.parse(request.params);
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const brainIds = writableBrainIds(services.brains, installation.id);
+    const memory = services.store.get(memoryId, brainIds);
+    if (memory === undefined) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    try {
+      const forgotten = services.store.forget(memoryId, {
+        actor: installation.clientType,
+        reason: 'Explicit forget request from the authenticated adapter.',
+      }, [memory.brainId]);
+      response.status(201).json({ memory: forgotten, status: 'forgotten' });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('markdown_authority')) {
+        response.status(503).json({ error: 'markdown_authority_required' });
+        return;
+      }
+      throw error;
+    }
+  });
+
   app.get('/v1/memories/search', requireAdapter, (request, response) => {
     const { q } = SearchQuerySchema.parse(request.query);
     const installation = authenticatedInstallation(response);
@@ -653,29 +995,47 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
       response.status(401).json({ error: 'unauthorized' });
       return;
     }
-    const { requestedBrainIds, ...contextInput } = ResolveContextRequestSchema.parse(request.body);
-    const mountedBrainIds = contextBrainIds(services.brains, installation.id);
-    const brainIds = requestedBrainIds === undefined ? mountedBrainIds : [...new Set(requestedBrainIds)];
-    if (brainIds.length === 0 || brainIds.some((brainId) => !mountedBrainIds.includes(brainId))) {
-      response.status(403).json({ error: 'forbidden' });
-      return;
-    }
-    const context = services.resolver.resolve({ ...contextInput, brainIds });
-    try {
-      services.outcomes.issueReceipt({
-        traceId: context.traceId,
-        agentId: installation.id,
-        brainIds,
-        sourceMemoryIds: context.explanation.sourceMemoryIds,
-      });
-    } catch (error) {
-      if (error instanceof OutcomeReceiptRateLimitError) {
-        response.status(429).json({ error: 'rate_limited' });
+    const input = ResolveContextRequestSchema.parse(request.body);
+    const legacyRequest = request.get('x-memlume-protocol-version') === undefined;
+    if (legacyRequest) {
+      const mountedBrainIds = contextBrainIds(services.brains, installation.id);
+      const requestedBrainIds = input.requestedBrainIds;
+      const brainIds = requestedBrainIds === undefined ? mountedBrainIds : [...new Set(requestedBrainIds)];
+      if (brainIds.length === 0 || brainIds.some((brainId) => !mountedBrainIds.includes(brainId))) {
+        response.status(403).json({ error: 'forbidden' });
         return;
       }
-      throw error;
+      const { requestedBrainIds: _requested, ...legacyContextInput } = input;
+      const context = services.resolver.resolve({ ...legacyContextInput, brainIds });
+      try {
+        services.outcomes.issueReceipt({ traceId: context.traceId, agentId: installation.id, brainIds, sourceMemoryIds: context.explanation.sourceMemoryIds });
+      } catch (error) {
+        if (!(error instanceof OutcomeReceiptRateLimitError)) throw error;
+      }
+      response.json({ context });
+      return;
     }
-    response.json({ context });
+    const readSet = planServerReadSet(services, installation.id, input);
+    const { workspacePath: _workspacePath, taskId: _taskId, agentType: _agentType, subagentId: _subagentId, childGoal: _childGoal, parentReadSet: _parentReadSet, requestedBrainIds: _requestedBrainIds, ...contextInput } = input;
+    const context = services.resolver.resolve({ ...contextInput, readSet });
+    let feedbackUnavailable = false;
+    try {
+      if (readSet.entries.length > 0) {
+        services.outcomes.issueReceipt({
+          traceId: context.traceId,
+          agentId: installation.id,
+          brainIds: readSet.entries.map(({ brainId }) => brainId),
+          sourceMemoryIds: context.explanation.sourceMemoryIds,
+        });
+      }
+    } catch (error) {
+      if (error instanceof OutcomeReceiptRateLimitError) {
+        feedbackUnavailable = true;
+      } else {
+        throw error;
+      }
+    }
+    response.json({ context, readSet, ...(feedbackUnavailable ? { feedbackUnavailable: true } : {}) });
   });
 
   app.post('/v1/memories/:memoryId/usage', requireAdapter, (request, response) => {
@@ -818,6 +1178,25 @@ function requireAdapterToken(brains: BrainStore): RequestHandler {
     try {
       const agentInstallation: AgentInstallation = brains.authenticateToken(token);
       response.locals.agentInstallation = agentInstallation;
+      const callbackHeader = request.get('x-memlume-callback');
+      const protocolHeader = request.get('x-memlume-protocol-version');
+      const adapterHeader = request.get('x-memlume-adapter-version');
+      const callbackHeadersPresent = callbackHeader !== undefined || protocolHeader !== undefined || adapterHeader !== undefined;
+      if (callbackHeadersPresent) {
+        const callback = AdapterCallbackSchema.safeParse(callbackHeader);
+        const protocolVersion = AdapterProtocolVersionSchema.safeParse(protocolHeader);
+        const adapterVersion = NonEmptyTextSchema.safeParse(adapterHeader);
+        if (!callback.success || !protocolVersion.success || !adapterVersion.success) {
+          response.status(400).json({ error: 'invalid_callback' });
+          return;
+        }
+        brains.recordHeartbeat({
+          agentInstallationId: agentInstallation.id,
+          callback: callback.data,
+          protocolVersion: protocolVersion.data,
+          adapterVersion: adapterVersion.data,
+        });
+      }
       next();
     } catch {
       response.status(401).json({ error: 'unauthorized' });
@@ -843,6 +1222,57 @@ function hasWriteAccess(response: { readonly locals: Record<string, unknown>; st
 function authenticatedInstallation(response: { readonly locals: Record<string, unknown> }): AgentInstallation | undefined {
   const installation = response.locals.agentInstallation;
   return AgentInstallationSchema.safeParse(installation).data;
+}
+
+function planServerReadSet(
+  services: DaemonServices,
+  installationId: string,
+  input: z.infer<typeof ResolveContextRequestSchema>,
+): ReadSet {
+  const mounted = services.brains.listMountedBrains(installationId);
+  const inspections = services.projects?.inspect() ?? [];
+  const inspectionById = new Map(inspections.map((inspection) => [inspection.brain.id, inspection]));
+  const catalog = mounted.map(({ brain, access }) => ({
+    brainId: brain.id,
+    kind: brain.kind,
+    name: brain.name,
+    access,
+    aliases: inspectionById.get(brain.id)?.aliases ?? [],
+  }));
+  const workspaceBindings = input.workspacePath === undefined || services.projects === undefined
+    ? []
+    : services.projects.resolveWorkspace(input.workspacePath);
+  const mountedProjectIds = catalog.filter(({ kind }) => kind === 'project').map(({ brainId }) => brainId);
+  const primaryProjectId = workspaceBindings.find(({ role, brainId }) => role === 'primary' && mountedProjectIds.includes(brainId))?.brainId
+    ?? (input.workspacePath === undefined ? mountedProjectIds[0] : undefined);
+  const linkedProjectIds = workspaceBindings
+    .filter(({ role, brainId }) => role === 'linked' && mountedProjectIds.includes(brainId))
+    .map(({ brainId }) => brainId)
+    .filter((brainId) => brainId !== primaryProjectId);
+  const fallbackLinked = input.workspacePath === undefined
+    ? mountedProjectIds.filter((brainId) => brainId !== primaryProjectId)
+    : [];
+  const personalBrainId = catalog.find(({ kind }) => kind === 'personal')?.brainId;
+  const probe = [input.task ?? '', input.intent, ...(input.entities ?? [])].join(' ').trim();
+  const personalRelevant = personalBrainId !== undefined && (
+    /\b(?:my|mine|personal|user|preference|習慣|偏好|我)\b/iu.test(probe)
+    || (probe.length > 0 && services.store.search(probe, { brainIds: [personalBrainId], status: 'active' }).length > 0)
+  );
+  const agentType = (input.agentType ?? services.brains.listInstallations().find(({ id }) => id === installationId)?.clientType ?? '').toLocaleLowerCase();
+  const primaryOnly = input.subagentId !== undefined
+    && (agentType === 'codex' || agentType === 'claude-code')
+    && (input.childGoal === undefined || input.childGoal === null || input.childGoal.trim() === '');
+  return ReadSetSchema.parse(planReadSet({
+    ...(input.workspacePath === undefined ? {} : { workspaceKey: input.workspacePath }),
+    task: input.childGoal ?? input.task,
+    entities: input.entities,
+    brains: catalog,
+    primaryProjectId,
+    linkedProjectIds: linkedProjectIds.length > 0 ? linkedProjectIds : fallbackLinked,
+    ...(personalBrainId === undefined ? {} : { personalBrainId, personalRelevant }),
+    ...(input.parentReadSet === undefined ? {} : { parentGrant: input.parentReadSet }),
+    ...(primaryOnly ? { primaryOnly: true } : {}),
+  }));
 }
 
 function contextBrainIds(brains: BrainStore, agentInstallationId: string): string[] {
@@ -911,32 +1341,77 @@ function tokensMatch(expected: string, actual: string | undefined): boolean {
 
 const inferenceClientTypes = new Set(['hermes', 'codex', 'openclaw', 'claude-code']);
 
-function captureCatalog(brains: BrainStore, installationId: string): readonly {
+type CaptureCatalogEntry = {
   readonly brainId: string;
   readonly kind: 'personal' | 'project';
   readonly role: 'personal' | 'primary' | 'linked';
   readonly access: 'read' | 'read_write';
   readonly name: string;
-}[] {
-  const mounted = brains.listMountedBrains(installationId);
+  readonly aliases?: readonly string[];
+  readonly keys?: readonly string[];
+};
+
+function captureCatalog(services: DaemonServices, installationId: string, workspacePath?: string): readonly CaptureCatalogEntry[] {
+  const mounted = services.brains.listMountedBrains(installationId);
+  const inspections = new Map((services.projects?.inspect() ?? []).map((inspection) => [inspection.brain.id, inspection]));
+  const workspaceBindings = workspacePath === undefined || services.projects === undefined
+    ? []
+    : services.projects.resolveWorkspace(workspacePath);
+  const workspaceByBrain = new Map(workspaceBindings.map((binding) => [binding.brainId, binding]));
   let primaryAssigned = false;
-  return mounted.map(({ brain, access }) => {
+  const catalog: CaptureCatalogEntry[] = [];
+  for (const { brain, access } of mounted) {
     if (brain.kind === 'personal') {
-      return { brainId: brain.id, kind: brain.kind, role: 'personal' as const, access, name: brain.name };
+      catalog.push({ brainId: brain.id, kind: brain.kind, role: 'personal', access, name: brain.name });
+      continue;
     }
-    const role = primaryAssigned ? 'linked' as const : 'primary' as const;
-    primaryAssigned = true;
-    return { brainId: brain.id, kind: brain.kind, role, access, name: brain.name };
-  });
+    const binding = workspaceByBrain.get(brain.id);
+    // A workspace-aware capture must never write a project that is merely
+    // mounted for another workspace.  It remains available to explicit
+    // context reads through that workspace's ReadSet instead.
+    if (workspacePath !== undefined && binding === undefined) continue;
+    const role: CaptureCatalogEntry['role'] = binding?.role ?? (primaryAssigned ? 'linked' : 'primary');
+    primaryAssigned ||= role === 'primary';
+    const effectiveAccess = binding?.access === 'read' || access === 'read' ? 'read' as const : 'read_write' as const;
+    const inspection = inspections.get(brain.id);
+    catalog.push({
+      brainId: brain.id,
+      kind: brain.kind,
+      role,
+      access: effectiveAccess,
+      name: brain.name,
+      ...(inspection === undefined ? {} : { aliases: inspection.aliases, keys: inspection.keys.map((key) => key.canonicalValue) }),
+    });
+  }
+  return catalog;
+}
+
+function currentAdapterVersion(_clientType: string): { readonly protocolVersion: string; readonly adapterVersion: string } {
+  return { protocolVersion: '1', adapterVersion: '0.3.0' };
+}
+
+function projectNameFromWorkspace(workspacePath: string): string {
+  const normalized = workspacePath.replace(/[\\/]+$/u, '');
+  const name = normalized.split(/[\\/]/u).filter(Boolean).at(-1);
+  return name === undefined || name.trim() === '' ? 'Project' : name;
 }
 
 async function persistAutomaticCapture(
   services: DaemonServices,
   semantic: SemanticMemoryService,
   input: z.infer<typeof AutomaticCaptureRequestSchema>,
+  sourceReference: string,
   atoms: readonly AtomPlan[],
   installationId: string,
 ): Promise<CaptureReceipt> {
+  const existing = services.database.prepare('SELECT capture_sources.source_reference AS source_reference, capture_sources.content_hash AS content_hash, capture_receipts.receipt_json AS receipt_json FROM capture_sources JOIN capture_receipts USING (capture_id) WHERE capture_sources.capture_id = ?').get(input.captureId) as { source_reference: string; content_hash: string; receipt_json: string } | undefined;
+  const contentHash = createHash('sha256').update(input.rawContent).digest('hex');
+  if (existing !== undefined) {
+    if (existing.source_reference !== sourceReference || existing.content_hash !== contentHash) {
+      throw new Error('identity_conflict: capture content differs for the same captureId.');
+    }
+    return CaptureReceiptSchema.parse(JSON.parse(existing.receipt_json));
+  }
   const atomMemoryIds = new Map<string, string>();
   for (const atom of atoms) {
     if (atom.route.status === 'routing_required') {
@@ -988,14 +1463,34 @@ async function persistAutomaticCapture(
     }).memory;
     if (memory !== undefined) atomMemoryIds.set(atom.atomKey, memory.id);
   }
-  const receipt = { ...servicesReceiptForAtoms(atoms, input.captureId), atoms: servicesReceiptForAtoms(atoms, input.captureId).atoms.map((atom) => {
+  const baseReceipt = servicesReceiptForAtoms(atoms, input.captureId, sourceReference);
+  const receipt = { ...baseReceipt, atoms: baseReceipt.atoms.map((atom) => {
     const memoryId = atomMemoryIds.get(atom.atomKey);
     return memoryId === undefined ? atom : { ...atom, memoryId };
   }) };
-  return CaptureReceiptSchema.parse(receipt);
+  const parsedReceipt = CaptureReceiptSchema.parse(receipt);
+  const now = new Date().toISOString();
+  services.database.transaction(() => {
+    services.database.prepare(`
+      INSERT INTO capture_sources (capture_id, source_reference, actor, event_type, sanitized_content, content_hash, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(input.captureId, sourceReference, input.actor ?? 'user', input.eventType, input.rawContent, contentHash, now);
+    const insertAtom = services.database.prepare(`
+      INSERT INTO capture_atoms (capture_id, atom_key, status, brain_id, memory_id, record_id, reason, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const atom of parsedReceipt.atoms) {
+      insertAtom.run(input.captureId, atom.atomKey, atom.status, atom.brainId ?? null, atom.memoryId ?? null, atom.recordId ?? null, atom.reason ?? null, now, now);
+    }
+    services.database.prepare(`
+      INSERT INTO capture_receipts (capture_id, source_reference, status, receipt_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(input.captureId, sourceReference, parsedReceipt.status, JSON.stringify(parsedReceipt), now, now);
+  })();
+  return parsedReceipt;
 }
 
-function servicesReceiptForAtoms(atoms: readonly AtomPlan[], captureId: string): CaptureReceipt {
+function servicesReceiptForAtoms(atoms: readonly AtomPlan[], captureId: string, sourceReference: string): CaptureReceipt {
   const now = new Date().toISOString();
   const receiptAtoms = atoms.map((atom) => ({
     atomKey: atom.atomKey,
@@ -1005,7 +1500,7 @@ function servicesReceiptForAtoms(atoms: readonly AtomPlan[], captureId: string):
   }));
   return CaptureReceiptSchema.parse({
     captureId,
-    sourceReference: captureId,
+    sourceReference,
     status: aggregateCaptureStatus(receiptAtoms.map((atom) => atom.status)),
     atoms: receiptAtoms,
     createdAt: now,
@@ -1085,6 +1580,11 @@ const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => 
     return;
   }
 
+  if (error instanceof Error && error.message.startsWith('identity_conflict:')) {
+    response.status(409).json({ error: 'identity_conflict' });
+    return;
+  }
+
   if (error instanceof OutcomeMemoryAccessError) {
     response.status(403).json({ error: 'forbidden' });
     return;
@@ -1122,4 +1622,8 @@ function isPayloadTooLargeError(error: unknown): boolean {
 
   const { status, type } = error as { readonly status?: unknown; readonly type?: unknown };
   return status === 413 && type === 'entity.too.large';
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }

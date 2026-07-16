@@ -487,7 +487,7 @@ describe('localhost daemon API', () => {
 
     const { response, body } = await requestJson(daemon, '/v1/health');
     expect(response.status).toBe(200);
-    expect(body).toEqual({ status: 'ok' });
+    expect(body).toEqual({ status: 'ok', service: 'memlume' });
   });
 
   test('serves the built Console and its browser routes from the loopback daemon', async () => {

@@ -93,8 +93,16 @@ export class ContextResolver {
       : new Map<string, number>();
     const compareWithFeedback = (left: MemoryItem, right: MemoryItem): number =>
       (feedbackScores.get(right.id) ?? 0) - (feedbackScores.get(left.id) ?? 0) || compareContextMemory(left, right);
+    const readSetProjectBrainIds = plannedReadSet === undefined
+      ? undefined
+      : new Set(
+        plannedReadSet.entries
+          .filter(({ role }) => role === 'primary' || role === 'linked')
+          .map(({ brainId }) => brainId),
+      );
     const applicable = this.store
-      .findApplicable(scope, { status: 'active', brainIds })
+      .list({ status: 'active', brainIds })
+      .filter((memory) => isReadSetScopeApplicable(memory, scope, readSetProjectBrainIds))
       .filter((memory) => isCurrentlyValid(memory, today))
       .sort(compareWithFeedback);
     const policies = applicable
@@ -126,7 +134,7 @@ export class ContextResolver {
         return data.success && (data.data.contexts === undefined || data.data.contexts.includes(intent));
       })
       .map(toPreference);
-    const facts = findFacts(this.store, input.task, scope, today, brainIds, compareWithFeedback);
+    const facts = findFacts(this.store, input.task, scope, today, brainIds, compareWithFeedback, readSetProjectBrainIds);
     const decisions = applicable.filter((memory) => memory.kind === 'decision').map(toDecision);
 
     const pack = {
@@ -196,6 +204,7 @@ function findFacts(
   today: string,
   brainIds: readonly string[],
   compare: (left: MemoryItem, right: MemoryItem) => number,
+  readSetProjectBrainIds?: ReadonlySet<string>,
 ): ContextKnowledge[] {
   if (task === null || !/[\p{L}\p{N}_]/u.test(task)) {
     return [];
@@ -203,10 +212,36 @@ function findFacts(
 
   return store
     .search(task, { status: 'active', kinds: ['fact'], brainIds })
-    .filter((memory) => isScopeApplicable(memory.scope, scope))
+    .filter((memory) => isReadSetScopeApplicable(memory, scope, readSetProjectBrainIds))
     .filter((memory) => isCurrentlyValid(memory, today))
     .sort(compare)
     .map(toKnowledge);
+}
+
+/**
+ * A v0.3 ReadSet is the daemon's explicit grant for automatic workspace
+ * reads.  Hosts commonly send `scope: global` because they do not know the
+ * project UUID; a granted primary/linked project Brain must nevertheless be
+ * allowed to contribute its own project-scoped memories.  Without this
+ * exception the ReadSet grants the Brain but the scope filter silently drops
+ * every project record.  Legacy requests (without a ReadSet) retain the
+ * original strict scope semantics.
+ */
+function isReadSetScopeApplicable(
+  memory: MemoryItem,
+  requestedScope: MemoryScope,
+  readSetProjectBrainIds: ReadonlySet<string> | undefined,
+): boolean {
+  if (isScopeApplicable(memory.scope, requestedScope)) {
+    return true;
+  }
+  return (
+    readSetProjectBrainIds !== undefined &&
+    requestedScope.level === 'global' &&
+    memory.scope.level === 'project' &&
+    memory.scope.projectId === memory.brainId &&
+    readSetProjectBrainIds.has(memory.brainId)
+  );
 }
 
 function toDirective(policy: ApplicablePolicy, forceMandatory = false): ContextDirective {

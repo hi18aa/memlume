@@ -36,6 +36,7 @@ async function handle(input) {
 
   if (input.hook_event_name === 'UserPromptSubmit') return beforePrompt(input, configuration);
   if (input.hook_event_name === 'SubagentStart') return beforeSubagent(input, configuration);
+  if (input.hook_event_name === 'Stop') return assistantFinal(input, configuration);
   return {};
 }
 
@@ -43,17 +44,22 @@ async function beforePrompt(input, configuration) {
   const prompt = text(input.prompt);
   if (prompt === undefined) return {};
   const client = await createClient(configuration);
+  const turnId = text(input.turn_id);
   const message = {
     messageId: messageId('user', configuration.envelope.sessionId, prompt),
+    ...(turnId === undefined ? {} : { turnId }),
     content: prompt,
-    brainId: configuration.brainId,
-    scope: configuration.scope,
+    ...(configuration.brainId === undefined ? {} : { brainId: configuration.brainId }),
+    ...(configuration.scope === undefined ? {} : { scope: configuration.scope }),
   };
   const context = await client.beforeTask({
+    envelope: configuration.envelope,
     intent: 'shared_memory',
     scope: configuration.scope,
     task: prompt,
     contextBudget: CONTEXT_BUDGET,
+    workspacePath: configuration.envelope.workspacePath,
+    agentType: 'claude-code',
   });
   // Read the previous Brain state before enqueueing this turn, so it cannot self-inject.
   backgroundWrite('capture', configuration.envelope, message);
@@ -66,6 +72,7 @@ async function beforePrompt(input, configuration) {
 async function beforeSubagent(input, configuration) {
   const client = await createClient(configuration);
   const subagentId = text(input.agent_id);
+  const childGoal = text(input.child_goal) ?? text(input.goal);
   const context = await client.onSubagentStart({
     envelope: configuration.envelope,
     parentTaskId: configuration.envelope.sessionId,
@@ -74,12 +81,27 @@ async function beforeSubagent(input, configuration) {
     scope: configuration.scope,
     task: null,
     contextBudget: CONTEXT_BUDGET,
-    requestedBrainIds: [configuration.brainId],
+    ...(automaticConfiguration(configuration) ? {
+      workspacePath: configuration.envelope.workspacePath,
+      agentType: 'claude-code',
+      ...(childGoal === undefined ? {} : { childGoal }),
+    } : {}),
+    ...(configuration.brainId === undefined ? {} : { requestedBrainIds: [configuration.brainId] }),
   });
   const additionalContext = compactContext(context);
   return additionalContext === undefined
     ? {}
     : { hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext } };
+}
+
+async function assistantFinal(input, configuration) {
+  if (configuration.brainId !== undefined || configuration.envelope.projectId !== undefined) return {};
+  const turnId = text(input.turn_id);
+  const finalAnswer = text(input.last_assistant_message);
+  if (turnId === undefined || finalAnswer === undefined) return {};
+  const client = await createClient(configuration);
+  await client.recordAssistantFinal(configuration.envelope, { turnId, finalAnswer });
+  return {};
 }
 
 async function handleBackgroundWrite(input) {
@@ -101,6 +123,7 @@ function backgroundWrite(operation, envelope, message) {
   });
   child.stdin.on('error', () => undefined);
   child.stdin.end(JSON.stringify({ operation, envelope, ...(message === undefined ? {} : { message }) }));
+  child.stdin.unref?.();
   child.unref();
 }
 
@@ -110,13 +133,13 @@ function configurationFor(input) {
   const projectId = environmentText('CLAUDE_PLUGIN_OPTION_PROJECT_ID');
   const brainId = environmentText('CLAUDE_PLUGIN_OPTION_BRAIN_ID');
   const sessionId = text(input.session_id);
-  if (installationId === undefined || profileId === undefined || projectId === undefined || brainId === undefined || sessionId === undefined || !uuidV7.test(brainId)) return undefined;
+  if (installationId === undefined || profileId === undefined || sessionId === undefined) return undefined;
   const workspacePath = environmentText('CLAUDE_PLUGIN_OPTION_WORKSPACE_PATH') ?? text(input.cwd);
   const envelope = {
     clientType: 'claude-code',
     installationId,
     profileId,
-    projectId,
+    ...(projectId === undefined ? {} : { projectId }),
     sessionId,
     ...(workspacePath === undefined ? {} : { workspacePath }),
   };
@@ -124,19 +147,20 @@ function configurationFor(input) {
 }
 
 function configurationFromEnvelope(envelope, brainId = environmentText('CLAUDE_PLUGIN_OPTION_BRAIN_ID')) {
-  if (!isRecord(envelope) || brainId === undefined || !uuidV7.test(brainId)) return undefined;
+  if (!isRecord(envelope)) return undefined;
   const installationId = text(envelope.installationId);
   const profileId = text(envelope.profileId);
   const projectId = text(envelope.projectId);
   const sessionId = text(envelope.sessionId);
-  if (envelope.clientType !== 'claude-code' || installationId === undefined || profileId === undefined || projectId === undefined || sessionId === undefined) return undefined;
+  if (envelope.clientType !== 'claude-code' || installationId === undefined || profileId === undefined || sessionId === undefined) return undefined;
   return {
     envelope: {
-      clientType: 'claude-code', installationId, profileId, projectId, sessionId,
+      clientType: 'claude-code', installationId, profileId, sessionId,
+      ...(projectId === undefined ? {} : { projectId }),
       ...(text(envelope.workspacePath) === undefined ? {} : { workspacePath: text(envelope.workspacePath) }),
     },
-    brainId,
-    scope: { level: 'project', projectId },
+    ...(brainId !== undefined && uuidV7.test(brainId) ? { brainId } : {}),
+    ...(projectId === undefined ? { scope: { level: 'global' } } : { scope: { level: 'project', projectId } }),
     daemonUrl: environmentText('CLAUDE_PLUGIN_OPTION_DAEMON_URL') ?? 'http://127.0.0.1:3849',
     token: environmentText('CLAUDE_PLUGIN_OPTION_ADAPTER_TOKEN'),
     outboxDirectory: environmentText('CLAUDE_PLUGIN_DATA'),
@@ -180,6 +204,10 @@ function collectText(lines, values, key) {
 function messageId(kind, sessionId, content) {
   const digest = createHash('sha256').update(content).digest('hex').slice(0, 24);
   return `claude-code:${sessionId}:${kind}:${digest}`;
+}
+
+function automaticConfiguration(configuration) {
+  return configuration.brainId === undefined && configuration.envelope.projectId === undefined;
 }
 
 function environmentText(name) {

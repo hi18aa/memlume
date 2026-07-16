@@ -10,6 +10,7 @@ import {
   type ContextPack,
   type MemoryItem,
   type MemoryScope,
+  type ReadSet,
 } from '@memlume/contracts';
 import { openDatabase, type SqliteDatabase } from '@memlume/database/internal';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -54,6 +55,7 @@ type ContextResolverConstructor = new (store: MemoryStore, outcomes?: OutcomeSto
     readonly brainIds?: readonly string[];
     readonly entities?: readonly string[];
     readonly availableTools?: readonly string[];
+    readonly readSet?: ReadSet;
   }): ContextPack;
 };
 
@@ -779,6 +781,34 @@ describe('ContextResolver', () => {
     ]);
     expect(pack.decisions).toEqual([{ memoryId: decision.id, brainId: decision.brainId, text: decision.canonicalText }]);
     expect(pack.explanation.sourceMemoryIds).toEqual(expect.arrayContaining([preference.id, fact.id, decision.id]));
+  });
+
+  test('allows a granted project Brain to answer a global automatic workspace read', () => {
+    const { database, store, resolver } = createResolver();
+    const projectBrainId = createUuidV7();
+    insertBrain(database, projectBrainId, 'project', 'Memlume');
+    const fact = store.save({
+      brainId: projectBrainId,
+      kind: 'fact',
+      canonicalText: 'This project uses Vue for its frontend.',
+      structuredData: { subject: 'project', predicate: 'frontend', object: 'Vue', confidence: 1 },
+      scope: { level: 'project', projectId: projectBrainId },
+    });
+
+    const pack = resolver.resolve({
+      intent: 'implementation',
+      scope: { level: 'global' },
+      task: 'implement the Vue frontend',
+      contextBudget: 100,
+      readSet: {
+        entries: [{ brainId: projectBrainId, role: 'primary', access: 'read', reason: 'workspace primary project' }],
+        exclusions: [],
+      },
+    });
+
+    expect(pack.knowledge).toEqual([
+      { memoryId: fact.id, brainId: projectBrainId, title: fact.canonicalText, summary: fact.canonicalText },
+    ]);
   });
 
   test('keeps mandatory directives when the explicit context budget is too small', () => {

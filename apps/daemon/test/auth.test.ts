@@ -185,7 +185,7 @@ describe('daemon local authentication and setup API', () => {
 
     const health = await requestJson(daemon, '/v1/health');
     expect(health.response.status).toBe(200);
-    expect(health.body).toEqual({ status: 'ok' });
+    expect(health.body).toEqual({ status: 'ok', service: 'memlume' });
   });
 
   test('does not enable setup routes when no setup token was configured', async () => {

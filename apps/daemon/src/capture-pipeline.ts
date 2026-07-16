@@ -7,6 +7,8 @@ export interface CapturePipelineInput extends Omit<CompileCaptureInput, 'capture
   readonly captureId: string;
   readonly catalog: readonly BrainCatalogEntry[];
   readonly now?: string;
+  /** Marks an assistant final that a user explicitly approved. */
+  readonly authorized?: boolean;
 }
 
 export interface CapturePipelineResult {
@@ -35,7 +37,7 @@ export async function planCapture(input: CapturePipelineInput): Promise<CaptureP
   if (compilation.atoms.length > 0) {
     for (const atom of compilation.atoms) {
       const route = routeAtom({ atom, catalog: input.catalog });
-      const status = activationPolicy({ atom, route: route.status });
+      const status = activationPolicy({ atom, route: route.status, authorized: input.authorized });
       atomPlans.push({
         route,
         atomKey: atom.atomKey,

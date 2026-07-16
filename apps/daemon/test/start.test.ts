@@ -115,6 +115,7 @@ describe('memlume daemon start entrypoint', () => {
     expect(daemon.address.address).toBe('127.0.0.1');
     await expect(fetch(`http://127.0.0.1:${daemon.address.port}/v1/health`).then((response) => response.json())).resolves.toEqual({
       status: 'ok',
+      service: 'memlume',
     });
 
     await daemon.stop();
@@ -161,7 +162,7 @@ describe('memlume daemon start entrypoint', () => {
     });
 
     const port = await waitForListening(child);
-    await expect(fetch(`http://127.0.0.1:${port}/v1/health`).then((response) => response.json())).resolves.toEqual({ status: 'ok' });
+    await expect(fetch(`http://127.0.0.1:${port}/v1/health`).then((response) => response.json())).resolves.toEqual({ status: 'ok', service: 'memlume' });
     expect(existsSync(join(workingDirectory, 'data', 'memlume.sqlite'))).toBe(true);
 
     child.kill('SIGTERM');

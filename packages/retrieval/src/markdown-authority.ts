@@ -6,7 +6,9 @@ import {
   createUuidV7,
   redactSensitiveJson,
   redactSensitiveText,
+  TombstoneRecordSchema,
   type MemoryItem,
+  type TombstoneRecord,
   type MemoryScope,
   type MemoryStatus,
   type JsonValue,
@@ -17,6 +19,7 @@ import { MarkdownRecordStore, scanMarkdownRecords } from '@memlume/shared-brains
 import { RecordProjector } from './record-projector.js';
 import { SourceEventBrainMismatchError } from './search.js';
 import type {
+  ForgetMemoryInput,
   MemoryWriteAuthority,
   ReviewCandidateInput,
   SaveMemoryInput,
@@ -125,6 +128,35 @@ export class MarkdownMemoryAuthority implements MemoryWriteAuthority {
     return this.requireMemory(rejected.id, [rejected.brainId]);
   }
 
+  forget(id: string, input: ForgetMemoryInput, brainIds?: readonly string[]): MemoryItem {
+    const allowedBrainIds = normalizeBrainIds(brainIds);
+    const existing = this.requireMemory(id, allowedBrainIds);
+    if (existing.status === 'superseded' || existing.status === 'rejected') return existing;
+    const now = new Date().toISOString();
+    const latestRecord = this.database
+      .prepare('SELECT record_id FROM record_projections WHERE memory_id = ? ORDER BY projected_at DESC, rowid DESC LIMIT 1')
+      .get(existing.id) as { record_id: string } | undefined;
+    if (latestRecord === undefined) throw new Error(`markdown_authority_missing: no record projection for memory ${existing.id}.`);
+    const tombstone = TombstoneRecordSchema.parse({
+      schemaVersion: '0.3',
+      recordType: 'tombstone',
+      recordId: createUuidV7(),
+      memoryId: existing.id,
+      brainId: existing.brainId,
+      status: 'superseded',
+      kind: existing.kind,
+      createdAt: now,
+      updatedAt: now,
+      captureId: existing.sourceEventId ?? existing.id,
+      atomKey: `forget:${existing.id}`,
+      supersedesRecordId: UuidV7Schema.parse(latestRecord.record_id),
+      reason: safeText(input.reason),
+    });
+    this.persistRecord(tombstone);
+    this.appendVersion(existing, safeText(input.actor), safeText(input.reason), now);
+    return this.requireMemory(existing.id, [existing.brainId]);
+  }
+
   update(id: string, input: UpdateMemoryInput, brainIds?: readonly string[]): MemoryItem {
     const existing = this.requireMemory(id, normalizeBrainIds(brainIds));
     if (!isManualMemoryKind(existing.kind) || existing.status !== 'active') {
@@ -198,7 +230,7 @@ export class MarkdownMemoryAuthority implements MemoryWriteAuthority {
     );
   }
 
-  private persistRecord(record: ReturnType<typeof memoryRecord>): boolean {
+  private persistRecord(record: ReturnType<typeof memoryRecord> | TombstoneRecord): boolean {
     this.records.ensureBrainDocument(record.brainId);
     this.records.append(record);
     const scanned = scanMarkdownRecords(this.recordsRoot()).find((item) => item.record.recordId === record.recordId);

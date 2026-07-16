@@ -35,7 +35,8 @@ export const AdapterEnvelopeSchema = z.object({
   installationId: NonEmptyTextSchema,
   profileId: NonEmptyTextSchema,
   sessionId: NonEmptyTextSchema,
-  projectId: NonEmptyTextSchema,
+  /** Deprecated v0.2 hint; v0.3 routing is daemon-owned. */
+  projectId: NonEmptyTextSchema.optional(),
   workspacePath: NonEmptyTextSchema.optional(),
 });
 export type AdapterEnvelope = z.infer<typeof AdapterEnvelopeSchema>;

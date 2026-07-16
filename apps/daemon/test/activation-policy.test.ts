@@ -6,6 +6,7 @@ describe('activationPolicy', () => {
   test('activates only clear user assertions', () => {
     expect(activationPolicy({ atom: { actor: 'user', confidence: 1, explicitness: 1 }, route: 'routed' })).toBe('active');
     expect(activationPolicy({ atom: { actor: 'assistant', confidence: 1, explicitness: 1 }, route: 'routed' })).toBe('candidate');
+    expect(activationPolicy({ atom: { actor: 'user', confidence: 0.5, explicitness: 0 }, route: 'routed', authorized: true })).toBe('active');
   });
 
   test('keeps events and unknown routes out of active memory', () => {

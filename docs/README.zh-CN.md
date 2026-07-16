@@ -6,7 +6,7 @@
 
 [English](../README.md) | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md)
 
-Memlume 是供 AI Agent 和开发工具使用的本地外部共享记忆大脑。同一台电脑上的已挂载 Client 共用既有的 SQLite 存储区；它记录不可变事件、存储结构化记忆、使用 FTS5 搜索，并为特定任务解析出可追溯的 Context Pack。它补充 Agent 的原生记忆，绝不取代、覆盖或同步回原生记忆。
+Memlume 是供 AI Agent 和开发工具使用的本地外部共享记忆大脑。同一台电脑上的 Hermes、Codex、OpenClaw、Claude Code、MCP Client 与未来 Adapter 可以共用同一个 Brain。Markdown record 是人类可维护的 authority，SQLite 是可搜索的 projection；它记录不可变事件、存储结构化记忆、使用 FTS5 搜索，并为特定任务解析出可追溯的 Context Pack。它补充 Agent 的原生记忆，绝不取代、覆盖或同步回原生记忆。
 
 公开文档：[架构](architecture/shared-brain.md) · [Hermes](guides/hermes.md) · [Codex](guides/codex.md) · [OpenClaw](guides/openclaw.md) · [Claude Code](guides/claude-code.md) · [备份与还原](guides/backup-restore.md) · [共享项目示例](../examples/shared-project-brain/README.md)。
 
@@ -18,15 +18,24 @@ Adapter SDK 共用三个 callback：
 
 | Callback | 用途 |
 | --- | --- |
-| `beforeTask` | 主 Agent 在工作前读取已挂载 Context。默认优先序为 **Project → Domain（Company）→ Personal**；调用端只能请求更小的已授权范围。 |
-| `onUserMessage` | 唯一的自动 capture 入口；将符合条件的用户消息交由 Core 进行治理。 |
-| `onSubagentStart` | 子代理只读取其设定的 Project Brain Context；不会回退到 Domain 或 Personal、不会写入，也不会 flush outbox。 |
+| `beforeTask` | daemon 根据工作区规划 ReadSet，在工作前只注入符合条件的 active Context；Host 不选择 Brain UUID。 |
+| `onUserMessage` | 唯一的自动 capture 入口；Core 会过滤 secret、拆分多主题陈述、路由到 Personal 或工作区 Project Brain，未知项目进入 durable Inbox。 |
+| `onSubagentStart` | 子代理取得受限的只读 ReadSet；不能扩大父代理授权、写入记忆或 flush outbox。 |
 
 Capture 治理：符合条件且非敏感的用户消息会追加为 immutable event。一般陈述可能成为待审核的 `candidate`；“记住”等明确请求可以走 `active` 路径，仍需经过冲突审核。空白或不支持事件会被 ignore，敏感资料会 redacted 或 rejected。
 
-主 Agent 的写入目标依序是：明确指定的 Brain、profile 的 Project Brain、拒绝。Memlume 不会猜测目标，也绝不回退到 Personal。Brain 才是数据归属与权限边界，Hook 只是触发时机。
+v0.3 自动模式由 Host 传送 workspace 与 session 身份，不传 Brain UUID；daemon 负责 Brain routing 与权限。仍支持 v0.2 的明确 Brain 参数以维持兼容，但自动模式不会猜测目标，也不会把未知项目静默写入 Personal。Brain 才是数据归属与权限边界，Hook 只是触发时机。
 
 本地 outbox 仅接受明确记忆 capture；已排队的 capture 会在下一次 `beforeTask` 或 `onUserMessage` 重送。callback 流程不会保存完整 transcript、assistant output、临时推理或秘密资料。
+
+## 何时写入、何时读取
+
+1. **任务开始前**：`beforeTask` 传送 workspace path、task、entities 与 intent，Core 产生 deterministic ReadSet（Primary Project、符合任务的 Linked Project，以及相关 Personal 记忆），只返回 active 且符合 budget 的 Context。
+2. **用户发送消息时**：`onUserMessage` 送出经过本地验证的消息。问候、闲聊、secret 与不支持的 transcript 会被忽略或拒绝；“记住我使用 Vue”等明确要求可在冲突检查后成为 active，一般推论则先是 candidate。
+3. **项目不明确时**：atom 会写入 `inbox/pending` 并标示 `routing_required`，不会猜到其他 Brain；维护者可用明确 Brain 与审计记录后续处理。
+4. **助手产生 final 后**：Adapter 最多将 final 放入 24 小时短期 runtime buffer；用户回复“可以／同意／修正：…”才授权该内容走一般 capture pipeline，批准文字本身不会成为记忆。
+
+因此不需要每次都说“写入 Memlume”；Hook 提供事件，Core 决定是否值得保存、应保存到哪个 Brain，以及何时可安全读回。
 
 ### 各 Host 的子代理能力
 
@@ -60,7 +69,7 @@ Memlume 不会自动保存每一条对话，也不会把整个数据库塞进 LL
 
 ## 状态与范围
 
-此仓库是 `0.2.0` 源码 workspace。目前所有包均为 private；请通过 clone 并构建此仓库的方式使用，不能从公开包 registry 安装。
+此仓库是 `0.3.0` 源码 workspace。目前所有包均为 private；请通过 clone 并构建此仓库的方式使用，不能从公开包 registry 安装。
 
 所有功能都属于 MIT 授权的 Memlume Core。官方网站仅提供下载、安装器、更新与文档入口，不存在功能更强的闭源版本。
 
@@ -77,7 +86,7 @@ Memlume 不会自动保存每一条对话，也不会把整个数据库塞进 LL
 - Hermes、Codex、OpenClaw、Claude Code 的官方本地 Adapter；它们共享同一个已挂载 Brain，不复制 Agent 的原生记忆。
 - Outcome usage、确定性 feedback ranking、retrieval benchmark、公开 guides/examples 与 CI/release 流程。
 
-v0.2.0 尚未实现：
+v0.3.0 尚未实现：
 
 - vector／embedding search、远程同步、云托管、多用户访问。
 - 公开 npm 包。
@@ -121,12 +130,11 @@ $env:MEMLUME_SETUP_TOKEN = '<long-random-secret>'
 pnpm --filter @memlume/daemon start -- --database ./data/memlume.sqlite --port 3849
 ```
 
-建议使用受保护的 `memlume setup adapter`，而不是手动复制 adapter token。它会注册一个本地 Agent installation、以 `read_write` 挂载 Project Brain、进行 loopback 只读 smoke test，并只把 token 留在当前用户的 Memlume 配置中。以下示例也会通过 Codex 官方 Marketplace 流程安装 Plugin：
+建议使用受保护的 `memlume setup adapter`，而不是手动复制 adapter token。v0.3 可以省略 `--project-id` 和 `--brain-id`，改用 `--workspace-path` 让 workspace-owned routing 创建并挂载 Project Brain；命令也会挂载 Personal Brain、进行 loopback 只读 smoke test，并只把 token 留在当前用户的 Memlume 配置中。以下示例也会通过 Codex 官方 Marketplace 流程安装 Plugin：
 
 ```powershell
 node apps/cli/dist/index.js --setup-token $env:MEMLUME_SETUP_TOKEN setup adapter codex `
-  --installation-id codex-desktop --project-id memlume `
-  --brain-id '<project-brain-uuidv7>' --core-path $PWD --install-host --yes
+  --installation-id codex-desktop --workspace-path $PWD --core-path $PWD --install-host --yes
 ```
 
 其他支持的 Host 将 `codex` 换成 `hermes`、`openclaw` 或 `claude-code` 即可。非交互终端必须带 `--yes`，Memlume 才会变更 Host Plugin 配置；交互终端则会先询问。profile 已存在时，可在相同命令加上 `--install-host --dry-run`，只预览不含秘密的 Host 命令而不变更 Host。Codex 与 Claude Code 仍要求用户审阅并信任 hook；Memlume 不会绕过这项平台控制。`memlume doctor` 会列出本地 profile，并进行不输出 token 的只读 Context 检查。
@@ -137,7 +145,7 @@ node apps/cli/dist/index.js --setup-token $env:MEMLUME_SETUP_TOKEN setup adapter
 
 ```sh
 curl http://127.0.0.1:3849/v1/health
-# {"status":"ok"}
+# {"status":"ok","service":"memlume"}
 ```
 
 ## CLI
@@ -226,7 +234,7 @@ MCP 使用 `available_tools`（snake case）；daemon 会收到 `availableTools`
 
 ## 隐私与本地运行
 
-Memlume 将数据保存到 `--database` 指定的 SQLite 文件，默认值为 `data/memlume.sqlite`。v0.2.0 没有远程同步或云服务，daemon 也只绑定 loopback。Adapter API 需要 Bearer Token，setup API 需要 `MEMLUME_SETUP_TOKEN`，而 `/v1/health` 特意保持公开。请勿提交任何真实 token 或粘贴到 log。验证不会加密静态数据库；请用操作系统权限保护它，不要保存不适合放在本地明文 SQLite 文件中的秘密数据。
+Memlume 将 Markdown authority record 与 SQLite projection 保存在 `--database` 指定的数据根目录，默认值为 `data/memlume.sqlite`。v0.3.0 没有远程同步或云服务，daemon 也只绑定 loopback。Runtime buffer 是短期数据，不属于 Brain，也不会进入备份。Adapter API 需要 Bearer Token，setup API 需要 `MEMLUME_SETUP_TOKEN`，而 `/v1/health` 特意保持公开。请勿提交任何真实 token 或粘贴到 log。验证不会加密静态数据库；请用操作系统权限保护它，不要保存不适合放在本地明文 SQLite 文件中的秘密数据。
 
 ## 架构
 
@@ -253,7 +261,7 @@ pnpm benchmark:retrieval
 
 ## 贡献
 
-请保持变更精简；非平凡行为请新增或更新最近的 Vitest coverage，并在创建 pull request 前执行上述命令。请勿将远程存储或 vector search 作为 v0.2.0 的附带变更加入。
+请保持变更精简；非平凡行为请新增或更新最近的 Vitest coverage，并在创建 pull request 前执行上述命令。请勿将远程存储或 vector search 作为 v0.3.0 的附带变更加入。
 
 ## 许可
 

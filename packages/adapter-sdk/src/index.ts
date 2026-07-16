@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 
 import {
   AdapterEnvelopeSchema,
+  CaptureReceiptSchema,
   ContextPackSchema,
   MemoryScopeSchema,
   UuidV7Schema,
@@ -17,6 +18,7 @@ import {
   type ContextPack,
   type JsonValue,
   type MemoryScope,
+  type ReadSet,
 } from '@memlume/contracts';
 
 import { RuntimeState, type RuntimeStateSnapshot } from './runtime-state.js';
@@ -26,9 +28,14 @@ export * from './runtime-state.js';
 
 const REQUEST_TIMEOUT_MS = 10_000;
 export const ADAPTER_PROTOCOL_VERSION = '1';
-export const ADAPTER_VERSION = '0.2.0';
+export const ADAPTER_VERSION = '0.3.0';
 const CONTEXT_REQUEST_TIMEOUT_MS = 250;
-const OUTBOX_FLUSH_GRACE_MS = 50;
+// Give the local JSONL lock/write a short but deterministic window before the
+// context request.  This is still bounded (the read itself has a 250 ms
+// deadline), while avoiding a race where `beforeTask` returns before a
+// targetless legacy entry has been marked for retry.
+const OUTBOX_FLUSH_GRACE_MS = 100;
+const OUTBOX_FLUSH_LOCK_TIMEOUT_MS = 50;
 const OUTBOX_LOCK_RETRY_MS = 10;
 const OUTBOX_LOCK_TIMEOUT_MS = 15_000;
 const OUTBOX_UNAVAILABLE_WARNING = 'Memlume outbox unavailable; event was not persisted.';
@@ -40,8 +47,8 @@ export interface LocalAdapterProfile {
   readonly clientType: string;
   readonly installationId: string;
   readonly profileId: string;
-  readonly projectId: string;
-  readonly brainId: string;
+  readonly projectId?: string;
+  readonly brainId?: string;
   readonly token: string;
   readonly corePath: string;
   readonly daemonUrl: string;
@@ -82,8 +89,8 @@ export function loadLocalAdapterProfile(clientType: string, { configPath, enviro
     ...stored,
     installationId: nonEmptyText(environment.MEMLUME_INSTALLATION_ID) ?? stored.installationId,
     profileId: nonEmptyText(environment.MEMLUME_PROFILE_ID) ?? stored.profileId,
-    projectId: nonEmptyText(environment.MEMLUME_PROJECT_ID) ?? stored.projectId,
-    brainId: nonEmptyText(environment.MEMLUME_BRAIN_ID) ?? stored.brainId,
+    ...(nonEmptyText(environment.MEMLUME_PROJECT_ID) ?? stored.projectId) === undefined ? {} : { projectId: nonEmptyText(environment.MEMLUME_PROJECT_ID) ?? stored.projectId },
+    ...(nonEmptyText(environment.MEMLUME_BRAIN_ID) ?? stored.brainId) === undefined ? {} : { brainId: nonEmptyText(environment.MEMLUME_BRAIN_ID) ?? stored.brainId },
     token: nonEmptyText(environment.MEMLUME_TOKEN) ?? stored.token,
     corePath: nonEmptyText(environment.MEMLUME_HOME) ?? stored.corePath,
     daemonUrl: nonEmptyText(environment.MEMLUME_DAEMON_URL) ?? stored.daemonUrl,
@@ -110,10 +117,16 @@ export interface BeforeTaskInput {
   readonly intent: string;
   readonly scope: MemoryScope;
   readonly task: string | null;
+  readonly taskId?: string;
   readonly contextBudget: number;
   readonly entities?: readonly string[];
   readonly availableTools?: readonly string[];
   readonly requestedBrainIds?: readonly string[];
+  readonly workspacePath?: string;
+  readonly agentType?: string;
+  readonly subagentId?: string;
+  readonly childGoal?: string | null;
+  readonly parentReadSet?: ReadSet;
 }
 
 export interface SubagentStartInput extends BeforeTaskInput {
@@ -123,6 +136,8 @@ export interface SubagentStartInput extends BeforeTaskInput {
 
 export interface AdapterMessage {
   readonly messageId: string;
+  /** Stable host turn identity used to pair a user capture with its final. */
+  readonly turnId?: string;
   readonly content: string;
   readonly brainId?: string;
   readonly scope?: MemoryScope;
@@ -130,7 +145,7 @@ export interface AdapterMessage {
   readonly structuredData?: JsonValue;
 }
 
-export type CapturedMemoryStatus = 'active' | 'candidate' | 'ignore' | 'rejected';
+export type CapturedMemoryStatus = 'active' | 'candidate' | 'event_only' | 'routing_required' | 'queued' | 'ignore' | 'rejected' | 'failed';
 export type WriteResult =
   | { readonly status: 'saved'; readonly memoryStatus?: CapturedMemoryStatus }
   | { readonly status: 'ignored'; readonly memoryStatus: 'ignore' }
@@ -176,9 +191,19 @@ interface CaptureMemoryRequest extends BaseWriteRequest {
   readonly scope: MemoryScope;
 }
 
-type WriteRequest = CaptureMemoryRequest;
+interface AutomaticCaptureRequest extends Omit<BaseWriteRequest, 'brainId' | 'structuredData'> {
+  readonly endpoint: '/v1/capture';
+  readonly captureId: string;
+  readonly actor: 'user' | 'assistant' | 'tool';
+  readonly workspacePath?: string;
+  readonly sessionId?: string;
+  readonly turnId?: string;
+  readonly structuredData?: JsonValue;
+}
+
+type WriteRequest = CaptureMemoryRequest | AutomaticCaptureRequest;
 type DeliveredCaptureMemoryRequest = CaptureMemoryRequest & { readonly brainId: string };
-type DeliveredWriteRequest = DeliveredCaptureMemoryRequest;
+type DeliveredWriteRequest = DeliveredCaptureMemoryRequest | AutomaticCaptureRequest;
 
 interface PendingWrite {
   readonly state: 'pending' | 'retry';
@@ -230,7 +255,7 @@ export class AdapterClient {
       return this.unavailableContext(input);
     }
     this.bindOutbox(input.envelope);
-    await withTimeout(this.flush(), OUTBOX_FLUSH_GRACE_MS).catch(() => undefined);
+    await withTimeout(this.flush(undefined, OUTBOX_FLUSH_LOCK_TIMEOUT_MS), OUTBOX_FLUSH_GRACE_MS).catch(() => undefined);
     return this.resolveContext(input, 'beforeTask');
   }
 
@@ -241,18 +266,19 @@ export class AdapterClient {
     }
     this.bindOutbox(envelope);
     return this.serialize(async () => {
-      const legacyCaptureUpgrade = await this.upgradeMatchingLegacyCapture(request);
+      const legacyRequest = request.endpoint === '/v1/memories/capture' ? request : undefined;
+      const legacyCaptureUpgrade = legacyRequest === undefined ? 'none' : await this.upgradeMatchingLegacyCapture(legacyRequest);
       if (legacyCaptureUpgrade === 'unavailable') {
         this.warn(OUTBOX_UNAVAILABLE_WARNING);
         return { status: 'rejected' };
       }
-      await this.flush(legacyCaptureUpgrade === 'upgraded' ? request : undefined);
+      await this.flush(legacyCaptureUpgrade === 'upgraded' ? legacyRequest : undefined);
       const result = await this.write(request);
       if (legacyCaptureUpgrade === 'upgraded') {
         if (result.status === 'saved' || result.status === 'ignored') {
-          await this.removeMatchingPendingCapture(request);
+          await this.removeMatchingPendingCapture(legacyRequest!);
         } else if (result.status === 'rejected') {
-          await this.discardMatchingPendingCapture(request);
+          await this.discardMatchingPendingCapture(legacyRequest!);
         }
       }
       return result;
@@ -260,20 +286,25 @@ export class AdapterClient {
   }
 
   async onSubagentStart(input: SubagentStartInput): Promise<ContextPack> {
-    const { parentTaskId: _parentTaskId, subagentId: _subagentId, requestedBrainIds, ...beforeTaskInput } = input;
-    const projectBrainId = this.defaultWriteBrainId;
-    if (
-      projectBrainId === undefined ||
-      (requestedBrainIds !== undefined && (
-        !Array.isArray(requestedBrainIds) ||
-        requestedBrainIds.length === 0 ||
-        requestedBrainIds.some((brainId) => brainId !== projectBrainId)
-      )) ||
-      redactSensitiveJson(beforeTaskInput.scope).detected
-    ) {
+    const { parentTaskId, subagentId, childGoal, requestedBrainIds: _requestedBrainIds, ...beforeTaskInput } = input;
+    if (redactSensitiveJson(beforeTaskInput.scope).detected) {
       return this.unavailableContext(beforeTaskInput);
     }
-    return this.resolveContext({ ...beforeTaskInput, requestedBrainIds: [projectBrainId] }, 'onSubagentStart');
+    if (input.envelope?.projectId !== undefined) {
+      const projectBrainId = this.defaultWriteBrainId;
+      if (projectBrainId === undefined || (input.requestedBrainIds !== undefined && (input.requestedBrainIds.length !== 1 || input.requestedBrainIds[0] !== projectBrainId))) {
+        return this.unavailableContext(beforeTaskInput);
+      }
+      return this.resolveContext({ ...beforeTaskInput, requestedBrainIds: [projectBrainId] }, 'onSubagentStart');
+    }
+    return this.resolveContext({
+      ...beforeTaskInput,
+      task: childGoal ?? beforeTaskInput.task ?? parentTaskId,
+      taskId: beforeTaskInput.taskId ?? parentTaskId,
+      subagentId: subagentId ?? input.subagentId,
+      childGoal: childGoal ?? null,
+      agentType: input.envelope?.clientType,
+    }, 'onSubagentStart');
   }
 
   /** Internal runtime transport; final text never enters the capture outbox. */
@@ -310,12 +341,22 @@ export class AdapterClient {
   }
 
   private async resolveContext(input: BeforeTaskInput, callback: AdapterCallback): Promise<ContextPack> {
-    const { envelope: _envelope, ...requestInput } = input;
-    if (redactSensitiveJson(requestInput as unknown as JsonValue).detected) {
+    const { envelope, requestedBrainIds: _requestedBrainIds, ...requestInput } = input;
+    const legacyEnvelope = envelope?.projectId !== undefined;
+    const requestBody = {
+      ...requestInput,
+      ...(legacyEnvelope
+        ? (input.requestedBrainIds === undefined ? {} : { requestedBrainIds: input.requestedBrainIds })
+        : {
+            ...(requestInput.workspacePath === undefined && envelope?.workspacePath === undefined ? {} : { workspacePath: requestInput.workspacePath ?? envelope?.workspacePath }),
+            ...(requestInput.agentType === undefined && envelope?.clientType === undefined ? {} : { agentType: requestInput.agentType ?? envelope?.clientType }),
+          }),
+    };
+    if (redactSensitiveJson(requestBody as unknown as JsonValue).detected) {
       return this.unavailableContext(input);
     }
     try {
-      const response = await this.request('/v1/context/resolve', 'POST', requestInput, CONTEXT_REQUEST_TIMEOUT_MS, callback);
+      const response = await this.request('/v1/context/resolve', 'POST', requestBody, CONTEXT_REQUEST_TIMEOUT_MS, callback);
       if (!response.ok) {
         throw new Error('Context request failed.');
       }
@@ -356,13 +397,13 @@ export class AdapterClient {
     }
   }
 
-  private async flush(skipRequest?: DeliveredCaptureMemoryRequest): Promise<readonly WriteResult[]> {
+  private async flush(skipRequest?: DeliveredCaptureMemoryRequest, lockTimeoutMs = OUTBOX_LOCK_TIMEOUT_MS): Promise<readonly WriteResult[]> {
     const outboxPath = this.outboxPath;
     if (outboxPath === undefined) {
       return [];
     }
     try {
-      return await withOutboxLock(outboxPath, () => this.flushLocked(outboxPath, skipRequest));
+      return await withOutboxLock(outboxPath, () => this.flushLocked(outboxPath, skipRequest), lockTimeoutMs);
     } catch {
       return [];
     }
@@ -493,7 +534,7 @@ export class AdapterClient {
             return { status: 'rejected' };
           }
           pending.push({ state: 'pending', retryCount: 0, messageId: request.source.messageId, request });
-        } else if (existing.request.endpoint === '/v1/memories/capture' && nonEmptyText(existing.request.brainId) === undefined) {
+        } else if (request.endpoint === '/v1/memories/capture' && existing.request.endpoint === '/v1/memories/capture' && nonEmptyText(existing.request.brainId) === undefined) {
           pending[pending.indexOf(existing)] = { ...existing, request: { ...existing.request, brainId: request.brainId } };
         }
         await writeOutbox(outboxPath, pending);
@@ -518,7 +559,7 @@ export class AdapterClient {
         'content-type': 'application/json',
         'x-memlume-callback': callback,
         'x-memlume-protocol-version': ADAPTER_PROTOCOL_VERSION,
-        'x-memlume-adapter-version': ADAPTER_VERSION,
+        'x-memlume-adapter-version': isLegacyAdapterBody(body) ? '0.2.0' : ADAPTER_VERSION,
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
@@ -553,6 +594,7 @@ export class AdapterClient {
   }
 
   private deliveryRequest(request: WriteRequest, retryCount: number): DeliveredWriteRequest | undefined {
+    if (request.endpoint === '/v1/capture') return request;
     const brainId = nonEmptyText(request.brainId) ?? this.defaultWriteBrainId;
     if (brainId === undefined) {
       if (retryCount === 0 && !this.warnedAboutLegacyCaptureTarget) {
@@ -665,17 +707,17 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise
   }
 }
 
-function captureRequest(envelope: AdapterEnvelope, message: AdapterMessage, defaultWriteBrainId: string | undefined): DeliveredCaptureMemoryRequest | undefined {
+function captureRequest(envelope: AdapterEnvelope, message: AdapterMessage, defaultWriteBrainId: string | undefined): DeliveredWriteRequest | undefined {
   const parsedEnvelope = AdapterEnvelopeSchema.safeParse(envelope);
   const brainId = nonEmptyText(message.brainId) ?? defaultWriteBrainId;
-  if (!parsedEnvelope.success || message.messageId.trim() === '' || message.content.trim() === '' || brainId === undefined) {
+  if (!parsedEnvelope.success || message.messageId.trim() === '' || message.content.trim() === '') {
     return undefined;
   }
   const value = parsedEnvelope.data;
-  const scope = MemoryScopeSchema.safeParse(message.scope ?? { level: 'project', projectId: value.projectId });
-  if (!scope.success || redactSensitiveJson(scope.data).detected) {
-    return undefined;
-  }
+  const scope = message.scope === undefined
+    ? undefined
+    : MemoryScopeSchema.safeParse(message.scope);
+  if (scope !== undefined && (!scope.success || redactSensitiveJson(scope.data).detected)) return undefined;
   const structuredData: JsonValue = {
     envelope: value,
     ...(message.structuredData === undefined ? {} : { data: message.structuredData }),
@@ -690,13 +732,38 @@ function captureRequest(envelope: AdapterEnvelope, message: AdapterMessage, defa
   if (redactSensitiveText(message.content).detected || redactSensitiveJson(structuredData).detected || redactSensitiveJson(source).detected) {
     return undefined;
   }
+  // A v0.2 profile explicitly carried projectId/brainId. Keep its strict
+  // target requirement during the compatibility window; v0.3 profiles omit
+  // both fields and use the daemon-owned capture router.
+  if (brainId === undefined && value.projectId !== undefined) {
+    return undefined;
+  }
+  if (brainId === undefined) {
+    return {
+      endpoint: '/v1/capture',
+      captureId: `capture-${createHash('sha256').update(source.reference).digest('hex').slice(0, 32)}`,
+      rawContent: message.content,
+      eventType: 'user_message',
+      actor: 'user',
+      source,
+      ...(value.workspacePath === undefined ? {} : { workspacePath: value.workspacePath }),
+      sessionId: value.sessionId,
+      turnId: message.turnId ?? message.messageId,
+      structuredData,
+    };
+  }
+  const legacyScope = scope?.success === true
+    ? scope.data
+    : value.projectId === undefined
+      ? { level: 'global' as const }
+      : { level: 'project' as const, projectId: value.projectId };
   return {
     endpoint: '/v1/memories/capture',
     rawContent: message.content,
     eventType: 'user_message',
     source,
     brainId,
-    scope: scope.data,
+    scope: legacyScope,
     ...(message.occurredAt === undefined ? {} : { occurredAt: message.occurredAt }),
     structuredData,
   };
@@ -737,10 +804,10 @@ async function writeOutbox(path: string, pending: readonly OutboxEntry[]): Promi
   await rename(temporaryPath, path);
 }
 
-async function withOutboxLock<T>(outboxPath: string, operation: () => Promise<T>): Promise<T> {
+async function withOutboxLock<T>(outboxPath: string, operation: () => Promise<T>, timeoutMs = OUTBOX_LOCK_TIMEOUT_MS): Promise<T> {
   const lockPath = `${outboxPath}.lock`;
   await mkdir(dirname(outboxPath), { recursive: true });
-  const deadline = Date.now() + OUTBOX_LOCK_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
       await mkdir(lockPath);
@@ -766,13 +833,17 @@ function sameRequest(left: WriteRequest, right: WriteRequest): boolean {
 
 function containsSecret(request: WriteRequest): boolean {
   return redactSensitiveText(request.rawContent).detected ||
-    redactSensitiveJson(request.structuredData).detected ||
+    (request.structuredData !== undefined && redactSensitiveJson(request.structuredData).detected) ||
     redactSensitiveJson(request.source).detected ||
-    redactSensitiveJson(request.scope).detected;
+    (request.endpoint === '/v1/memories/capture' && redactSensitiveJson(request.scope).detected);
 }
 
-function canQueueOffline(request: DeliveredWriteRequest): request is DeliveredCaptureMemoryRequest {
-  return explicitMemoryRequestPattern.test(request.rawContent);
+function isLegacyAdapterBody(value: unknown): boolean {
+  return isRecord(value) && (Object.hasOwn(value, 'requestedBrainIds') || Object.hasOwn(value, 'scope') && !Object.hasOwn(value, 'workspacePath'));
+}
+
+function canQueueOffline(request: DeliveredWriteRequest): boolean {
+  return request.endpoint === '/v1/capture' || explicitMemoryRequestPattern.test(request.rawContent);
 }
 
 function isMatchingPendingCapture(entry: OutboxEntry, request: DeliveredCaptureMemoryRequest): entry is PendingWrite {
@@ -840,6 +911,29 @@ function parseWriteRequest(value: unknown): WriteRequest | undefined {
     typeof source.reference !== 'string'
   ) {
     throw new Error('Outbox event source is invalid.');
+  }
+  if (value.endpoint === '/v1/capture') {
+    if (typeof value.captureId !== 'string' || value.captureId.trim() === '' || (value.actor !== 'user' && value.actor !== 'assistant' && value.actor !== 'tool')) {
+      throw new Error('Automatic capture request is invalid.');
+    }
+    return {
+      endpoint: '/v1/capture',
+      captureId: value.captureId,
+      rawContent: value.rawContent,
+      eventType: 'user_message',
+      actor: value.actor,
+      source: {
+        type: source.type,
+        agent: source.agent,
+        conversationId: source.conversationId,
+        messageId: source.messageId,
+        reference: source.reference,
+      },
+      ...(typeof value.workspacePath === 'string' ? { workspacePath: value.workspacePath } : {}),
+      ...(typeof value.sessionId === 'string' ? { sessionId: value.sessionId } : {}),
+      ...(typeof value.turnId === 'string' ? { turnId: value.turnId } : {}),
+      ...(value.structuredData === undefined ? {} : { structuredData: value.structuredData as JsonValue }),
+    };
   }
   if (legacyTaskAudit) {
     return undefined;
@@ -933,8 +1027,8 @@ function compactProfile(profile: LocalAdapterProfile): LocalAdapterProfile {
     clientType: profile.clientType,
     installationId: profile.installationId,
     profileId: profile.profileId,
-    projectId: profile.projectId,
-    brainId: profile.brainId,
+    ...(profile.projectId === undefined ? {} : { projectId: profile.projectId }),
+    ...(profile.brainId === undefined ? {} : { brainId: profile.brainId }),
     token: profile.token,
     corePath: profile.corePath,
     daemonUrl: profile.daemonUrl,
@@ -948,8 +1042,6 @@ function isLocalAdapterProfile(value: unknown): value is LocalAdapterProfile {
   return nonEmptyText(value.clientType) !== undefined
     && nonEmptyText(value.installationId) !== undefined
     && nonEmptyText(value.profileId) !== undefined
-    && nonEmptyText(value.projectId) !== undefined
-    && nonEmptyText(value.brainId) !== undefined
     && nonEmptyText(value.token) !== undefined
     && nonEmptyText(value.corePath) !== undefined
     && nonEmptyText(value.daemonUrl) !== undefined
@@ -966,6 +1058,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function confirmedCapture(value: unknown): CapturedMemoryStatus | undefined {
+  if (isRecord(value) && isRecord(value.receipt)) {
+    const receipt = CaptureReceiptSchema.safeParse(value.receipt);
+    if (!receipt.success) return undefined;
+    if (receipt.data.status === 'rejected') return 'rejected';
+    if (receipt.data.status === 'ignored') return 'ignore';
+    return receipt.data.status;
+  }
   if (!isRecord(value) || !isRecord(value.capture) || !UuidV7Schema.safeParse(value.capture.brain).success || !MemoryScopeSchema.safeParse(value.capture.scope).success) {
     return undefined;
   }
