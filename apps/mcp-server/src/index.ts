@@ -14,6 +14,8 @@ import {
   PreferenceDataSchema,
   UuidV7Schema,
   createUuidV7,
+  ReadSetSchema,
+  AdapterCallbackSchema,
 } from '@memlume/contracts';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -23,6 +25,8 @@ import { z } from 'zod';
 const DEFAULT_DAEMON_URL = 'http://127.0.0.1:3849';
 const REQUEST_TIMEOUT_MS = 10_000;
 const DAEMON_URL_ERROR = 'Daemon URL must be an http://127.0.0.1 or http://[::1] origin.';
+const MCP_PROTOCOL_VERSION = '1';
+const MCP_ADAPTER_VERSION = '0.3.0';
 
 const ResolveContextSchema = z
   .object({
@@ -32,6 +36,13 @@ const ResolveContextSchema = z
     contextBudget: z.number().int().nonnegative().describe('Maximum context budget in units.'),
     entities: z.array(NonEmptyTextSchema).optional().describe('Relevant task entities.'),
     available_tools: z.array(NonEmptyTextSchema).optional().describe('Tools available to the calling agent.'),
+    requested_brain_ids: z.array(UuidV7Schema).min(1).optional().describe('Optional subset; daemon validates against ReadSet.'),
+    workspace_path: NonEmptyTextSchema.optional().describe('Workspace path evidence for Brain routing.'),
+    task_id: NonEmptyTextSchema.optional().describe('Stable task identity.'),
+    agent_type: NonEmptyTextSchema.optional().describe('Calling host type.'),
+    subagent_id: NonEmptyTextSchema.optional().describe('Optional sub-agent identity.'),
+    child_goal: z.string().nullable().optional().describe('Optional child goal.'),
+    parent_read_set: ReadSetSchema.optional().describe('Parent ReadSet grant to intersect.'),
   })
   .strict();
 
@@ -105,7 +116,7 @@ export interface McpServerOptions {
 
 export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL, token = process.env.MEMLUME_TOKEN }: McpServerOptions = {}): McpServer {
   const safeDaemonUrl = daemonOrigin(daemonUrl);
-  const server = new McpServer({ name: 'memlume', version: '0.2.0' });
+  const server = new McpServer({ name: 'memlume', version: '0.3.0' });
 
   server.registerTool(
     'memlume.resolve_context',
@@ -114,9 +125,16 @@ export function createMcpServer({ daemonUrl = DEFAULT_DAEMON_URL, token = proces
       description: 'Resolve scoped Memlume context for an agent task.',
       inputSchema: ResolveContextSchema,
     },
-    async ({ available_tools, ...input }) => daemonTool(safeDaemonUrl, token, '/v1/context/resolve', 'POST', {
+    async ({ available_tools, requested_brain_ids, workspace_path, task_id, agent_type, subagent_id, child_goal, parent_read_set, ...input }) => daemonTool(safeDaemonUrl, token, '/v1/context/resolve', 'POST', {
       ...input,
       availableTools: available_tools,
+      ...(requested_brain_ids === undefined ? {} : { requestedBrainIds: requested_brain_ids }),
+      ...(workspace_path === undefined ? {} : { workspacePath: workspace_path }),
+      ...(task_id === undefined ? {} : { taskId: task_id }),
+      ...(agent_type === undefined ? {} : { agentType: agent_type }),
+      ...(subagent_id === undefined ? {} : { subagentId: subagent_id }),
+      ...(child_goal === undefined ? {} : { childGoal: child_goal }),
+      ...(parent_read_set === undefined ? {} : { parentReadSet: parent_read_set }),
     }),
   );
 
@@ -296,10 +314,19 @@ async function requestDaemon(
   const adapterToken = requiredAdapterToken(token);
   let response: Response;
   try {
+    const callback = callbackFor(path);
     response = await fetch(new URL(path, daemonUrl), {
       method,
       redirect: 'error',
-      headers: { authorization: `Bearer ${adapterToken}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+      headers: {
+        authorization: `Bearer ${adapterToken}`,
+        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        ...(callback === undefined ? {} : {
+          'x-memlume-callback': callback,
+          'x-memlume-protocol-version': MCP_PROTOCOL_VERSION,
+          'x-memlume-adapter-version': MCP_ADAPTER_VERSION,
+        }),
+      },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
@@ -319,6 +346,12 @@ async function requestDaemon(
     throw new DaemonRequestError('Daemon returned an invalid response.');
   }
   return result;
+}
+
+function callbackFor(path: string): z.infer<typeof AdapterCallbackSchema> | undefined {
+  if (path === '/v1/context/resolve') return 'beforeTask';
+  if (path === '/v1/capture' || path === '/v1/events' || path === '/v1/memories/capture') return 'onUserMessage';
+  return undefined;
 }
 
 async function daemonWriteTool(

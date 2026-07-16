@@ -81,6 +81,19 @@ describe('Memlume MCP server', () => {
     await server.close();
   });
 
+  test('exposes v0.3 ReadSet/workspace evidence fields for context planning', async () => {
+    const { client, server } = await connect();
+    const { tools } = await client.listTools();
+    const resolve = tools.find((tool) => tool.name === 'memlume.resolve_context');
+    const inputSchema = resolve?.inputSchema as { readonly properties?: Record<string, unknown> };
+    expect(inputSchema.properties).toEqual(expect.objectContaining({
+      workspace_path: expect.anything(),
+      requested_brain_ids: expect.anything(),
+      parent_read_set: expect.anything(),
+    }));
+    await server.close();
+  });
+
   test('exposes the remember object schema to MCP clients', async () => {
     const { client, server } = await connect();
     const { tools } = await client.listTools();

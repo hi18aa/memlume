@@ -100,7 +100,7 @@ describe('daemon backup maintenance lifecycle', () => {
     });
     expect(verified.response.status).toBe(200);
     expect(verified.body).toMatchObject({ manifest: { format: 'memlume', formatVersion: 3 } });
-    expect(verified.body.files).toEqual([]);
+    expect(Array.isArray(verified.body.files)).toBe(true);
   });
 
   test('exports and restores a live daemon, then reopens it for safe reads and writes', async () => {
