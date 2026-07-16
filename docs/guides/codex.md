@@ -1,24 +1,42 @@
 # Codex Adapter
 
-Codex Adapter 由 `adapters/codex/hooks/memlume.mjs` 呼叫共用 Adapter SDK，並以官方 Plugin Marketplace manifest 提供安裝入口。
+Codex Adapter 由 `adapters/codex/hooks/memlume.mjs` 呼叫共用 Adapter SDK，並透過官方 Plugin manifest 安裝。v0.3 不把 Project Brain UUID 寫死在 hook；daemon 依目前 workspace binding 產生正確 ReadSet。
+
+## 設定
 
 ```powershell
-node apps/cli/dist/index.js --setup-token $env:MEMLUME_SETUP_TOKEN setup adapter codex `
-  --installation-id codex-desktop --project-id memlume `
-  --brain-id '<project-brain-uuidv7>' --core-path $PWD --install-host --yes
+$env:MEMLUME_SETUP_TOKEN = '<setup-token>'
+node apps/cli/dist/index.js init --path $PWD
+node apps/cli/dist/index.js setup adapter codex `
+  --installation-id codex-desktop `
+  --workspace-path $PWD `
+  --core-path $PWD --install-host --yes
 ```
 
-`--install-host --dry-run` 可預覽不含 token 的 marketplace/hook 命令。Codex 仍會要求使用者信任 hook；Memlume 不會代替 Codex 放寬信任。
+`--install-host --dry-run` 可預覽安裝命令；Codex 仍會要求使用者信任 hook，Memlume 不會代替 Codex 放寬信任。若要手動管理 Project，使用 `memlume project create`、`project bind` 與 `project alias`。舊版 `--project-id`／`--brain-id` 仍可作相容設定，但不應作為 v0.3 自動路由的主要方式。
 
-`UserPromptSubmit` 先以 `beforeTask` 讀取主 Agent 的已掛載 Context，預設優先序為 **Project → Domain（Company）→ Personal**，再暫時注入本回合。它同時以 `onUserMessage` 將符合資格且非敏感的使用者訊息送到 Core 並追加 immutable event；一般陳述可能成為待審核 `candidate`，明確「記住」類要求可走 `active` 路徑，仍須經過衝突審核。空白或不支援事件會被 ignore，敏感資料會 redacted 或 rejected。主 Agent 寫入採明確 Brain → profile Project Brain → 拒絕，絕不回退 Personal。
+## 主 Agent 流程
 
-## 子代理 Context
+Codex 的 `UserPromptSubmit` 先呼叫 `beforeTask`。daemon 依 workspace、任務、intent 與 entities 產生最小 ReadSet：Primary Project 必須優先，命中的 Linked Project 才會加入，Personal 只有在內容與任務相關時才加入。Host 不可自行要求未掛載或未匹配的 Brain。
 
-Codex 的官方 [`SubagentStart`](https://learn.chatgpt.com/docs/hooks#subagentstart) hook 會直接以 `additionalContext` 注入受限的 Project Brain Context。此事件只呼叫 `onSubagentStart` 解析 Context，`task` 固定為 `null`。
+同一個使用者訊息再由 `onUserMessage` 自動 capture。Core 會執行 Secret filter、admission、atomization、Brain Router 與 activation；使用者不需要重複說「記錄到 Memlume」。
 
-- 只讀取設定的 Project Brain，絕不回退到 Domain 或 Personal。
-- 不讀取或傳送 transcript、agent type、prompt 或 Codex native memory，也不會同步原生記憶。
-- 不執行 capture、不寫入 Core，也不會 flush outbox。
-- daemon、設定或 Context 不可用時會 fail-open，以空 Context 繼續，不阻斷 Codex。
+- 明確穩定的使用者偏好、事實或決策可成為 `active`，衝突時停在 review。
+- 推測內容是 `candidate`，時間軸事件可為 `event_only`。
+- 未知／模糊 Project 進 durable routing Inbox，不建立 Brain，也不回退 Personal。
+- 問候、閒聊與 Secret 會 `ignored` 或 `rejected`；每個 atom 先寫 Markdown，再投影 SQLite。
 
-Codex 的 native memory 不會搬到 Memlume。未掛載時 daemon 直接 endpoint 會回 `403 forbidden`，Adapter SDK 則以空 Context fail-open。本機 outbox 僅接受明確記憶 capture，並在下一次 `beforeTask` 或 `onUserMessage` 重送；完整 transcript、assistant output、暫時推理與秘密資料不會被自動保存。
+## 子代理與短回覆
+
+Codex 的官方 `SubagentStart` hook 透過 `additionalContext` 呼叫 `onSubagentStart`。沒有 child goal 時只注入 Primary Project；不讀取 Personal、未匹配 Linked Project、transcript 或 Codex native memory，也不寫入或 flush outbox。daemon 不可用時 fail-open 為空 Context。
+
+Assistant final 僅短期存於 daemon `.runtime`（64 KiB、24 小時），不會進 Brain、FTS、Inbox、outbox 或 backup。下一個使用者回覆「可以／同意」會在有效 buffer 存在時重新 atomize、路由並授權寫入；「修正」會沿用 supersedes/conflict 流程。單獨的「可以」或過期 buffer 會被忽略。
+
+## 檢查與離線
+
+```powershell
+node apps/cli/dist/index.js status
+node apps/cli/dist/index.js doctor
+```
+
+`status` 顯示 ReadSet／routing Inbox／capture queue 與 Host callback 狀態；`doctor` 用 heartbeat、read/write smoke 檢查實際啟用。daemon 暫時離線時，SDK 只把安全且明確的 capture 排入 outbox，之後由 `beforeTask` 或 `onUserMessage` 重送；完整 transcript、assistant output、推理與秘密資料不會自動保存。Codex native memory 保持原狀。

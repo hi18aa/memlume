@@ -1,33 +1,40 @@
 # Hermes Adapter
 
-Hermes Adapter 使用 `adapters/hermes/bridge.mjs` 與 Python plugin，將 Hermes 的 Hook 差異轉成 Memlume Core 的共用 Adapter SDK。
+Hermes Adapter 使用 `adapters/hermes/bridge.mjs` 與 Python plugin，把 Hermes 的生命週期事件轉成 Memlume Core 的三個共用 callback。它不維護第二份 Brain，也不需要在每次訊息中手動說「記錄到 Memlume」。
 
 ## 設定
 
-先建置 Core，並用 CLI 建立 Hermes profile：
+先啟動 daemon，初始化 workspace binding，再建立不含靜態 Brain UUID 的 v0.3 profile：
 
 ```powershell
-pnpm install --frozen-lockfile
-pnpm build
-node apps/cli/dist/index.js --setup-token $env:MEMLUME_SETUP_TOKEN setup adapter hermes `
-  --installation-id hermes-desktop --project-id memlume `
-  --brain-id '<project-brain-uuidv7>' --core-path $PWD --install-host --yes
+$env:MEMLUME_SETUP_TOKEN = '<setup-token>'
+node apps/cli/dist/index.js init --path $PWD
+node apps/cli/dist/index.js setup adapter hermes `
+  --installation-id hermes-desktop `
+  --workspace-path $PWD `
+  --core-path $PWD --install-host --yes
 ```
 
-Profile 會放在使用者設定目錄；token 不會寫入 Git。`MEMLUME_DAEMON_URL`、`MEMLUME_TOKEN`、`MEMLUME_HOME` 等變數可覆寫 profile。
+需要手動建立 Project 時，可先執行 `memlume project create <name>`、`memlume project bind <brain-id> --path <workspace> --role primary`，再執行 Adapter setup。`--project-id` 與 `--brain-id` 僅是 v0.2 相容選項；v0.3 預設由 workspace binding 路由。
 
-## 流程
+Profile 與 token 只放在使用者設定目錄，不應提交 Git。`MEMLUME_DAEMON_URL`、`MEMLUME_TOKEN`、`MEMLUME_HOME` 與 `MEMLUME_WORKSPACE_PATH` 可覆寫 profile。
 
-主 Agent 的 `pre_llm_call` 會以 `beforeTask` 讀取已掛載 Context，預設優先序為 **Project → Domain（Company）→ Personal**；也會以 `onUserMessage` 將非敏感使用者訊息送到 Core 並追加 immutable event。依治理規則，非明確陳述可成為待審核 `candidate`，明確「記住」類要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。主 Agent 寫入採明確 Brain → profile Project Brain → 拒絕，絕不回退 Personal。
+## 自動流程
 
-Hermes 的 `subagent_start` 是 observer：它只登錄 child 識別值，不會直接注入 Context、寫入記憶或 flush outbox。child 的第一次 `pre_llm_call` 才呼叫只讀的 `onSubagentStart`，且只取得 Project Brain Context，不會讀取 Domain 或 Personal。Brain 是資料歸屬與權限邊界，Hook 只決定觸發時機。
+- Hermes 的 `pre_llm_call` 以 `beforeTask` 讀取 daemon 依 workspace 產生的 ReadSet。通常包含 Primary Project；任務或 entity 命中時才加入 Linked Project，必要時才加入 Personal。
+- Hermes 的使用者訊息以 `onUserMessage` 送入自動 capture。Core 會先過濾 Secret，再拆 atom、解析 Personal／Project 路由、檢查衝突，最後寫 Markdown authority 並投影 SQLite。
+- 未知或模糊 Project 會進 durable routing Inbox，不會靜默寫入 Personal。普通陳述可為 `candidate`，明確「記住」才可能成為 `active`；問候、閒聊與秘密會被忽略或拒絕。
+- `subagent_start` 只觀察 child；child 第一次支援的 `pre_llm_call` 才呼叫 `onSubagentStart`，沒有 child goal 時只讀 Primary Project，不寫入或 flush outbox。
 
-暫時離線時，installation-specific outbox 僅接受安全且不含秘密的明確記憶 capture，並在下一次 `beforeTask` 或 `onUserMessage` 重送。完整 transcript、assistant output、暫時推理與秘密資料不會自動保存。Hermes 原生記憶仍由 Hermes 自己管理。
+Hermes assistant final 不會直接進 Brain。Core 會在 `.runtime` 暫存最多 64 KiB、24 小時；下一個使用者回覆「可以／同意」時，只有存在有效 buffer 才會重新路由並寫入。`修正` 會建立 superseding record；沒有 buffer 或已過期則忽略。
 
-## 檢查
+## 離線與檢查
+
+daemon 暫時不可用時，Adapter SDK fail-open，Hermes 繼續使用原生功能；只有安全且明確的 capture 會進 outbox，下一次 `beforeTask` 或 `onUserMessage` 重送。完整 transcript、assistant 推理、token 與秘密不會寫入 outbox、Brain 或 backup。
 
 ```powershell
+node apps/cli/dist/index.js status
 node apps/cli/dist/index.js doctor
 ```
 
-看到 `read: ok` 且 `write: ok` 才代表 mount 與 token 可用。只要 Shared Brain 不可用，Hermes 仍可使用自身原生功能。
+`status` 可查看 routing／queue／Host callback 狀態；`doctor` 的 read/write 與 heartbeat 通過後，才代表該 installation 已實際啟用。Hermes 原生記憶仍由 Hermes 自己管理，Memlume 只提供跨 Host 共用 Brain。

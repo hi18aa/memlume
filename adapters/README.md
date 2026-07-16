@@ -1,50 +1,48 @@
-# Adapter 共用合約
+# Memlume Host Adapters
 
-各 Agent Adapter 只負責把 Host 事件轉成 Memlume 共用 callback；記憶是否保存、衝突處理、敏感資料過濾與 Brain mount 授權，一律由 Memlume Core 判斷。Adapter 不讀取、模擬或同步 Host 的私有長期記憶，也不建立第二個資料庫或工作流。
+這個目錄提供 Hermes、Codex、OpenClaw、Claude Code 的最小 Host 整合。四個 Adapter 共用同一個 `@memlume/adapter-sdk` 與本機 daemon；差異只在各 Host 的 hook／plugin 事件，不在記憶資料或 Brain 路由。
 
-請共用 `fixtures/host-events.ts`，不要各自重做共用流程。
+## v0.3 共用原則
 
-```ts
-import { AdapterClient } from '@memlume/adapter-sdk';
-import { createAdapterHostCallbacks } from '../fixtures/host-events.js';
+Adapter 不再把固定 Project Brain UUID 當成寫入目標。Host 只送出 callback、workspace、session、task 與證據；daemon 依 workspace binding 與 mount 權限產生 ReadSet 或選擇寫入 Brain。
 
-const callbacks = createAdapterHostCallbacks(new AdapterClient({
-  daemonUrl,
-  token,
-  defaultWriteBrainId: projectBrainId,
-}));
-callbacks.initialize({ envelope });
+| Callback | 用途 |
+| --- | --- |
+| `beforeTask` | 任務前讀取 daemon 產生的最小 ReadSet；讀取失敗時回空 Context，Host 繼續工作。 |
+| `onUserMessage` | 自動 capture 入口；Core 負責 Secret filter、atomization、routing、conflict 與 Markdown-first 寫入。 |
+| `onSubagentStart` | 子代理讀取受限 ReadSet；沒有 child goal 時只允許 Primary Project，不寫入或 flush outbox。 |
+
+### 初始化
+
+```powershell
+node apps/cli/dist/index.js init --path <workspace>
+node apps/cli/dist/index.js setup adapter <hermes|codex|openclaw|claude-code> `
+  --installation-id <stable-id> --workspace-path <workspace> `
+  --core-path <memlume-core> --install-host --yes
 ```
 
-## 初始化與三個共用 callback
+需要自訂 Project 時，可使用：
 
-`initialize({ envelope })` 是初始化步驟，不是 callback。`envelope` 必須帶 `clientType`、`installationId`、`profileId`、`sessionId`、`projectId`；`workspacePath` 可選。同一個 callback instance 重新初始化時，`clientType`、`installationId`、`profileId` 必須相同；可更換 `sessionId`，但不同 Adapter 身分會 fail-closed。
+```powershell
+node apps/cli/dist/index.js project create <name>
+node apps/cli/dist/index.js project bind <brain-id> --path <workspace> --role primary
+node apps/cli/dist/index.js project alias <brain-id> <alias>
+node apps/cli/dist/index.js project inspect --path <workspace>
+```
 
-| Callback | Adapter 必須維持的邊界 |
-| --- | --- |
-| `beforeTask(...)` | 主 Agent 讀取 Context。未指定範圍時，Core 依已掛載 Brain 的 **Project → Domain（Company）→ Personal** 優先序解析；可要求較小的已授權範圍。讀取失敗必須 fail-open，以空 Context 繼續原任務。 |
-| `onUserMessage(...)` | 唯一的自動 capture 入口；將符合資格的使用者訊息交由 Core 進行治理。主 Agent 寫入採明確 Brain → `defaultWriteBrainId`（Project Brain）→ `rejected`，永不回退 Personal。 |
-| `onSubagentStart(...)` | 只讀取設定的 Project Brain Context，不讀取 Domain 或 Personal，不建立寫入，也不 flush outbox。Host 沒有可注入 child Context 的事件時，不得偽造支援。 |
+`--project-id` 與 `--brain-id` 僅保留 v0.2 相容模式；新安裝應省略它們，讓 workspace-owned routing 發揮作用。
 
-Capture 治理：符合資格且非敏感的使用者訊息會追加為 immutable event。一般陳述可能成為待審核的 `candidate`；「記住」等明確要求可走 `active` 路徑，仍須經過衝突審核。空白或不支援事件會被 ignore，敏感資料會 redacted 或 rejected。
+## 自動 capture 與 routing Inbox
 
-`onSubagentStart` 可接收 `parentTaskId` 與 `subagentId` 供 Host 對應，但 SDK 會在 Context request 前移除它們；Host 私有內容也不得送入 request。Brain 才是資料歸屬與權限邊界，Hook 只決定何時觸發。
+使用者訊息不必加上「記錄到 Memlume」。Core 會先過濾 Secret，將多主題訊息拆成 atom，再依 Personal／Primary Project／Linked Project 路由。明確且無衝突的命題可成為 `active`；推測是 `candidate`；事件是 `event_only`；未知或模糊 Project 進 durable `routing Inbox`，不會猜測或回退 Personal。SQLite 是索引投影，Markdown records 才是可恢復 authority。
 
-## 寫入結果與離線行為
+Assistant final 不會直接成為 active memory。daemon 只在 `.runtime` 保留安裝、session、turn、trace 與 final answer（最多 64 KiB、24 小時）；「可以／同意」或「修正」會在有效 buffer 存在時重新走 atomization、routing 與 supersedes 流程。runtime 不進 Brain、FTS、Inbox、outbox 或 backup。
 
-Adapter 必須原樣回報 SDK 結果，不能把請求已送出或已排隊說成已保存：
+## Adapter 邊界
 
-| 結果 | Host 可顯示的意思 |
-| --- | --- |
-| `saved` | Daemon 已確認保存；capture 另會帶 Core 判定的記憶狀態。 |
-| `queued` | Daemon 暫時不可用，且 SDK 已安全寫入本機 outbox；outbox 僅接受明確記憶要求，待下一次 `beforeTask` 或 `onUserMessage` 重送。 |
-| `rejected` | 授權、掛載、輸入或安全規則拒絕，沒有保存。 |
-| `ignored` | Core 判定不形成記憶，沒有保存；這不是錯誤。 |
+- 不讀取、覆寫或同步 Host native memory。
+- 不自行產生 Brain UUID、不猜測未知 Project、不把未驗證 assistant output 寫入 active。
+- 不建立第二個 retry queue；SDK outbox 只保留安全且明確的 capture，queue full、routing_required、rejected 與 degraded 都必須可見。
+- 不保存完整 transcript、tool transcript、暫時推理、token 或 Secret。
 
-不要在 Adapter 自行建立另一個 retry queue。SDK 只會將符合安全與明確記憶請求條件的可重送 capture 放入 outbox；完整 transcript、assistant output、暫時推理、token 與敏感訊息都不能寫入 outbox。
-
-## Brain 掛載
-
-每次讀寫都由 Adapter token 對應的 installation 與 Brain mount 驗證。未掛載或唯讀 mount 的寫入會得到 `rejected`；Adapter 只能如實呈現結果，不得改寫 Brain ID、繞過授權，或以 Host 私有記憶補寫。
-
-共用契約的 E2E 測試位於 `test/e2e/adapter-contract.test.ts`。新增 Hermes、Codex、Claude Code、OpenClaw 等 Adapter 時，應以該測試覆蓋其 Host event mapping。
+使用 `memlume status` 查看 callback heartbeat、ReadSet／capture／routing 狀態；使用 `memlume doctor` 檢查 daemon health、mount、read/write smoke 與實際啟用。各 Host 的詳細 hook 差異請參閱 `docs/guides/` 下的 Hermes、Codex、OpenClaw 與 Claude Code 指南。

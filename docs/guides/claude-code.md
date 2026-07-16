@@ -1,18 +1,39 @@
 # Claude Code Adapter
 
-Claude Code 使用 `adapters/claude-code/.claude-plugin` 與 hooks/MCP 設定接入 Memlume。先建立 profile，再使用官方本機 Plugin manifest：
+Claude Code 使用 `adapters/claude-code/.claude-plugin` 與 hooks/MCP 接入 Memlume。v0.3 由 daemon 依 workspace binding 產生 ReadSet；Adapter 不持有靜態 Project Brain，也不同步 Claude Code native memory。
+
+## 設定
 
 ```powershell
-node apps/cli/dist/index.js --setup-token $env:MEMLUME_SETUP_TOKEN setup adapter claude-code `
-  --installation-id claude-desktop --project-id memlume `
-  --brain-id '<project-brain-uuidv7>' --core-path $PWD --install-host --yes
+$env:MEMLUME_SETUP_TOKEN = '<setup-token>'
+node apps/cli/dist/index.js init --path $PWD
+node apps/cli/dist/index.js setup adapter claude-code `
+  --installation-id claude-desktop `
+  --workspace-path $PWD `
+  --core-path $PWD --install-host --yes
 claude plugin validate .\adapters\claude-code
 ```
 
-主 Agent 的 `UserPromptSubmit` 以 `beforeTask` 讀取已掛載 Context，預設優先序為 **Project → Domain（Company）→ Personal**，並以官方 `additionalContext` 暫時注入。它也會以 `onUserMessage` 將非敏感使用者訊息送到 Core 並追加 immutable event；依治理規則，非明確陳述可成為待審核 `candidate`，明確「記住」類要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。主 Agent 寫入採明確 Brain → profile Project Brain → 拒絕，永不回退 Personal。
+可用 `memlume project create`、`project bind` 與 `project alias` 管理 workspace 的 Project。`--project-id`／`--brain-id` 僅為 v0.2 相容選項；v0.3 應讓 daemon-owned routing 決定 Brain。
 
-Claude Code 的 `SubagentStart` 可直接注入 Context：Adapter 會呼叫只讀的 `onSubagentStart`，只提供 Project Brain，不會讀取 Domain 或 Personal，也不會寫入或 flush outbox。這與主 Agent 的 mount 優先序刻意分開；Brain 是權限邊界，Hook 只決定觸發時機。
+## 自動讀寫
 
-Claude Code 可使用 `memlume.record_event` 保存刻意呼叫的不可變證據，並以 Context Pack 的 `traceId` 呼叫 `memlume.record_memory_usage`／`memlume.record_outcome` 回報結果。`memlume.remember` 建立的是 reviewable candidate，避免外部 prompt 直接製造 active policy；請在 Console 或受保護 inbox 逐筆核准。
+- `UserPromptSubmit` 先以 `beforeTask` 讀取最小 ReadSet，並透過官方 `additionalContext` 暫時注入。ReadSet 以 Primary Project 為核心，依任務命中加入 Linked Project，Personal 只在相關時加入。
+- 同一使用者訊息以 `onUserMessage` 進入自動 capture。Core 先執行 Secret filter、admission、atomization、Brain Router 與 activation，再 append Markdown record、投影 SQLite。
+- 明確穩定命題才可能成為 `active`；推測是 `candidate`，事件是 `event_only`。未知／模糊 Project 進 durable routing Inbox，不建立新 Brain、不寫入 Personal。
+- `SubagentStart` 呼叫 `onSubagentStart`，沒有 child goal 時只注入 Primary Project；不讀取 Personal、未匹配 Linked Project、transcript 或 Claude native memory，也不寫入或 flush outbox。
 
-平台仍會要求使用者信任 hooks。daemon 不可用時，讀取會 fail-open，Claude Code 的 native memory 與其他原生設定不受影響；本機 outbox 僅接受明確記憶 capture，並在下一次 `beforeTask` 或 `onUserMessage` 重送，不會自動保存完整 transcript、assistant output、暫時推理或秘密資料。
+## Assistant final 與明確工具
+
+Assistant final 只會在 daemon `.runtime` 暫存 64 KiB／24 小時，不會直接建立 active memory。下一個使用者回覆「可以／同意」且 buffer 尚未過期時，Core 才重新 atomize、路由並依使用者授權寫入；「修正」會建立 superseding record。沒有有效 final buffer 的短回覆會被忽略。
+
+`memlume.remember`、`memlume.record_event`、`memlume.review`、`memlume.record_memory_usage` 與 `memlume.record_outcome` 是明確操作／稽核工具，不是自動 capture 的替代品。Outcome 只關閉 receipt，不改變 memory 排序或狀態。
+
+## 檢查與安全
+
+```powershell
+node apps/cli/dist/index.js status
+node apps/cli/dist/index.js doctor
+```
+
+daemon 不可用時讀取 fail-open；只有安全且明確的 capture 進本機 outbox，下一個 `beforeTask` 或 `onUserMessage` 重送。完整 transcript、assistant 推理、token 與 Secret 不會進 Brain、FTS、Inbox、outbox 或 backup。Claude Code 仍會要求使用者信任 hooks，native memory 與原生設定保持不變。

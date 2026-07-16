@@ -1,16 +1,37 @@
 # OpenClaw Adapter
 
-OpenClaw Adapter 透過 `adapters/openclaw` 的 typed Hook 連到 loopback daemon。安裝與檢查：
+OpenClaw Adapter 透過 `adapters/openclaw` 的 typed hooks 連到 loopback daemon。v0.3 的 workspace binding 與 Brain Router 由 daemon 管理，OpenClaw 不需要把 Project Brain UUID 寫入 prompt 或 adapter 程式。
+
+## 設定
 
 ```powershell
-node apps/cli/dist/index.js --setup-token $env:MEMLUME_SETUP_TOKEN setup adapter openclaw `
-  --installation-id openclaw-desktop --project-id memlume `
-  --brain-id '<project-brain-uuidv7>' --core-path $PWD --install-host --yes
+$env:MEMLUME_SETUP_TOKEN = '<setup-token>'
+node apps/cli/dist/index.js init --path $PWD
+node apps/cli/dist/index.js setup adapter openclaw `
+  --installation-id openclaw-desktop `
+  --workspace-path $PWD `
+  --core-path $PWD --install-host --yes
+node apps/cli/dist/index.js status
+```
+
+需要手動建立 Project 時，可使用 `memlume project create <name>`、`project bind <brain-id> --path <workspace> --role primary` 與 `project alias`。v0.2 的 `--project-id`／`--brain-id` 只作相容模式；一般安裝應讓 workspace binding 決定路由。
+
+## Hook 與讀寫
+
+- `before_prompt_build` 呼叫 `beforeTask`，Core 依目前 workspace、任務與 entity 產生 ReadSet。Primary Project 優先，只有命中的 Linked Project 才加入；Personal 需具相關性才注入。
+- `message_received` 呼叫 `onUserMessage`。Core 會過濾 Secret、拆分 atom、解析 Personal／Project、檢查衝突，再以 Markdown authority → SQLite projection 寫入。
+- `subagent_spawned` 是 observer，只記錄 child 啟用訊號；child 第一次 `before_prompt_build` 才呼叫 `onSubagentStart`。沒有 child goal 時只讀 Primary Project，不讀取 Personal 或未匹配 Linked Project，也不寫入。
+
+未知或模糊 Project 不會自動建立，也不會回退 Personal，而會進 durable routing Inbox。一般陳述可為 `candidate`，明確授權才可能成為 `active`；事件可為 `event_only`，問候與閒聊則 `ignored`。每個 atom 都有 capture receipt，可用 `memlume status` 查詢 routing／queue 狀態。
+
+Assistant final 不直接成為記憶。daemon 只在 `.runtime` 暫存最多 64 KiB、24 小時；「可以／同意」會在有效 final buffer 存在時重新路由，「修正」會走 supersedes/conflict 流程。短回覆沒有有效 buffer 時忽略；runtime 資料不進 Brain、FTS、Inbox、outbox 或 backup。
+
+## 離線與安全
+
+設定 `allowPromptInjection` 後才會向 OpenClaw 注入 Context；daemon 不可用時 Adapter fail-open，OpenClaw 原生流程仍可繼續。outbox 只保留安全且明確的 capture，下一次 `beforeTask` 或 `onUserMessage` 重送，沒有 silent eviction。token、完整 transcript、assistant 推理與 Secret 不會寫入 outbox 或記憶。
+
+```powershell
 node apps/cli/dist/index.js doctor
 ```
 
-Adapter 設定只放 daemon URL、profile 與 token 參照；不會把 token 寫入 OpenClaw 的一般設定或 prompt。設定 `allowPromptInjection` 後，主 Agent 的 `before_prompt_build` 會以 `beforeTask` 讀取已掛載 Context，預設優先序為 **Project → Domain（Company）→ Personal**，並暫時注入背景參考。`message_received` 會以 `onUserMessage` 將非敏感使用者訊息送到 Core 並追加 immutable event；依治理規則，非明確陳述可成為待審核 `candidate`，明確「記住」類要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。主 Agent 寫入採明確 Brain → profile Project Brain → 拒絕，絕不回退 Personal。
-
-`subagent_spawned` 只是 observer：它只登錄 child 識別值，不寫入 memory 或 flush outbox。child 的第一次 `before_prompt_build` 才呼叫只讀的 `onSubagentStart`，只取得 Project Brain Context，不會讀取 Domain 或 Personal。Brain 是資料歸屬與權限邊界，Hook 只決定觸發時機。
-
-沒有 mount 的 OpenClaw 不能讀取或寫入該 Brain；直接 API 會回 `403 forbidden`，Adapter SDK 則 fail-open。若要暫停共享腦，只需停止 daemon；OpenClaw 原生流程仍可使用空 Context 繼續。本機 outbox 僅接受明確記憶 capture，並在下一次 `beforeTask` 或 `onUserMessage` 重送；完整 transcript、assistant output、暫時推理與秘密資料不會被自動保存。
+看到 daemon health、read/write 與 callback heartbeat 正常，才代表 OpenClaw 實際啟用。OpenClaw native memory 不會被 Memlume 讀取、覆寫或同步。
