@@ -402,6 +402,15 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
       io.stdout(doctorSummary(health, diagnostics, profiles));
     });
 
+  program
+    .command('status')
+    .description('唯讀顯示 daemon 與 Host activation 狀態。')
+    .action(async (_options: unknown, command: Command) => {
+      const global = command.optsWithGlobals<GlobalOptions>();
+      const result = await requestPublicJson(global.url, '/v1/status', runtime);
+      printResult(result, global.json, io.stdout, statusSummary);
+    });
+
   const brain = program.command('brain').description('管理 Shared Brain 匯出與匯入。');
   brain
     .command('list')
@@ -1423,6 +1432,21 @@ function brainsSummary(result: unknown): string {
     const name = objectString(brain, 'name');
     return name === undefined ? id : `${id}: ${name}`;
   }).join('\n');
+}
+
+function statusSummary(result: unknown): string {
+  if (typeof result !== 'object' || result === null) {
+    return 'Memlume status unavailable.\n';
+  }
+  const body = result as Record<string, unknown>;
+  const daemon = objectString(body, 'daemon') ?? objectString(body, 'health') ?? 'unknown';
+  const hosts = arrayValue(body, 'hosts');
+  const lines = [`Daemon: ${daemon}.`];
+  for (const host of hosts) {
+    if (typeof host !== 'object' || host === null) continue;
+    lines.push(`${objectString(host, 'clientType') ?? 'host'}: ${objectString(host, 'state') ?? 'unknown'}.`);
+  }
+  return `${lines.join('\n')}\n`;
 }
 
 function initSummary(result: unknown): string {
