@@ -93,7 +93,6 @@ export class MarkdownMemoryAuthority implements MemoryWriteAuthority {
     const approved = MemoryItemSchema.parse({ ...candidate, status: 'active', updatedAt: now });
     const projected = this.persistRecord(memoryRecord(approved, {
       supersedesRecordId,
-      sourceAtom: `${changedBy}: ${changeReason}`,
     }));
     if (projected) {
       this.appendVersion(candidate, changedBy, changeReason, now);
@@ -116,7 +115,6 @@ export class MarkdownMemoryAuthority implements MemoryWriteAuthority {
     const rejected = MemoryItemSchema.parse({ ...candidate, status: 'rejected', updatedAt: new Date().toISOString() });
     const projected = this.persistRecord(memoryRecord(rejected, {
       supersedesRecordId: this.latestRecordId(candidate.id),
-      sourceAtom: `${changedBy}: ${changeReason}`,
     }));
     if (projected) {
       this.appendVersion(candidate, changedBy, changeReason, rejected.updatedAt);
@@ -144,7 +142,6 @@ export class MarkdownMemoryAuthority implements MemoryWriteAuthority {
     });
     const projected = this.persistRecord(memoryRecord(updated, {
       supersedesRecordId: this.latestRecordId(existing.id),
-      sourceAtom: `${changedBy}: ${changeReason}`,
     }));
     if (projected) {
       this.appendVersion(existing, changedBy, changeReason, updated.updatedAt);
