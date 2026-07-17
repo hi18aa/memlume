@@ -215,6 +215,14 @@ def _ephemeral_context(context: Any) -> dict[str, str] | None:
     for item in context.get("knowledge", []):
         if isinstance(item, dict) and isinstance(item.get("summary"), str) and item["summary"].strip():
             lines.append(item["summary"].strip())
+    for item in context.get("documents", []):
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+            continue
+        path = _text(item.get("logicalPath"))
+        heading = item.get("headingPath")
+        heading_text = " > ".join(value.strip() for value in heading if isinstance(value, str) and value.strip()) if isinstance(heading, list) else ""
+        if path is not None:
+            lines.append(f"［{path}{('#' + heading_text) if heading_text else ''}］ {item['text'].strip()}")
     for item in context.get("procedures", []):
         if isinstance(item, dict) and isinstance(item.get("steps"), list):
             lines.extend(step.strip() for step in item["steps"] if isinstance(step, str) and step.strip())

@@ -75,3 +75,9 @@ Setup token 用於註冊、binding、備份、診斷與 review；Adapter bearer 
 `beforeTask` 只負責讀取 Context，不等待本機 outbox flush；讀取完成後才以背景工作重送安全 capture。daemon Context 讀取有 250ms 上限，背景 flush 的 lock／request 工作各自有界，OpenClaw 與 Hermes Adapter 的 Host hook 統一以 500ms fail-open contract 驗證。超時仍回傳空 Context，不阻塞原生 Agent 流程。
 
 Context Pack 的 `traceId`、`sourceMemoryIds`、ReadSet exclusion 與 budget 可稽核。Outcome 只關閉 receipt 與留下稽核，不改變 memory status、權重或檢索排序。Agent native memory 不會被讀取、覆寫或同步。
+
+## Document Project（唯讀 MVP）
+
+Document project 是既有 Project Brain 的可選 capability，不是新的 Brain kind。使用者指定一個 Markdown source root 後，必須明確執行 sync；Core 會建立 revision、source SHA-256、文件版本與 heading section 的 SQLite/FTS projection。原始 Markdown 是唯一 authority，projection 遺失時可重新掃描，Core 不會反向改寫 source。
+
+Profile-level attachment 只在 installation 已 mount 該 Project Brain 時生效，支援 `always_core`、`task_conditional` 與 `explicit_only`。一般 `onUserMessage` capture、assistant final 與 inbox 不會寫入 document tables。文件 Context 與 memory Context 共用 budget，每段都帶 `logicalPath`、`headingPath`、`revisionId` 與 `sourceSha256`，Host 只收到 active version。

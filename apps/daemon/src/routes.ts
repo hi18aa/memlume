@@ -23,6 +23,7 @@ import {
   AdapterProtocolVersionSchema,
   DEFAULT_PERSONAL_BRAIN_ID,
   type CaptureReceipt,
+  type ContextPack,
   type ReadSet,
   redactSensitiveJson,
   redactSensitiveText,
@@ -34,7 +35,7 @@ import type { SqliteDatabase } from '@memlume/database/internal';
 import { EventBrainConflictError, EventJournal } from '@memlume/event-journal';
 import { assessMemoryConflict, compileMemory, resolveApproval, type MemoryProposal } from '@memlume/memory-compiler';
 import { MemoryStore, OutcomeFeedbackRateLimitError, OutcomeMemoryAccessError, OutcomeReceiptError, OutcomeReceiptRateLimitError, OutcomeStore, SourceEventBrainMismatchError } from '@memlume/retrieval';
-import { BrainStore, MarkdownRecordStore, ProjectBindingStore, RoutingInboxStore, scanMarkdownRecords } from '@memlume/shared-brains';
+import { BrainStore, DocumentProjectStore, MarkdownRecordStore, ProjectBindingStore, RoutingInboxStore, scanMarkdownRecords } from '@memlume/shared-brains';
 import { BrainImportConflictError, BrainImportRequiredError, FullBackupAuthenticationRequiredError, FullRestoreRequiredError, RestoreRecoveryError, verifyMarkdownBundle } from '@memlume/backup';
 import { planCapture, type AtomPlan } from './capture-pipeline.js';
 import { SemanticMemoryService } from './semantic-memory-service.js';
@@ -177,6 +178,24 @@ const EditRecordRequestSchema = z.object({
   repair: z.boolean().default(false),
 }).strict();
 const ReindexRequestSchema = z.object({ repair: z.boolean().default(false) }).strict();
+const ConfigureDocumentProjectRequestSchema = z.object({ sourceRoot: NonEmptyTextSchema }).strict();
+const DocumentBindingRequestSchema = z.object({
+  brainId: UuidV7Schema,
+  mode: z.enum(['always_core', 'task_conditional', 'explicit_only']),
+  defaultDocumentPaths: z.array(NonEmptyTextSchema).max(256).optional(),
+  maxContextBudget: z.number().int().nonnegative().max(100_000).optional(),
+}).strict();
+const DocumentSearchQuerySchema = z.object({
+  q: SearchQuerySchema.shape.q,
+  brainId: UuidV7Schema.optional(),
+  path: NonEmptyTextSchema.optional(),
+  limit: z.coerce.number().int().positive().max(256).optional(),
+}).strict();
+const DocumentContextQuerySchema = z.object({
+  q: NonEmptyTextSchema.optional(),
+  paths: z.array(NonEmptyTextSchema).max(256).optional(),
+  contextBudget: z.coerce.number().int().nonnegative().max(100_000).default(320),
+}).strict();
 
 const RegisterInstallationRequestSchema = z
   .object({
@@ -221,6 +240,8 @@ export interface DaemonServices {
   readonly routingInbox?: RoutingInboxStore;
   /** Server-owned project bindings used to derive ReadSet grants. */
   readonly projects?: ProjectBindingStore;
+  /** Read-only Markdown document projects and profile attachments. */
+  readonly documents?: DocumentProjectStore;
   /** Markdown root used by maintenance and explicit Inbox routing. */
   readonly dataRoot?: string;
   readonly reindex?: (options?: { readonly repair?: boolean }) => unknown;
@@ -348,6 +369,30 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     const { brainId } = z.object({ brainId: UuidV7Schema }).strict().parse(request.params);
     response.status(201).json({ alias: projects.addAlias(brainId, AddProjectAliasRequestSchema.parse(request.body).alias) });
   });
+  app.post('/v1/setup/document-projects/:brainId', requireSetup, (request, response) => {
+    if (services.documents === undefined) {
+      response.status(503).json({ error: 'document_projects_unavailable' });
+      return;
+    }
+    const { brainId } = z.object({ brainId: UuidV7Schema }).strict().parse(request.params);
+    response.status(201).json({ project: services.documents.configure({ brainId, sourceRoot: ConfigureDocumentProjectRequestSchema.parse(request.body).sourceRoot }) });
+  });
+  app.post('/v1/setup/document-projects/:brainId/sync', requireSetup, (request, response) => {
+    if (services.documents === undefined) {
+      response.status(503).json({ error: 'document_projects_unavailable' });
+      return;
+    }
+    const { brainId } = z.object({ brainId: UuidV7Schema }).strict().parse(request.params);
+    response.status(201).json({ sync: services.documents.sync(brainId) });
+  });
+  app.get('/v1/setup/document-projects/:brainId/documents', requireSetup, (request, response) => {
+    if (services.documents === undefined) {
+      response.status(503).json({ error: 'document_projects_unavailable' });
+      return;
+    }
+    const { brainId } = z.object({ brainId: UuidV7Schema }).strict().parse(request.params);
+    response.json({ project: services.documents.getProject(brainId), documents: services.documents.listDocuments(brainId) });
+  });
   app.get('/v1/setup/projects/inspect', requireSetup, (request, response) => {
     const projects = services.projects;
     if (projects === undefined) {
@@ -459,6 +504,29 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
   app.post('/v1/setup/installations/:agentInstallationId/token/rotate', requireSetup, (request, response) => {
     const { agentInstallationId } = InstallationParametersSchema.parse(request.params);
     response.status(201).json(services.brains.rotateToken(agentInstallationId));
+  });
+  app.post('/v1/setup/installations/:agentInstallationId/document-bindings', requireSetup, (request, response) => {
+    if (services.documents === undefined) {
+      response.status(503).json({ error: 'document_projects_unavailable' });
+      return;
+    }
+    const { agentInstallationId } = InstallationParametersSchema.parse(request.params);
+    const input = DocumentBindingRequestSchema.parse(request.body);
+    try {
+      services.brains.assertAccess(agentInstallationId, input.brainId, 'read');
+    } catch {
+      response.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    response.status(201).json({ binding: services.documents.upsertBinding({ agentInstallationId, ...input }) });
+  });
+  app.get('/v1/setup/installations/:agentInstallationId/document-bindings', requireSetup, (request, response) => {
+    if (services.documents === undefined) {
+      response.status(503).json({ error: 'document_projects_unavailable' });
+      return;
+    }
+    const { agentInstallationId } = InstallationParametersSchema.parse(request.params);
+    response.json({ bindings: services.documents.listBindings(agentInstallationId) });
   });
   app.get('/v1/setup/diagnostics', requireSetup, (_request, response) => {
     response.json({
@@ -989,6 +1057,54 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     response.json({ memories: services.store.search(q, { brainIds }) });
   });
 
+  app.get('/v1/documents/search', requireAdapter, (request, response) => {
+    if (services.documents === undefined) {
+      response.status(503).json({ error: 'document_projects_unavailable' });
+      return;
+    }
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const input = DocumentSearchQuerySchema.parse(request.query);
+    const mounted = services.brains.listMountedBrains(installation.id).filter(({ brain }) => brain.kind === 'project');
+    const mountedBrainIds = mounted.map(({ brain }) => brain.id);
+    const brainIds = input.brainId === undefined ? mountedBrainIds : [input.brainId];
+    if (brainIds.length === 0 || brainIds.some((brainId) => !mountedBrainIds.includes(brainId))) {
+      response.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    response.json({ sections: services.documents.search({ brainIds, query: input.q, ...(input.path === undefined ? {} : { documentPaths: [input.path] }), ...(input.limit === undefined ? {} : { limit: input.limit }) }) });
+  });
+
+  app.get('/v1/documents/context', requireAdapter, (request, response) => {
+    if (services.documents === undefined) {
+      response.status(503).json({ error: 'document_projects_unavailable' });
+      return;
+    }
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const input = DocumentContextQuerySchema.parse(request.query);
+    const mountedBrainIds = services.brains.listMountedBrains(installation.id)
+      .filter(({ brain }) => brain.kind === 'project')
+      .map(({ brain }) => brain.id);
+    if (mountedBrainIds.length === 0) {
+      response.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    response.json({ context: services.documents.resolveForInstallation({
+      agentInstallationId: installation.id,
+      query: input.q ?? '',
+      contextBudget: input.contextBudget,
+      ...(input.paths === undefined ? {} : { explicitDocumentPaths: input.paths }),
+      allowedBrainIds: mountedBrainIds,
+    }) });
+  });
+
   app.post('/v1/context/resolve', requireAdapter, (request, response) => {
     const installation = authenticatedInstallation(response);
     if (installation === undefined) {
@@ -1017,7 +1133,8 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     }
     const readSet = planServerReadSet(services, installation.id, input);
     const { workspacePath: _workspacePath, taskId: _taskId, agentType: _agentType, subagentId: _subagentId, childGoal: _childGoal, parentReadSet: _parentReadSet, requestedBrainIds: _requestedBrainIds, ...contextInput } = input;
-    const context = services.resolver.resolve({ ...contextInput, readSet });
+    const baseContext = services.resolver.resolve({ ...contextInput, readSet });
+    const context = attachDocumentContext(services, installation.id, input, baseContext);
     let feedbackUnavailable = false;
     try {
       if (readSet.entries.length > 0) {
@@ -1273,6 +1390,34 @@ function planServerReadSet(
     ...(input.parentReadSet === undefined ? {} : { parentGrant: input.parentReadSet }),
     ...(primaryOnly ? { primaryOnly: true } : {}),
   }));
+}
+
+function attachDocumentContext(
+  services: DaemonServices,
+  installationId: string,
+  input: z.infer<typeof ResolveContextRequestSchema>,
+  context: ContextPack,
+): ContextPack {
+  if (services.documents === undefined) return context;
+  const mountedProjectIds = services.brains.listMountedBrains(installationId)
+    .filter(({ brain }) => brain.kind === 'project')
+    .map(({ brain }) => brain.id);
+  const documentContext = services.documents.resolveForInstallation({
+    agentInstallationId: installationId,
+    query: [input.task ?? '', ...(input.entities ?? [])].join(' ').trim() || input.intent,
+    contextBudget: Math.max(0, context.explanation.budget.limitUnits - context.explanation.budget.usedUnits),
+    allowedBrainIds: mountedProjectIds,
+  });
+  if (documentContext.documents.length === 0) return context;
+  return {
+    ...context,
+    documents: [...documentContext.documents],
+    explanation: {
+      ...context.explanation,
+      sourceDocumentIds: [...documentContext.sourceDocumentIds],
+      documentBudget: documentContext.budget,
+    },
+  };
 }
 
 function contextBrainIds(brains: BrainStore, agentInstallationId: string): string[] {

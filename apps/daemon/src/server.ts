@@ -3,7 +3,7 @@ import { openDatabase, readDatabaseState, setDatabaseAuthority, type SqliteDatab
 import { ContextResolver } from '@memlume/context-resolver';
 import { EventJournal } from '@memlume/event-journal';
 import { MemoryStore, OutcomeStore } from '@memlume/retrieval';
-import { BrainStore, ProjectBindingStore, RoutingInboxStore } from '@memlume/shared-brains';
+import { BrainStore, DocumentProjectStore, ProjectBindingStore, RoutingInboxStore } from '@memlume/shared-brains';
 import express, { type Express } from 'express';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { type AddressInfo, type Server } from 'node:net';
@@ -227,6 +227,7 @@ export function createDaemon({ databasePath, setupToken, consolePath = defaultCo
       const semantic = new SemanticMemoryService({ journal, store });
       const routingInbox = new RoutingInboxStore({ rootDir: resolve(dirname(databasePath)) });
       const projects = new ProjectBindingStore(database, { markdownRoot: dataRoot });
+      const documents = new DocumentProjectStore(database);
       const runtimeStore = new TurnRuntimeStore({ rootDir: join(dataRoot, '.runtime') });
       const router = express();
       router.disable('x-powered-by');
@@ -241,6 +242,7 @@ export function createDaemon({ databasePath, setupToken, consolePath = defaultCo
         semantic,
         routingInbox,
         projects,
+        documents,
         dataRoot,
         reindex: () => reindex({ database, dataRoot }),
         runtime: runtimeStore,

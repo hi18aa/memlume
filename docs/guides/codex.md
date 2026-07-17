@@ -27,6 +27,8 @@ node apps/cli/dist/index.js setup adapter codex `
 
 Codex 的 `UserPromptSubmit` 先呼叫 `beforeTask`。daemon 依 workspace、任務、intent 與 entities 產生最小 ReadSet：Primary Project 必須優先，命中的 Linked Project 才會加入，Personal 只有在內容與任務相關時才加入。Host 不可自行要求未掛載或未匹配的 Brain。
 
+已掛載 Project Brain 的 profile 若另有 document attachment，文件 sections 會在同一個 context budget 內以唯讀、可引用的方式加入；source root 必須先由 setup API 明確 sync，普通 capture 不會寫入文件。
+
 同一個使用者訊息再由 `onUserMessage` 自動 capture。Core 會執行 Secret filter、admission、atomization、Brain Router 與 activation；使用者不需要重複說「記錄到 Memlume」。
 
 - 明確穩定的使用者偏好、事實或決策可成為 `active`，衝突時停在 review。

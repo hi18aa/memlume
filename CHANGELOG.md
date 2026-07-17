@@ -1,5 +1,18 @@
 # 變更紀錄
 
+## 未發布 - 2026-07-17
+
+### 新增
+
+- Document Project read-only MVP：以既有 Project Brain 掛載 Markdown source root，顯式同步版本、章節與 FTS5 projection。
+- profile document attachment 支援 `always_core`、`task_conditional`、`explicit_only`，並與既有 memory 共用 bounded context budget。
+- `/v1/setup/document-projects/*`、`/v1/setup/installations/*/document-bindings`、`/v1/documents/search` 與 `/v1/documents/context` API。
+- ContextPack 與 Hermes、Codex、OpenClaw、Claude Code renderer 顯示可回溯的文件 path、heading、revision 與 source hash citation。
+
+### 邊界
+
+- 文件 source root 為 Markdown authority；本階段只讀同步，不提供文件寫回、proposal、review 或自動 capture。
+
 ## [0.3.0] - 2026-07-16
 
 ### 新增

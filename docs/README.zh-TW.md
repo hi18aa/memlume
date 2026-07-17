@@ -94,12 +94,33 @@ Memlume 不會自動保存每一則對話，也不會把整個資料庫塞進 LL
 - 結構化的 `policy`、`preference`、`fact`、`decision` 記憶。
 - Personal 與 Project Brain、workspace binding，以及 task 層級的 ReadSet 限制。
 - SQLite FTS5 搜尋，以及含來源記憶 ID 與 context budget 的確定性 Context Resolver。
+- 既有 Project Brain 上的唯讀 document project：Markdown source root 掃描、revision/hash/section citation、FTS 搜尋，以及具預算的 profile attachment。
 - 具每個安裝實例掛載設定的共享 Brain、僅限 localhost 的 daemon、CLI，以及 MCP stdio server。
 - Adapter API 使用 Bearer Token 驗證；`/v1/health` 仍是公開的本機健康檢查。
 - 受治理的記憶編譯、candidate 審核與可辨識衝突的取代流程。
 - 可驗證的本機備份與還原維護，以及本機 Shared Brain Console。
 - Hermes、Codex、OpenClaw、Claude Code 的官方本機 Adapter；它們共用同一個已掛載 Brain，不複製 Agent 的原生記憶。
 - Outcome usage、確定性 feedback ranking、retrieval benchmark、公開 guides/examples 與 CI/release 流程。
+
+### 唯讀 Document Project（Phase B）
+
+Project Brain 可選擇掛接一個 Markdown source root。原始檔案仍是唯一 authority；只有明確執行 sync 才會建立 immutable revision、hash 與章節的 SQLite/FTS projection。Profile attachment 可設定 `always_core`、`task_conditional` 或 `explicit_only`，一般聊天 capture 不會寫入 document project，attachment 也不能繞過 Brain mount。
+
+目前 MVP 透過 daemon API 操作：
+
+```powershell
+# setup endpoint 需要 MEMLUME_SETUP_TOKEN
+curl.exe -X POST "$env:MEMLUME_DAEMON_URL/v1/setup/document-projects/$BRAIN_ID" `
+  -H "x-memlume-setup-token: $env:MEMLUME_SETUP_TOKEN" `
+  -H "content-type: application/json" `
+  -d '{"sourceRoot":"C:/absolute/path/to/docs"}'
+curl.exe -X POST "$env:MEMLUME_DAEMON_URL/v1/setup/document-projects/$BRAIN_ID/sync" `
+  -H "x-memlume-setup-token: $env:MEMLUME_SETUP_TOKEN" -H "content-type: application/json" -d '{}'
+curl.exe "$env:MEMLUME_DAEMON_URL/v1/documents/search?q=deployment" `
+  -H "authorization: Bearer $env:MEMLUME_TOKEN"
+```
+
+先掛載 Project Brain，再建立 installation 的 profile binding，`beforeTask` 才會自動取得文件 Context。搜尋與 Context 回應會附上 logical path、heading path、revision ID 與 source SHA-256 citation。
 
 v0.3.0 尚未實作：
 

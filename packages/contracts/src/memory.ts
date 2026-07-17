@@ -299,6 +299,21 @@ export const ContextDecisionSchema = z.object({
 });
 export type ContextDecision = z.infer<typeof ContextDecisionSchema>;
 
+/** Read-only Markdown section with a verifiable source citation. */
+export const ContextDocumentSectionSchema = z.object({
+  sectionId: UuidV7Schema,
+  documentId: UuidV7Schema,
+  brainId: UuidV7Schema,
+  logicalPath: NonEmptyTextSchema,
+  headingPath: z.array(NonEmptyTextSchema).min(1),
+  text: PreservedTextSchema,
+  revisionId: UuidV7Schema,
+  sourceSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  priority: z.number().int(),
+  estimatedTextUnits: z.number().int().positive(),
+});
+export type ContextDocumentSection = z.infer<typeof ContextDocumentSectionSchema>;
+
 export const ContextBudgetInclusionSchema = z.object({
   memoryId: UuidV7Schema,
   reason: NonEmptyTextSchema,
@@ -322,11 +337,31 @@ export const ContextExclusionSchema = z.object({
   reason: z.literal('exclusive_conflict'),
 });
 
+export const ContextDocumentBudgetInclusionSchema = z.object({
+  sectionId: UuidV7Schema,
+  reason: NonEmptyTextSchema,
+  estimatedTextUnits: z.number().int().positive(),
+});
+export const ContextDocumentBudgetOmissionSchema = z.object({
+  sectionId: UuidV7Schema,
+  reason: z.literal('budget'),
+});
+export const ContextDocumentBudgetSchema = z.object({
+  limitUnits: z.number().int().nonnegative(),
+  usedUnits: z.number().int().nonnegative(),
+  included: z.array(ContextDocumentBudgetInclusionSchema),
+  omitted: z.array(ContextDocumentBudgetOmissionSchema),
+  truncated: z.boolean(),
+});
+export type ContextDocumentBudget = z.infer<typeof ContextDocumentBudgetSchema>;
+
 export const ContextPackExplanationSchema = z.object({
   toolSelection: NonEmptyTextSchema.optional(),
   sourceMemoryIds: z.array(UuidV7Schema),
   budget: ContextBudgetSchema,
   exclusions: z.array(ContextExclusionSchema),
+  sourceDocumentIds: z.array(UuidV7Schema).optional(),
+  documentBudget: ContextDocumentBudgetSchema.optional(),
 });
 export type ContextPackExplanation = z.infer<typeof ContextPackExplanationSchema>;
 
@@ -339,6 +374,7 @@ export const ContextPackSchema = z.object({
   preferences: z.array(ContextPreferenceSchema),
   knowledge: z.array(ContextKnowledgeSchema),
   decisions: z.array(ContextDecisionSchema),
+  documents: z.array(ContextDocumentSectionSchema).optional(),
   explanation: ContextPackExplanationSchema,
 });
 export type ContextPack = z.infer<typeof ContextPackSchema>;

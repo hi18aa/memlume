@@ -27,6 +27,7 @@ claude plugin validate .\adapters\claude-code
 ## 自動讀寫
 
 - `UserPromptSubmit` 先以 `beforeTask` 讀取最小 ReadSet，並透過官方 `additionalContext` 暫時注入。ReadSet 以 Primary Project 為核心，依任務命中加入 Linked Project，Personal 只在相關時加入。
+- 若 profile 已掛載並綁定 document project，官方 `additionalContext` 也會加入 bounded、唯讀的 Markdown sections；citation 包含 logical path、heading、revision 與 source hash。
 - 同一使用者訊息以 `onUserMessage` 進入自動 capture。Core 先執行 Secret filter、admission、atomization、Brain Router 與 activation，再 append Markdown record、投影 SQLite。
 - 明確穩定命題才可能成為 `active`；推測是 `candidate`，事件是 `event_only`。未知／模糊 Project 進 durable routing Inbox，不建立新 Brain、不寫入 Personal。
 - `SubagentStart` 呼叫 `onSubagentStart`，沒有 child goal 時只注入 Primary Project；不讀取 Personal、未匹配 Linked Project、transcript 或 Claude native memory，也不寫入或 flush outbox。

@@ -96,6 +96,7 @@ Implemented:
 - Structured `policy`, `preference`, `fact`, and `decision` memories.
 - Personal and Project Brains with workspace bindings, plus task-level ReadSet constraints.
 - SQLite FTS5 search and a deterministic context resolver with source memory IDs and a context budget.
+- Read-only document projects on existing Project Brains: Markdown source-root scanning, revision/hash/section citations, FTS search, and profile-level attachments with bounded context.
 - Workspace initialization and explicit Project bindings, server-planned ReadSets, per-installation mounts, a localhost-only daemon, a CLI, and an MCP stdio server.
 - Bearer-token authentication for adapter APIs; `/v1/health` remains a public local health check.
 - Governed memory compilation, candidate review, conflict-aware replacement, secret filtering, and approval of bounded assistant finals.
@@ -109,6 +110,26 @@ Not implemented in v0.3.0:
 - Vector/embedding search, remote sync, cloud hosting, or multi-user access.
 - A public npm package.
 - Creating `procedure` or `capability` memories through the daemon, CLI, or MCP server; the writable API accepts only the four memory kinds above.
+
+### Read-only document projects
+
+A Project Brain can optionally point at a Markdown source root. The source files remain the only authority; an explicit sync creates immutable revision snapshots and searchable sections in SQLite. Profile attachments decide whether an authorized host receives `always_core`, `task_conditional`, or `explicit_only` sections. Ordinary chat capture never writes to a document project, and a document attachment never bypasses the Brain mount.
+
+The current MVP is daemon API based:
+
+```sh
+# setup endpoints require MEMLUME_SETUP_TOKEN
+curl -X POST "$MEMLUME_DAEMON_URL/v1/setup/document-projects/$BRAIN_ID" \
+  -H "x-memlume-setup-token: $MEMLUME_SETUP_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"sourceRoot":"/absolute/path/to/docs"}'
+curl -X POST "$MEMLUME_DAEMON_URL/v1/setup/document-projects/$BRAIN_ID/sync" \
+  -H "x-memlume-setup-token: $MEMLUME_SETUP_TOKEN" -H 'content-type: application/json' -d '{}'
+curl "$MEMLUME_DAEMON_URL/v1/documents/search?q=deployment" \
+  -H "authorization: Bearer $MEMLUME_TOKEN"
+```
+
+Use the setup API to mount the Project Brain and create a profile binding before expecting automatic document Context. Search and Context responses include the logical path, heading path, revision ID, and source SHA-256 citation.
 
 ## Requirements
 

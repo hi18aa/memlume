@@ -189,9 +189,20 @@ function compactContext(context) {
   const lines = [];
   for (const key of ['directives', 'preferences', 'decisions']) collectText(lines, context[key], 'text');
   collectText(lines, context.knowledge, 'summary');
+  collectDocuments(lines, context.documents);
   for (const procedure of array(context.procedures)) collectText(lines, isRecord(procedure) ? procedure.steps : undefined, undefined);
   const content = lines.slice(0, 8).join('\n');
   return content === '' ? undefined : `${CONTEXT_BOUNDARY}\n\nMemlume shared context:\n${content.slice(0, 1200)}`;
+}
+
+function collectDocuments(lines, values) {
+  for (const document of array(values)) {
+    if (!isRecord(document)) continue;
+    const path = text(document.logicalPath);
+    const heading = array(document.headingPath).map(text).filter(Boolean).join(' > ');
+    const body = text(document.text);
+    if (path !== undefined && body !== undefined) lines.push(`- ［${path}${heading === '' ? '' : `#${heading}`}］ ${body}`);
+  }
 }
 
 function collectText(lines, values, key) {

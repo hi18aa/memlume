@@ -30,6 +30,7 @@ Profile 與 token 只放在使用者設定目錄，不應提交 Git。`MEMLUME_D
 ## 自動流程
 
 - Hermes 的 `pre_llm_call` 以 `beforeTask` 讀取 daemon 依 workspace 產生的 ReadSet。通常包含 Primary Project；任務或 entity 命中時才加入 Linked Project，必要時才加入 Personal。
+- 若 installation 有已掛載 Project Brain 的 document attachment，`beforeTask` 也會依 attachment policy 讀取唯讀 Markdown sections；每段含 path、heading、revision 與 hash citation，普通對話不會改動文件。
 - Plugin callback 統一遵守 500ms fail-open contract；`beforeTask` 先讀取 250ms 內的 Context，outbox retry 在讀取完成後以背景工作執行，不阻塞 Hermes 原生流程。
 - Hermes 的使用者訊息以 `onUserMessage` 送入自動 capture。Core 會先過濾 Secret，再拆 atom、解析 Personal／Project 路由、檢查衝突，最後寫 Markdown authority 並投影 SQLite。
 - 未知或模糊 Project 會進 durable routing Inbox，不會靜默寫入 Personal。普通陳述可為 `candidate`，明確「記住」才可能成為 `active`；問候、閒聊與秘密會被忽略或拒絕。
