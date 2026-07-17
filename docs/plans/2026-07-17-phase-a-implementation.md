@@ -78,7 +78,7 @@ Expected: fail with `Expected callback within 500ms.`.
 
 **Step 3: Implement the minimal decoupling**
 
-Bind the outbox, schedule a serialized bounded flush without awaiting it, and immediately execute the context request. Preserve outbox locking, warnings, retry status, and the existing 250ms context request timeout.
+Bind the outbox, schedule a bounded background flush without awaiting it, and immediately execute the context request. Preserve the outbox lock, warnings, retry status, and the existing 250ms context request timeout.
 
 **Step 4: Run focused adapter tests**
 
@@ -143,4 +143,3 @@ git commit -m "fix: stabilize host adapter callbacks"
 Run: `git push origin main; gh run list --repo hi18aa/memlume --limit 3`
 
 Expected: the new main verification run completes successfully before claiming Phase A complete.
-

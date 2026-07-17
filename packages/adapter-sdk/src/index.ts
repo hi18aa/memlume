@@ -30,12 +30,13 @@ const REQUEST_TIMEOUT_MS = 10_000;
 export const ADAPTER_PROTOCOL_VERSION = '1';
 export const ADAPTER_VERSION = '0.3.0';
 const CONTEXT_REQUEST_TIMEOUT_MS = 250;
-// Give the local JSONL lock/write a short but deterministic window before the
-// context request.  This is still bounded (the read itself has a 250 ms
-// deadline), while avoiding a race where a busy filesystem makes `beforeTask`
-// return before a targetless legacy entry has been marked for retry.
+// `beforeTask` is a read-path callback.  Outbox delivery is scheduled in the
+// background and uses its own short request deadline so a degraded daemon
+// cannot hold the host callback or the local outbox lock for the normal 10 s
+// write deadline.
 const OUTBOX_FLUSH_GRACE_MS = 500;
 const OUTBOX_FLUSH_LOCK_TIMEOUT_MS = 50;
+const OUTBOX_FLUSH_REQUEST_TIMEOUT_MS = 250;
 const OUTBOX_LOCK_RETRY_MS = 10;
 const OUTBOX_LOCK_TIMEOUT_MS = 15_000;
 const OUTBOX_UNAVAILABLE_WARNING = 'Memlume outbox unavailable; event was not persisted.';
@@ -236,6 +237,7 @@ export class AdapterClient {
   private warnedAboutContext = false;
   private warnedAboutLegacyCaptureTarget = false;
   private writeChain: Promise<void> = Promise.resolve();
+  private backgroundFlush: Promise<void> = Promise.resolve();
 
   constructor({ daemonUrl, token, defaultWriteBrainId, outboxPath, outboxDirectory = join(homedir(), '.memlume'), maxOutboxEntries = 256, writeTimeoutMs = REQUEST_TIMEOUT_MS, fetch = globalThis.fetch, warn = console.warn }: AdapterClientOptions) {
     this.daemonUrl = daemonOrigin(daemonUrl);
@@ -255,8 +257,15 @@ export class AdapterClient {
       return this.unavailableContext(input);
     }
     this.bindOutbox(input.envelope);
-    await withTimeout(this.flush(undefined, OUTBOX_FLUSH_LOCK_TIMEOUT_MS), OUTBOX_FLUSH_GRACE_MS).catch(() => undefined);
-    return this.resolveContext(input, 'beforeTask');
+    // Resolve the read first so a host-provided fetch/test double cannot have
+    // its response consumed by the background retry path.  The retry is still
+    // detached from the callback and starts as soon as the bounded read has
+    // settled (including fail-open errors).  Register the promise synchronously
+    // so diagnostics called immediately after `beforeTask` can wait for the
+    // scheduled retry instead of observing a stale outbox.
+    const context = this.resolveContext(input, 'beforeTask');
+    this.scheduleBackgroundFlush(context);
+    return context;
   }
 
   async onUserMessage(envelope: AdapterEnvelope, message: AdapterMessage): Promise<WriteResult> {
@@ -333,11 +342,17 @@ export class AdapterClient {
   }
 
   outboxStatus(): Promise<OutboxStatus> {
-    return this.serialize(() => this.readOutboxStatus());
+    return this.serialize(async () => {
+      await this.backgroundFlush.catch(() => undefined);
+      return this.readOutboxStatus();
+    });
   }
 
   status(): Promise<AdapterRuntimeStatus> {
-    return this.serialize(async () => ({ outbox: await this.readOutboxStatus(), runtime: this.runtimeState.snapshot() }));
+    return this.serialize(async () => {
+      await this.backgroundFlush.catch(() => undefined);
+      return { outbox: await this.readOutboxStatus(), runtime: this.runtimeState.snapshot() };
+    });
   }
 
   private async resolveContext(input: BeforeTaskInput, callback: AdapterCallback): Promise<ContextPack> {
@@ -397,19 +412,36 @@ export class AdapterClient {
     }
   }
 
-  private async flush(skipRequest?: DeliveredCaptureMemoryRequest, lockTimeoutMs = OUTBOX_LOCK_TIMEOUT_MS): Promise<readonly WriteResult[]> {
+  private scheduleBackgroundFlush(read: Promise<unknown>): void {
+    this.backgroundFlush = this.backgroundFlush
+      .catch(() => undefined)
+      .then(async () => {
+        await read.catch(() => undefined);
+        await withTimeout(
+          this.flush(undefined, OUTBOX_FLUSH_LOCK_TIMEOUT_MS, OUTBOX_FLUSH_REQUEST_TIMEOUT_MS),
+          OUTBOX_FLUSH_GRACE_MS,
+        ).catch(() => undefined);
+      })
+      .catch(() => undefined);
+  }
+
+  private async flush(
+    skipRequest?: DeliveredCaptureMemoryRequest,
+    lockTimeoutMs = OUTBOX_LOCK_TIMEOUT_MS,
+    requestTimeoutMs = this.writeTimeoutMs,
+  ): Promise<readonly WriteResult[]> {
     const outboxPath = this.outboxPath;
     if (outboxPath === undefined) {
       return [];
     }
     try {
-      return await withOutboxLock(outboxPath, () => this.flushLocked(outboxPath, skipRequest), lockTimeoutMs);
+      return await withOutboxLock(outboxPath, () => this.flushLocked(outboxPath, skipRequest, requestTimeoutMs), lockTimeoutMs);
     } catch {
       return [];
     }
   }
 
-  private async flushLocked(outboxPath: string, skipRequest?: DeliveredCaptureMemoryRequest): Promise<readonly WriteResult[]> {
+  private async flushLocked(outboxPath: string, skipRequest?: DeliveredCaptureMemoryRequest, requestTimeoutMs = this.writeTimeoutMs): Promise<readonly WriteResult[]> {
     let entries: OutboxEntry[];
     try {
       entries = await readOutbox(outboxPath);
@@ -435,7 +467,7 @@ export class AdapterClient {
         remaining.push({ ...entry, state: 'retry', retryCount: entry.retryCount + 1 });
         continue;
       }
-      const result = await this.deliver(request);
+      const result = await this.deliver(request, requestTimeoutMs);
       results.push(result);
       if (result.status === 'queued') {
         remaining.push({ ...entry, state: 'retry', retryCount: entry.retryCount + 1, request });
@@ -476,14 +508,14 @@ export class AdapterClient {
     return result.status === 'queued' ? this.queue(request) : result;
   }
 
-  private async deliver(request: DeliveredWriteRequest): Promise<WriteResult> {
+  private async deliver(request: DeliveredWriteRequest, timeoutMs = this.writeTimeoutMs): Promise<WriteResult> {
     if (!hasToken(this.token)) {
       return { status: 'rejected' };
     }
 
     try {
       const { endpoint, ...body } = request;
-      const response = await this.request(endpoint, 'POST', body, this.writeTimeoutMs, 'onUserMessage');
+      const response = await this.request(endpoint, 'POST', body, timeoutMs, 'onUserMessage');
       if (response.ok) {
         const result = await response.json();
         const memoryStatus = confirmedCapture(result);

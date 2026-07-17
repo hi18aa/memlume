@@ -14,7 +14,10 @@ from typing import Any, Callable, Mapping
 
 BridgeRunner = Callable[[dict[str, Any], float | None], Any]
 CHILD_SESSION_LIMIT = 256
-DEFAULT_TIMEOUT_SECONDS = 1.0
+# Hermes must continue its turn even when the local bridge or daemon is slow.
+# The SDK owns the shorter 250 ms context request deadline; this host-level
+# guard leaves a deterministic 500 ms fail-open ceiling for future bridge work.
+DEFAULT_TIMEOUT_SECONDS = 0.5
 
 
 class MemlumePlugin:

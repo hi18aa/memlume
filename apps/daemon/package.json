@@ -14,7 +14,7 @@
     "build": "pnpm run build:console && pnpm run build:dependencies && tsc -p tsconfig.json",
     "start": "node dist/start.js",
     "test": "pnpm run build && vitest run --pool=threads",
-    "test:codex": "vitest --root ../.. run ../../adapters/codex/test/hook.test.ts",
+    "test:codex": "vitest --root ../.. run --exclude=.worktrees/** ../../adapters/codex/test/hook.test.ts",
     "typecheck": "pnpm run build:dependencies && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

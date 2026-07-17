@@ -27,7 +27,7 @@ node apps/cli/dist/index.js status
 ## Hook 與讀寫
 
 - `before_prompt_build` 呼叫 `beforeTask`，Core 依目前 workspace、任務與 entity 產生 ReadSet。Primary Project 優先，只有命中的 Linked Project 才加入；Personal 需具相關性才注入。
-- Hook 預留 1 秒；SDK 會以有界時間處理本機 outbox 與 daemon context，逾時則 fail-open，不阻塞 OpenClaw 原生流程。
+- Hook 統一遵守 500ms fail-open contract；`beforeTask` 先讀取 250ms 內的 Context，outbox retry 在讀取完成後以背景工作執行，不阻塞 OpenClaw 原生流程。
 - `message_received` 呼叫 `onUserMessage`。Core 會過濾 Secret、拆分 atom、解析 Personal／Project、檢查衝突，再以 Markdown authority → SQLite projection 寫入。
 - `subagent_spawned` 是 observer，只記錄 child 啟用訊號；child 第一次 `before_prompt_build` 才呼叫 `onSubagentStart`。沒有 child goal 時只讀 Primary Project，不讀取 Personal 或未匹配 Linked Project，也不寫入。
 
@@ -37,7 +37,7 @@ Assistant final 不直接成為記憶。daemon 只在 `.runtime` 暫存最多 64
 
 ## 離線與安全
 
-設定 `allowPromptInjection` 後才會向 OpenClaw 注入 Context；daemon 不可用時 Adapter fail-open，OpenClaw 原生流程仍可繼續。outbox 只保留安全且明確的 capture，下一次 `beforeTask` 或 `onUserMessage` 重送，沒有 silent eviction。token、完整 transcript、assistant 推理與 Secret 不會寫入 outbox 或記憶。
+設定 `allowPromptInjection` 後才會向 OpenClaw 注入 Context；daemon 不可用時 Adapter fail-open，OpenClaw 原生流程仍可繼續。outbox 只保留安全且明確的 capture，`beforeTask` 讀取完成後會背景重送，下一次 `beforeTask` 或 `onUserMessage` 仍會再次重試，沒有 silent eviction。token、完整 transcript、assistant 推理與 Secret 不會寫入 outbox 或記憶。
 
 ```powershell
 node apps/cli/dist/index.js doctor

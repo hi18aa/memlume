@@ -60,7 +60,7 @@ OpenClaw 設定中的 `corePath` 必須是完整 Memlume repository；Plugin 會
 
 例如使用者說「`記住專案使用 pnpm`」時，Plugin 會以設定的 Project scope 與 Brain 交給 Memlume Core。非敏感使用者訊息會追加 immutable event；依治理規則，非明確陳述可成為待審核 `candidate`，明確要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。完整 transcript、assistant output 與暫時推理不會形成自動 capture。Core 仍負責敏感資料過濾、候選審核、衝突處理與 mount 權限；Plugin 不能宣稱寫入已成功，也不會把 OpenClaw 私有記憶同步到 Memlume。
 
-若 daemon 暫時不可用，Shared Context 讀取會 fail-open，OpenClaw 照常執行。本機 outbox 僅接受明確記憶 capture，並在下一次 `before_prompt_build` 或 `message_received` 對應的 `beforeTask`／`onUserMessage` 重送。Brain 是資料歸屬與權限邊界，Hook 只決定觸發時機。
+若 daemon 暫時不可用，Shared Context 讀取會 fail-open，OpenClaw 照常執行。本機 outbox 僅接受明確記憶 capture，`beforeTask` 讀取完成後會在背景重送，下一次 `before_prompt_build` 或 `message_received` 對應的 `beforeTask`／`onUserMessage` 仍會再次重試。Brain 是資料歸屬與權限邊界，Hook 只決定觸發時機。
 
 ## 驗證
 

@@ -47,7 +47,7 @@ $env:MEMLUME_NODE_BINARY = 'node' # 選填
 
 例如「`記住專案使用 pnpm`」會由 workspace-owned routing 送到正確的 Project Brain。非敏感使用者訊息會追加 immutable event；依治理規則，非明確陳述可成為待審核 `candidate`，明確要求可走 `active` 路徑，仍可能需衝突審核。空白或不支援事件可被 ignore，秘密資料會 redacted 或 rejected。完整 transcript、assistant output 與暫時推理不會形成自動 capture。Core 仍負責敏感資料過濾、候選審核、衝突治理與 mount 授權；Adapter 不自行保存、重試或模擬 Hermes 的私有記憶。
 
-明確記憶暫時無法送達時，SDK 會將安全的請求排入本機 outbox；outbox 僅接受明確記憶 capture，並在下一次 `pre_llm_call` 的 `beforeTask` 或 `onUserMessage` 重送。Brain 是資料歸屬與權限邊界，Hook 只決定何時觸發。
+明確記憶暫時無法送達時，SDK 會將安全的請求排入本機 outbox；`beforeTask` 讀取完成後會在背景重送，下一次 `pre_llm_call` 的 `beforeTask` 或 `onUserMessage` 仍會再次重試。Brain 是資料歸屬與權限邊界，Hook 只決定何時觸發。
 
 ## 驗證
 

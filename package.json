@@ -19,7 +19,7 @@
     "test:codex": "pnpm --filter @memlume/adapter-sdk build && pnpm --dir apps/daemon run test:codex",
     "test:openclaw": "pnpm --filter @memlume/adapter-sdk build && pnpm --dir adapters/openclaw test",
     "test:claude-code": "pnpm --filter @memlume/adapter-sdk build && node --test adapters/claude-code/test/adapter.test.mjs",
-    "test:e2e": "pnpm --filter @memlume/adapter-sdk build && pnpm --filter @memlume/daemon build && pnpm --filter @memlume/daemon exec vitest --root ../.. run apps/daemon/test/shared-brain.e2e.test.ts test/e2e/adapter-contract.test.ts",
+    "test:e2e": "pnpm --filter @memlume/adapter-sdk build && pnpm --filter @memlume/daemon build && pnpm --filter @memlume/daemon exec vitest --root ../.. run --exclude=.worktrees/** apps/daemon/test/shared-brain.e2e.test.ts test/e2e/adapter-contract.test.ts",
     "benchmark:retrieval": "pnpm --filter @memlume/context-resolver build && node benchmarks/retrieval/run.ts",
     "lint": "pnpm -r --if-present run lint",
     "typecheck": "pnpm -r --if-present run typecheck"

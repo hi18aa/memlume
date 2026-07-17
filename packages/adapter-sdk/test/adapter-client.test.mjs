@@ -104,7 +104,13 @@ function fakeFetch(...responses) {
     calls,
     fetch: async (input, init) => {
       calls.push({ url: String(input), init });
-      const next = responses.shift();
+      const path = new URL(String(input)).pathname;
+      const expectedBodyKey = path.endsWith('/context/resolve') ? 'context' : 'capture';
+      const matchingIndex = responses.findIndex((candidate) => (
+        candidate && typeof candidate === 'object' && !(candidate instanceof Error) && !(candidate instanceof Response) &&
+        candidate.body && typeof candidate.body === 'object' && Object.hasOwn(candidate.body, expectedBodyKey)
+      ));
+      const next = matchingIndex >= 0 ? responses.splice(matchingIndex, 1)[0] : responses.shift();
       if (next instanceof Error) {
         throw next;
       }
@@ -566,7 +572,10 @@ describe('AdapterClient', () => {
     assert.deepEqual(entries[0].request.structuredData, { envelope });
     assert.equal(readFileSync(outboxPath, 'utf8').includes(legacySecret), false);
 
-    const recoveredFetch = fakeFetch({ status: 201, body: savedCapture() });
+    const recoveredFetch = fakeFetch(
+      { status: 201, body: savedCapture() },
+      { status: 200, body: { context: context() } },
+    );
     const recovered = new AdapterClient({
       daemonUrl: 'http://127.0.0.1:3849',
       token,
@@ -574,7 +583,8 @@ describe('AdapterClient', () => {
       fetch: recoveredFetch.fetch,
     });
     await recovered.beforeTask({ ...beforeTask, envelope });
-    assert.equal(recoveredFetch.calls[0].url.endsWith('/v1/memories/capture'), true);
+    await recovered.outboxStatus();
+    assert.equal(recoveredFetch.calls.some(({ url }) => url.endsWith('/v1/memories/capture')), true);
     assert.equal(readFileSync(outboxPath, 'utf8'), '');
   });
 
@@ -863,7 +873,10 @@ describe('AdapterClient', () => {
       daemonUrl: 'http://127.0.0.1:3849',
       token,
       outboxPath,
-      fetch: fakeFetch({ status: 503, body: { error: 'unavailable' } }).fetch,
+      fetch: fakeFetch(
+        { status: 503, body: { error: 'unavailable' } },
+        { status: 200, body: { context: context() } },
+      ).fetch,
     });
     await retrying.beforeTask({ ...beforeTask, envelope });
     assert.deepEqual(await retrying.outboxStatus(), { state: 'pending', pending: 1, retry: 1, discarded: 0 });
@@ -872,7 +885,10 @@ describe('AdapterClient', () => {
       daemonUrl: 'http://127.0.0.1:3849',
       token,
       outboxPath,
-      fetch: fakeFetch({ status: 403, body: { error: 'forbidden' } }).fetch,
+      fetch: fakeFetch(
+        { status: 403, body: { error: 'forbidden' } },
+        { status: 200, body: { context: context() } },
+      ).fetch,
     });
     await rejecting.beforeTask({ ...beforeTask, envelope });
     assert.deepEqual(await rejecting.outboxStatus(), { state: 'discarded', pending: 0, retry: 0, discarded: 1 });
@@ -1155,6 +1171,7 @@ describe('AdapterClient', () => {
     );
     const newClient = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token: newToken, outboxDirectory, fetch: recovered.fetch });
     assert.deepEqual(await newClient.beforeTask({ ...beforeTask, envelope }), context());
+    await newClient.outboxStatus();
 
     assert.equal(readFileSync(outboxPath, 'utf8'), '');
     assert.equal(outboxPath.includes(oldToken) || outboxPath.includes(newToken), false);
@@ -1181,7 +1198,10 @@ describe('AdapterClient', () => {
       daemonUrl: 'http://127.0.0.1:3849',
       token,
       outboxDirectory,
-      fetch: fakeFetch({ status: 201, body: savedCapture() }).fetch,
+      fetch: fakeFetch(
+        { status: 201, body: savedCapture() },
+        { status: 200, body: { context: context() } },
+      ).fetch,
     });
     await recovered.beforeTask({ ...beforeTask, envelope });
     assert.deepEqual(await recovered.outboxStatus(), { state: 'empty', pending: 0, retry: 0, discarded: 0 });
@@ -1219,9 +1239,13 @@ describe('AdapterClient', () => {
     assert.equal(lines.length, 1);
     assert.equal(readFileSync(outboxPath, 'utf8').includes(token), false);
 
-    const recovering = fakeFetch({ status: 201, body: savedCapture() });
+    const recovering = fakeFetch(
+      { status: 201, body: savedCapture() },
+      { status: 200, body: { context: context() } },
+    );
     const retryingClient = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: recovering.fetch });
     await retryingClient.beforeTask({ ...beforeTask, envelope });
+    await retryingClient.outboxStatus();
     assert.equal(readFileSync(outboxPath, 'utf8'), '');
   });
 
@@ -1240,10 +1264,14 @@ describe('AdapterClient', () => {
       daemonUrl: 'http://127.0.0.1:3849',
       token,
       outboxPath,
-      fetch: fakeFetch({ status: 201, body: savedCapture() }).fetch,
+      fetch: fakeFetch(
+        { status: 201, body: savedCapture() },
+        { status: 200, body: { context: context() } },
+      ).fetch,
     });
 
     await recovered.beforeTask({ ...beforeTask, envelope });
+    await recovered.outboxStatus();
     assert.equal(readFileSync(outboxPath, 'utf8'), '');
   });
 
@@ -1262,9 +1290,13 @@ describe('AdapterClient', () => {
       daemonUrl: 'http://127.0.0.1:3849',
       token,
       outboxPath,
-      fetch: fakeFetch({ status: 201, body: savedCapture() }).fetch,
+      fetch: fakeFetch(
+        { status: 201, body: savedCapture() },
+        { status: 200, body: { context: context() } },
+      ).fetch,
     });
     await recovered.beforeTask({ ...beforeTask, envelope });
+    await recovered.outboxStatus();
     assert.equal(readFileSync(outboxPath, 'utf8'), '');
   });
 
@@ -1287,6 +1319,7 @@ describe('AdapterClient', () => {
     });
 
     await client.beforeTask({ ...beforeTask, envelope });
+    await client.outboxStatus();
     assert.deepEqual(warnings, ['Memlume outbox update unavailable; queued events will retry later.']);
     assert.equal(warnings.join(' ').includes(token), false);
     assert.equal(readFileSync(outboxPath, 'utf8'), original);
@@ -1318,7 +1351,10 @@ describe('AdapterClient', () => {
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: queued.fetch });
     await client.onUserMessage(envelope, { messageId: 'message-2', content: 'Remember the SDK implementation.', brainId });
 
-    const rejected = fakeFetch({ status: 401, body: { error: 'unauthorized' } });
+    const rejected = fakeFetch(
+      { status: 401, body: { error: 'unauthorized' } },
+      { status: 200, body: { context: context() } },
+    );
     const retryingClient = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: rejected.fetch });
     await retryingClient.beforeTask({ ...beforeTask, envelope });
     assert.deepEqual(await retryingClient.outboxStatus(), { state: 'discarded', pending: 0, retry: 0, discarded: 1 });
@@ -1356,6 +1392,7 @@ describe('AdapterClient', () => {
     const rejecting = fakeFetch(
       { status: 400, body: { error: 'invalid_request' } },
       { status: 403, body: { error: 'forbidden' } },
+      { status: 200, body: { context: context() } },
     );
     const flushingClient = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: rejecting.fetch });
     await flushingClient.beforeTask({ ...beforeTask, envelope });
@@ -1410,7 +1447,10 @@ describe('AdapterClient', () => {
       daemonUrl: 'http://127.0.0.1:3849',
       token,
       outboxPath,
-      fetch: async () => {
+      fetch: async (input) => {
+        if (new URL(String(input)).pathname === '/v1/context/resolve') {
+          return new Response(JSON.stringify({ context: context() }), { status: 200 });
+        }
         oldRequestStarted.resolve();
         await releaseOldRequest.promise;
         return new Response(JSON.stringify(savedCapture()), { status: 201 });

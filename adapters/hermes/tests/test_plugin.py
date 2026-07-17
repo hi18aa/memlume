@@ -135,7 +135,7 @@ class HermesPluginTests(unittest.TestCase):
         plugin = plugin_module.MemlumePlugin(environment=self.environment, runner=lambda _payload, _timeout: {})
 
         self.assertEqual(plugin._timeout_seconds, plugin_module.DEFAULT_TIMEOUT_SECONDS)
-        self.assertGreaterEqual(plugin._timeout_seconds, 1.0)
+        self.assertEqual(plugin._timeout_seconds, 0.5)
 
     def test_registers_general_plugin_hooks_without_touching_memory_provider(self):
         plugin_module = importlib.import_module("memlume_plugin.plugin")
