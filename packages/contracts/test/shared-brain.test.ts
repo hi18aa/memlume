@@ -50,10 +50,11 @@ describe('shared brain contracts', () => {
     expect(AgentInstallationSchema.safeParse({ ...installation, profileId: '  ' }).success).toBe(false);
   });
 
-  test('accepts read or read_write brain mounts only', () => {
+  test('accepts read, propose, and read_write brain mounts', () => {
     const mount = { brainId: ids.brain, agentInstallationId: ids.installation, access: 'read_write' };
 
     expect(BrainMountSchema.safeParse(mount).success).toBe(true);
+    expect(BrainMountSchema.safeParse({ ...mount, access: 'propose' }).success).toBe(true);
     expect(BrainMountSchema.safeParse({ ...mount, access: 'admin' }).success).toBe(false);
     expect(BrainMountSchema.safeParse({ ...mount, agentInstallationId: 'installation-1' }).success).toBe(false);
   });

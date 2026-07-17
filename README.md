@@ -96,7 +96,7 @@ Implemented:
 - Structured `policy`, `preference`, `fact`, and `decision` memories.
 - Personal and Project Brains with workspace bindings, plus task-level ReadSet constraints.
 - SQLite FTS5 search and a deterministic context resolver with source memory IDs and a context budget.
-- Read-only document projects on existing Project Brains: Markdown source-root scanning, revision/hash/section citations, FTS search, and profile-level attachments with bounded context.
+- Governed document projects on existing Project Brains: Markdown authority, revision/hash/section citations, FTS search, bounded attachments, proposal review, atomic apply, audit, and drift protection.
 - Workspace initialization and explicit Project bindings, server-planned ReadSets, per-installation mounts, a localhost-only daemon, a CLI, and an MCP stdio server.
 - Bearer-token authentication for adapter APIs; `/v1/health` remains a public local health check.
 - Governed memory compilation, candidate review, conflict-aware replacement, secret filtering, and approval of bounded assistant finals.
@@ -111,9 +111,17 @@ Not implemented in v0.3.0:
 - A public npm package.
 - Creating `procedure` or `capability` memories through the daemon, CLI, or MCP server; the writable API accepts only the four memory kinds above.
 
-### Read-only document projects
+### Governed document projects
 
-A Project Brain can optionally point at a Markdown source root. The source files remain the only authority; an explicit sync creates immutable revision snapshots and searchable sections in SQLite. Profile attachments decide whether an authorized host receives `always_core`, `task_conditional`, or `explicit_only` sections. Ordinary chat capture never writes to a document project, and a document attachment never bypasses the Brain mount.
+A Project Brain can optionally point at a Markdown source root. The source files remain the only authority; an explicit sync creates immutable revision snapshots and searchable sections in SQLite. SQLite stores a rebuildable projection plus proposals, revision state, and audit events—it is not the document authority. Profile attachments decide whether an authorized host receives `always_core`, `task_conditional`, or `explicit_only` sections. Ordinary chat capture never writes to a document project, and a document attachment never bypasses the Brain mount.
+
+Document writes use three mount permissions:
+
+- `read` can search and receive active sections.
+- `propose` can submit a complete Markdown body with a base revision/hash, reason, and evidence. It creates `pending` only; it cannot review or apply.
+- `read_write` can approve/reject and apply a proposal. Apply rechecks the base revision, atomically replaces the Markdown file, syncs a new revision, and records an audit event.
+
+Every document search and Context resolution reconciles the source manifest first. A hand edit sets the project to `drift`; an apply failure sets `repair_required`. Neither state returns stale SQLite sections. Run an explicit sync after correcting the source. Proposal routes are `/v1/documents/proposals`, `/review`, and `/apply` and require an adapter bearer token.
 
 The current MVP is daemon API based:
 
@@ -127,6 +135,14 @@ curl -X POST "$MEMLUME_DAEMON_URL/v1/setup/document-projects/$BRAIN_ID/sync" \
   -H "x-memlume-setup-token: $MEMLUME_SETUP_TOKEN" -H 'content-type: application/json' -d '{}'
 curl "$MEMLUME_DAEMON_URL/v1/documents/search?q=deployment" \
   -H "authorization: Bearer $MEMLUME_TOKEN"
+```
+
+To propose a document update, use the `revisionId` and `sourceSha256` returned by the setup document listing. The proposal body is the complete replacement Markdown, not a patch:
+
+```sh
+curl -X POST "$MEMLUME_DAEMON_URL/v1/documents/proposals" \
+  -H "authorization: Bearer $MEMLUME_TOKEN" -H 'content-type: application/json' \
+  -d '{"brainId":"'$BRAIN_ID'","logicalPath":"architecture.md","baseRevisionId":"'$REVISION_ID'","baseSourceSha256":"'$SOURCE_SHA256'","proposedBody":"# Architecture\n\nUpdated.","reason":"Approved architecture change."}'
 ```
 
 Use the setup API to mount the Project Brain and create a profile binding before expecting automatic document Context. Search and Context responses include the logical path, heading path, revision ID, and source SHA-256 citation.

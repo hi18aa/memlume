@@ -525,13 +525,13 @@ function createProgram(io: Io, environment: NodeJS.ProcessEnv, runtime: CliRunti
     .description('將 Project Brain 綁定到 workspace。')
     .requiredOption('--path <path>', 'workspace 路徑')
     .option('--role <role>', 'primary 或 linked', 'linked')
-    .option('--access <access>', 'read 或 read_write')
+    .option('--access <access>', 'read、propose 或 read_write')
     .action(async (brainId: string, options: ProjectBindOptions, command: Command) => {
       const global = command.optsWithGlobals<GlobalOptions>();
       const role = options.role === 'primary' || options.role === 'linked' ? options.role : (() => { throw new Error('--role must be primary or linked.'); })();
-      const access = options.access === undefined || options.access === 'read' || options.access === 'read_write'
+      const access = options.access === undefined || options.access === 'read' || options.access === 'propose' || options.access === 'read_write'
         ? options.access
-        : (() => { throw new Error('--access must be read or read_write.'); })();
+        : (() => { throw new Error('--access must be read, propose, or read_write.'); })();
       const result = await requestSetupJson(
         global.url,
         setupToken(global.setupToken, environment),
@@ -758,7 +758,7 @@ interface DoctorAdapterProfile {
   readonly installationId: string;
   readonly profileId: string;
   readonly brainId?: string;
-  readonly mount: 'read' | 'read_write' | 'not_mounted' | 'not_checked';
+  readonly mount: 'read' | 'propose' | 'read_write' | 'not_mounted' | 'not_checked';
   readonly readCheck: 'ok' | 'failed';
 }
 
@@ -1360,7 +1360,7 @@ async function requiredFile(path: string, runtime: CliRuntime): Promise<Uint8Arr
   return file;
 }
 
-function configuredMounts(profiles: readonly AdapterProfile[], installations: unknown, diagnostics: unknown): ReadonlyMap<string, 'read' | 'read_write' | 'not_mounted'> {
+function configuredMounts(profiles: readonly AdapterProfile[], installations: unknown, diagnostics: unknown): ReadonlyMap<string, 'read' | 'propose' | 'read_write' | 'not_mounted'> {
   const installationIds = new Map<string, string>();
   for (const installation of arrayValue(installations, 'installations')) {
     const id = objectString(installation, 'id');
@@ -1371,12 +1371,12 @@ function configuredMounts(profiles: readonly AdapterProfile[], installations: un
       installationIds.set(adapterInstallationKey(clientType, installationId, profileId), id);
     }
   }
-  const mountAccess = new Map<string, 'read' | 'read_write'>();
+  const mountAccess = new Map<string, 'read' | 'propose' | 'read_write'>();
   for (const mount of arrayValue(diagnostics, 'mounts')) {
     const brainId = objectString(mount, 'brainId');
     const agentInstallationId = objectString(mount, 'agentInstallationId');
     const access = objectString(mount, 'access');
-    if (brainId !== undefined && agentInstallationId !== undefined && (access === 'read' || access === 'read_write')) {
+    if (brainId !== undefined && agentInstallationId !== undefined && (access === 'read' || access === 'propose' || access === 'read_write')) {
       mountAccess.set(`${agentInstallationId}\u0000${brainId}`, access);
     }
   }
@@ -1397,7 +1397,7 @@ function adapterProfileKey(profile: AdapterProfile): string {
 
 async function doctorAdapterProfiles(
   profiles: readonly AdapterProfile[],
-  mounts: ReadonlyMap<string, 'read' | 'read_write' | 'not_mounted'> | undefined,
+  mounts: ReadonlyMap<string, 'read' | 'propose' | 'read_write' | 'not_mounted'> | undefined,
   runtime: CliRuntime,
 ): Promise<readonly DoctorAdapterProfile[]> {
   const results: DoctorAdapterProfile[] = [];

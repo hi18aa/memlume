@@ -94,7 +94,7 @@ Memlume 不會自動保存每一則對話，也不會把整個資料庫塞進 LL
 - 結構化的 `policy`、`preference`、`fact`、`decision` 記憶。
 - Personal 與 Project Brain、workspace binding，以及 task 層級的 ReadSet 限制。
 - SQLite FTS5 搜尋，以及含來源記憶 ID 與 context budget 的確定性 Context Resolver。
-- 既有 Project Brain 上的唯讀 document project：Markdown source root 掃描、revision/hash/section citation、FTS 搜尋，以及具預算的 profile attachment。
+- 既有 Project Brain 上的受治理 document project：Markdown authority、revision/hash/section citation、FTS 搜尋、具預算 attachment、proposal 審核、atomic apply、audit 與 drift 防護。
 - 具每個安裝實例掛載設定的共享 Brain、僅限 localhost 的 daemon、CLI，以及 MCP stdio server。
 - Adapter API 使用 Bearer Token 驗證；`/v1/health` 仍是公開的本機健康檢查。
 - 受治理的記憶編譯、candidate 審核與可辨識衝突的取代流程。
@@ -102,9 +102,17 @@ Memlume 不會自動保存每一則對話，也不會把整個資料庫塞進 LL
 - Hermes、Codex、OpenClaw、Claude Code 的官方本機 Adapter；它們共用同一個已掛載 Brain，不複製 Agent 的原生記憶。
 - Outcome usage、確定性 feedback ranking、retrieval benchmark、公開 guides/examples 與 CI/release 流程。
 
-### 唯讀 Document Project（Phase B）
+### 受治理 Document Project（Phase C）
 
-Project Brain 可選擇掛接一個 Markdown source root。原始檔案仍是唯一 authority；只有明確執行 sync 才會建立 immutable revision、hash 與章節的 SQLite/FTS projection。Profile attachment 可設定 `always_core`、`task_conditional` 或 `explicit_only`，一般聊天 capture 不會寫入 document project，attachment 也不能繞過 Brain mount。
+Project Brain 可選擇掛接一個 Markdown source root。原始檔案仍是唯一 authority；只有明確執行 sync 才會建立 immutable revision、hash 與章節的 SQLite/FTS projection。SQLite 只保存可重建 projection、proposal、revision state 與 audit，不是文件 authority。Profile attachment 可設定 `always_core`、`task_conditional` 或 `explicit_only`，一般聊天 capture 不會寫入 document project，attachment 也不能繞過 Brain mount。
+
+文件治理權限為三層：
+
+- `read`：可搜尋並取得 active sections。
+- `propose`：可提交完整 Markdown body、base revision/hash、reason 與 evidence，僅建立 `pending`，不能 review/apply。
+- `read_write`：可 approve/reject 與 apply。套用前會再次檢查 base revision，使用同目錄暫存檔與 atomic rename 更新 Markdown，成功 sync 後建立新 revision 並寫入 audit。
+
+每次文件搜尋與 Context 都會先 reconcile source manifest。手動改檔會進入 `drift`，套用失敗會進入 `repair_required`；這兩種狀態都不會回傳舊 SQLite sections。修正原始檔後請明確執行 sync 才會恢復 `ready`。
 
 目前 MVP 透過 daemon API 操作：
 
@@ -121,6 +129,8 @@ curl.exe "$env:MEMLUME_DAEMON_URL/v1/documents/search?q=deployment" `
 ```
 
 先掛載 Project Brain，再建立 installation 的 profile binding，`beforeTask` 才會自動取得文件 Context。搜尋與 Context 回應會附上 logical path、heading path、revision ID 與 source SHA-256 citation。
+
+Proposal API 為 `/v1/documents/proposals`、`/review` 與 `/apply`，需要 adapter bearer token；proposal body 是完整替換內容，不是 patch。`propose` installation 不能自行審核或套用。
 
 v0.3.0 尚未實作：
 

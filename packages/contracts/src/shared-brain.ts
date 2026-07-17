@@ -26,7 +26,7 @@ export type AgentInstallation = z.infer<typeof AgentInstallationSchema>;
 export const BrainMountSchema = z.object({
   brainId: UuidV7Schema,
   agentInstallationId: UuidV7Schema,
-  access: z.enum(['read', 'read_write']),
+  access: z.enum(['read', 'propose', 'read_write']),
 });
 export type BrainMount = z.infer<typeof BrainMountSchema>;
 

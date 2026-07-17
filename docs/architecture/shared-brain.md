@@ -68,7 +68,7 @@ Hook 只決定時機，不對應獨立 Brain，也不會讀取 Host 私有長期
 
 ## 權限、失敗與可觀察性
 
-Setup token 用於註冊、binding、備份、診斷與 review；Adapter bearer token 代表單一 installation。每次讀寫都由 daemon 依 installation 的 mount/access 重新驗證。唯讀 Linked Project 可讀不可寫，未授權寫入會被拒絕。
+Setup token 用於註冊、binding、備份、診斷與 review；Adapter bearer token 代表單一 installation。每次讀寫都由 daemon 依 installation 的 mount/access 重新驗證。Brain mount 的文件治理權限分成 `read`、`propose`、`read_write`：`read` 只能讀取，`propose` 可提交完整 Markdown body 的 pending proposal，只有 `read_write` 可 review/apply。一般 memory write 仍只接受 `read_write`。
 
 讀取失敗 fail-open，Host 會收到空 Context 並繼續任務；寫入失敗只把安全且明確的 capture 放入 installation-specific outbox，沒有 silent eviction，queue full、routing_required、rejected 與 degraded 狀態可由 `memlume status`／`memlume doctor` 查到。
 
@@ -76,8 +76,15 @@ Setup token 用於註冊、binding、備份、診斷與 review；Adapter bearer 
 
 Context Pack 的 `traceId`、`sourceMemoryIds`、ReadSet exclusion 與 budget 可稽核。Outcome 只關閉 receipt 與留下稽核，不改變 memory status、權重或檢索排序。Agent native memory 不會被讀取、覆寫或同步。
 
-## Document Project（唯讀 MVP）
+## Document Project 治理流程
 
-Document project 是既有 Project Brain 的可選 capability，不是新的 Brain kind。使用者指定一個 Markdown source root 後，必須明確執行 sync；Core 會建立 revision、source SHA-256、文件版本與 heading section 的 SQLite/FTS projection。原始 Markdown 是唯一 authority，projection 遺失時可重新掃描，Core 不會反向改寫 source。
+Document project 是既有 Project Brain 的可選 capability，不是新的 Brain kind。使用者指定一個 Markdown source root 後，必須明確執行 sync；Core 會建立 revision、source SHA-256、文件版本與 heading section 的 SQLite/FTS projection。原始 Markdown 是唯一 authority，SQLite 只保存可重建 projection、proposal、revision state 與 audit；一般聊天 capture 不會寫入文件。
 
-Profile-level attachment 只在 installation 已 mount 該 Project Brain 時生效，支援 `always_core`、`task_conditional` 與 `explicit_only`。一般 `onUserMessage` capture、assistant final 與 inbox 不會寫入 document tables。文件 Context 與 memory Context 共用 budget，每段都帶 `logicalPath`、`headingPath`、`revisionId` 與 `sourceSha256`，Host 只收到 active version。
+Profile-level attachment 只在 installation 已 mount 該 Project Brain 時生效，支援 `always_core`、`task_conditional` 與 `explicit_only`。文件 Context 與 memory Context 共用 budget，每段都帶 `logicalPath`、`headingPath`、`revisionId` 與 `sourceSha256`，Host 只收到 active version。
+
+治理採用完整 body proposal，避免把不同 Agent 的 patch 方言直接寫入 authority：
+
+1. `propose` Agent 送出 `logicalPath`、`baseRevisionId`、`baseSourceSha256`、完整 `proposedBody`、reason 與 evidence，Core 只建立 `pending`，不改檔案、不進搜尋。
+2. `read_write` reviewer 先 `approve` 或 `reject`；`apply` 會再次檢查 base revision 與目前 source hash。
+3. 套用使用同目錄暫存檔加 atomic rename，成功後才 sync 新 revision 並標記 `applied`；失敗會標記 `repair_required` 並阻擋讀取。
+4. 每次搜尋與 Context 先 reconcile source manifest。手動改檔造成 `drift` 時不會回傳舊 projection；明確 sync 後才恢復 `ready`。

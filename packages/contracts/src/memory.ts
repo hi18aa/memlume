@@ -387,7 +387,7 @@ export type ContextPack = z.infer<typeof ContextPackSchema>;
 export const ReadSetEntrySchema = z.object({
   brainId: UuidV7Schema,
   role: z.enum(['primary', 'linked', 'personal']),
-  access: z.enum(['read', 'read_write']),
+  access: z.enum(['read', 'propose', 'read_write']),
   reason: NonEmptyTextSchema,
 }).strict();
 export type ReadSetEntry = z.infer<typeof ReadSetEntrySchema>;

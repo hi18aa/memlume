@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, test } from 'node:test';
 
 import { openDatabase } from '@memlume/database/internal';
 
-import { BrainStore, DocumentProjectStore } from '../dist/index.js';
+import { BrainStore, DocumentProjectNotReadyError, DocumentProposalConflictError, DocumentProjectStore } from '../dist/index.js';
 
 const roots = [];
 const databases = [];
@@ -120,5 +120,62 @@ describe('DocumentProjectStore', () => {
       mode: 'always_core',
       defaultDocumentPaths: ['../outside.md'],
     }), /inside|path/i);
+  });
+
+  test('requires reconciliation and keeps proposals out of reads until approved and applied', async () => {
+    const { root, project, installation, brains, store } = await setup();
+    await writeFile(join(root, 'profile.md'), '# Profile\n\nUses Vue.', 'utf8');
+    store.configure({ brainId: project.id, sourceRoot: root });
+    const synced = store.sync(project.id);
+    brains.mountBrain({ brainId: project.id, agentInstallationId: installation.installation.id, access: 'propose' });
+    const document = store.listDocuments(project.id)[0];
+    const proposal = store.propose({
+      agentInstallationId: installation.installation.id,
+      brainId: project.id,
+      logicalPath: document.logicalPath,
+      proposedBody: '# Profile\n\nUses Vue and TypeScript.',
+      baseRevisionId: synced.revisionId,
+      baseSourceSha256: document.sourceSha256,
+      reason: 'Keep the profile current.',
+      evidence: { source: 'test' },
+    });
+    assert.equal(proposal.status, 'pending');
+    assert.equal(store.search({ brainIds: [project.id], query: 'TypeScript' }).length, 0);
+    brains.mountBrain({ brainId: project.id, agentInstallationId: installation.installation.id, access: 'read_write' });
+    const approved = store.reviewProposal({ proposalId: proposal.id, reviewerId: installation.installation.id, decision: 'approve' });
+    assert.equal(approved.status, 'approved');
+    const applied = store.applyProposal({ proposalId: proposal.id, actorId: installation.installation.id });
+    assert.equal(applied.status, 'applied');
+    assert.match(await readFile(join(root, 'profile.md'), 'utf8'), /TypeScript/);
+    assert.equal(store.search({ brainIds: [project.id], query: 'TypeScript' }).length, 1);
+  });
+
+  test('blocks stale proposals and source drift instead of returning stale context', async () => {
+    const { root, project, installation, store } = await setup();
+    await writeFile(join(root, 'drift.md'), '# Drift\n\nOriginal source.', 'utf8');
+    store.configure({ brainId: project.id, sourceRoot: root });
+    const synced = store.sync(project.id);
+    const document = store.listDocuments(project.id)[0];
+    await writeFile(join(root, 'drift.md'), '# Drift\n\nEdited outside Memlume.', 'utf8');
+    assert.throws(() => store.search({ brainIds: [project.id], query: 'Original source' }), (error) => error instanceof DocumentProjectNotReadyError && error.state === 'drift');
+    assert.throws(() => store.propose({
+      agentInstallationId: installation.installation.id,
+      brainId: project.id,
+      logicalPath: document.logicalPath,
+      proposedBody: '# Drift\n\nReplacement.',
+      baseRevisionId: synced.revisionId,
+      baseSourceSha256: document.sourceSha256,
+      reason: 'stale',
+    }), /not ready|drift/i);
+    store.sync(project.id);
+    assert.throws(() => store.propose({
+      agentInstallationId: installation.installation.id,
+      brainId: project.id,
+      logicalPath: document.logicalPath,
+      proposedBody: '# Drift\n\nReplacement.',
+      baseRevisionId: synced.revisionId,
+      baseSourceSha256: document.sourceSha256,
+      reason: 'stale revision',
+    }), (error) => error instanceof DocumentProposalConflictError);
   });
 });

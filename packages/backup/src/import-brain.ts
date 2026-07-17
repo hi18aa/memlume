@@ -64,6 +64,9 @@ function importSnapshot(target: SqliteDatabase, source: Database.Database, sourc
   if (sourceBrain === undefined) {
     throw new Error('Brain export does not contain its declared Brain.');
   }
+  if (hasTable(source, 'document_projects') && source.prepare('SELECT 1 FROM document_projects WHERE brain_id = ?').get(sourceBrainId) !== undefined) {
+    throw new FullRestoreRequiredError();
+  }
   const name = requestedName === undefined ? sourceBrain.name : requestedName.trim();
   if (name === '') {
     throw new Error('Imported Brain name must not be empty.');
@@ -146,6 +149,10 @@ function importSnapshot(target: SqliteDatabase, source: Database.Database, sourc
     eventCount: events.length,
     memoryCount: memories.length,
   };
+}
+
+function hasTable(database: Database.Database, name: string): boolean {
+  return database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
 }
 
 const eventColumns = `SELECT events.id, events.event_type, events.raw_content, events.structured_data, events.source_type, events.source_agent, events.source_reference, events.source_data, events.occurred_at, events.ingested_at, events.processing_status, events.content_hash`;

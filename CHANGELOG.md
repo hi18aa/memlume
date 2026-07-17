@@ -8,10 +8,11 @@
 - profile document attachment 支援 `always_core`、`task_conditional`、`explicit_only`，並與既有 memory 共用 bounded context budget。
 - `/v1/setup/document-projects/*`、`/v1/setup/installations/*/document-bindings`、`/v1/documents/search` 與 `/v1/documents/context` API。
 - ContextPack 與 Hermes、Codex、OpenClaw、Claude Code renderer 顯示可回溯的文件 path、heading、revision 與 source hash citation。
+- Document governance：`read`／`propose`／`read_write` mount ACL、完整 Markdown body proposal、review/apply API、base revision/hash conflict、audit、atomic source apply，以及 `drift`／`repair_required` read gate。
 
 ### 邊界
 
-- 文件 source root 為 Markdown authority；本階段只讀同步，不提供文件寫回、proposal、review 或自動 capture。
+- 文件 source root 仍是 Markdown authority；一般 capture 不會寫入文件。Proposal 必須經 `read_write` review/apply，讀取前會 reconcile source manifest，drift 或 repair 狀態不會回傳舊 projection。
 
 ## [0.3.0] - 2026-07-16
 

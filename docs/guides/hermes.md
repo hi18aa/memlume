@@ -30,13 +30,15 @@ Profile 與 token 只放在使用者設定目錄，不應提交 Git。`MEMLUME_D
 ## 自動流程
 
 - Hermes 的 `pre_llm_call` 以 `beforeTask` 讀取 daemon 依 workspace 產生的 ReadSet。通常包含 Primary Project；任務或 entity 命中時才加入 Linked Project，必要時才加入 Personal。
-- 若 installation 有已掛載 Project Brain 的 document attachment，`beforeTask` 也會依 attachment policy 讀取唯讀 Markdown sections；每段含 path、heading、revision 與 hash citation，普通對話不會改動文件。
+- 若 installation 有已掛載 Project Brain 的 document attachment，`beforeTask` 也會依 attachment policy 讀取 active Markdown sections；每段含 path、heading、revision 與 hash citation，普通對話不會改動文件。
 - Plugin callback 統一遵守 500ms fail-open contract；`beforeTask` 先讀取 250ms 內的 Context，outbox retry 在讀取完成後以背景工作執行，不阻塞 Hermes 原生流程。
 - Hermes 的使用者訊息以 `onUserMessage` 送入自動 capture。Core 會先過濾 Secret，再拆 atom、解析 Personal／Project 路由、檢查衝突，最後寫 Markdown authority 並投影 SQLite。
 - 未知或模糊 Project 會進 durable routing Inbox，不會靜默寫入 Personal。普通陳述可為 `candidate`，明確「記住」才可能成為 `active`；問候、閒聊與秘密會被忽略或拒絕。
 - `subagent_start` 只觀察 child；child 第一次支援的 `pre_llm_call` 才呼叫 `onSubagentStart`，沒有 child goal 時只讀 Primary Project，不寫入或 flush outbox。
 
 Hermes assistant final 不會直接進 Brain。Core 會在 `.runtime` 暫存最多 64 KiB、24 小時；下一個使用者回覆「可以／同意」時，只有存在有效 buffer 才會重新路由並寫入。`修正` 會建立 superseding record；沒有 buffer 或已過期則忽略。
+
+若要讓 Hermes 建議修改文件，請將 mount 設為 `propose`：它只能送出完整 Markdown body、base revision/hash、reason 與 evidence 的 pending proposal。具 `read_write` 的維護者才可 review/apply；套用會 atomic rename 後 sync 新 revision。手動改檔造成 `drift` 或套用失敗進入 `repair_required` 時，文件搜尋與 Context 會暫停，不會回傳舊投影。
 
 ## 離線與檢查
 

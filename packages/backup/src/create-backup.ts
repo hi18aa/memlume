@@ -97,6 +97,20 @@ function sanitizeSnapshot(database: Database.Database, brainId: string | undefin
     database.exec('DROP TRIGGER IF EXISTS events_reject_update; DROP TRIGGER IF EXISTS events_reject_delete;');
     try {
       database.transaction(() => {
+        // Document Markdown is a Brain-scoped authority.  A selected-Brain
+        // snapshot must not retain proposals, audit events, or projections
+        // belonging to another Brain. Legacy snapshots may predate documents.
+        if (hasTable(database, 'document_projects')) {
+          database.prepare('DELETE FROM document_section_search WHERE brain_id <> ?').run(brainId);
+          database.prepare('DELETE FROM document_audit_events WHERE brain_id <> ?').run(brainId);
+          database.prepare('DELETE FROM document_proposals WHERE brain_id <> ?').run(brainId);
+          database.prepare('DELETE FROM document_sections WHERE document_id NOT IN (SELECT id FROM documents WHERE brain_id = ?)').run(brainId);
+          database.prepare('DELETE FROM document_versions WHERE document_id NOT IN (SELECT id FROM documents WHERE brain_id = ?)').run(brainId);
+          database.prepare('DELETE FROM documents WHERE brain_id <> ?').run(brainId);
+          database.prepare('DELETE FROM document_revisions WHERE brain_id <> ?').run(brainId);
+          database.prepare('DELETE FROM document_projects WHERE brain_id <> ?').run(brainId);
+          database.exec('DELETE FROM profile_document_bindings;');
+        }
         database.prepare('DELETE FROM memory_search WHERE memory_id NOT IN (SELECT memory_id FROM memory_brains WHERE brain_id = ?)').run(brainId);
         database.prepare('DELETE FROM memory_usage WHERE memory_id NOT IN (SELECT memory_id FROM memory_brains WHERE brain_id = ?)').run(brainId);
         database.prepare('DELETE FROM memory_relations WHERE source_id NOT IN (SELECT memory_id FROM memory_brains WHERE brain_id = ?) OR target_id NOT IN (SELECT memory_id FROM memory_brains WHERE brain_id = ?)').run(brainId, brainId);
@@ -140,6 +154,10 @@ function createManifest(database: Database.Database, snapshot: Uint8Array, selec
     checksums: { 'snapshot.sqlite': sha256(snapshot) },
     ...(encrypted ? { encryption: { algorithm: 'aes-256-gcm' as const, kdf: 'scrypt' as const } } : {}),
   };
+}
+
+function hasTable(database: Database.Database, name: string): boolean {
+  return database.prepare("SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?").get(name) !== undefined;
 }
 
 export function readMappings(database: Database.Database): BackupMappings {

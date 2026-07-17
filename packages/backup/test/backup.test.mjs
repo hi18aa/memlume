@@ -101,6 +101,25 @@ function seedImportTarget(filename) {
 
 function downgradeToReceiptMigration005(database) {
   database.exec(`
+    ALTER TABLE brain_mounts RENAME TO brain_mounts_governance_legacy;
+    CREATE TABLE IF NOT EXISTS brain_mounts (
+    brain_id TEXT NOT NULL,
+    agent_installation_id TEXT NOT NULL,
+    access TEXT NOT NULL CHECK(access IN ('read', 'read_write')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(brain_id, agent_installation_id),
+    FOREIGN KEY(brain_id) REFERENCES brains(id),
+    FOREIGN KEY(agent_installation_id) REFERENCES agent_installations(id)
+  );
+    INSERT INTO brain_mounts SELECT brain_id, agent_installation_id, access, created_at, updated_at FROM brain_mounts_governance_legacy WHERE access IN ('read', 'read_write');
+    DROP TABLE brain_mounts_governance_legacy;
+    DROP INDEX IF EXISTS idx_document_audit_proposal;
+    DROP INDEX IF EXISTS idx_document_audit_brain_created;
+    DROP TABLE IF EXISTS document_audit_events;
+    DROP INDEX IF EXISTS idx_document_proposals_document;
+    DROP INDEX IF EXISTS idx_document_proposals_brain_status;
+    DROP TABLE IF EXISTS document_proposals;
     DROP TABLE IF EXISTS document_section_search;
     DROP TABLE IF EXISTS profile_document_bindings;
     DROP TABLE IF EXISTS document_sections;
@@ -132,7 +151,7 @@ function downgradeToReceiptMigration005(database) {
     DROP INDEX IF EXISTS idx_adapter_heartbeats_installation;
     DROP TABLE IF EXISTS adapter_heartbeats;
     DROP INDEX IF EXISTS idx_outcomes_result_created_at;
-    DELETE FROM schema_migrations WHERE id IN ('006_receipt_hardening', '007_project_model', '008_record_projection', '009_capture_receipts', '010_adapter_heartbeats', '011_outcome_results', '012_document_projects');
+    DELETE FROM schema_migrations WHERE id IN ('006_receipt_hardening', '007_project_model', '008_record_projection', '009_capture_receipts', '010_adapter_heartbeats', '011_outcome_results', '012_document_projects', '013_document_governance');
   `);
 }
 

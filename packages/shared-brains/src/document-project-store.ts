@@ -4,9 +4,12 @@ import {
   lstatSync,
   readFileSync,
   readdirSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import type { Dirent } from 'node:fs';
-import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import {
   ContextDocumentSectionSchema,
@@ -27,6 +30,7 @@ export type DocumentProject = {
   readonly sourceRoot: string;
   readonly authorityMode: 'markdown';
   readonly activeRevisionId?: string;
+  readonly state: 'ready' | 'drift' | 'repair_required';
   readonly captureMode: 'manual_only';
   readonly retrievalPolicy: Record<string, unknown>;
   readonly createdAt: string;
@@ -63,6 +67,54 @@ export type DocumentContextResult = {
   readonly budget: ContextDocumentBudget;
 };
 
+export type DocumentProposalStatus = 'pending' | 'approved' | 'rejected' | 'applied' | 'conflict' | 'apply_failed';
+
+export type DocumentProposal = {
+  readonly id: string;
+  readonly brainId: string;
+  readonly documentId: string;
+  readonly logicalPath: string;
+  readonly baseRevisionId: string;
+  readonly baseSourceSha256: string;
+  readonly proposedBody: string;
+  readonly reason: string;
+  readonly evidence: Record<string, unknown>;
+  readonly status: DocumentProposalStatus;
+  readonly actorId: string;
+  readonly reviewerId?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly reviewedAt?: string;
+  readonly appliedAt?: string;
+};
+
+export class DocumentProjectNotReadyError extends Error {
+  readonly code = 'document_project_not_ready';
+  readonly status = 409;
+  constructor(readonly brainId: string, readonly state: DocumentProject['state'] | 'not_ready', options?: ErrorOptions) {
+    super(`Document project is not ready for reads: ${brainId} (${state}).`, options);
+    this.name = 'DocumentProjectNotReadyError';
+  }
+}
+
+export class DocumentProposalConflictError extends Error {
+  readonly code = 'document_proposal_conflict';
+  readonly status = 409;
+  constructor(readonly brainId: string, message = 'Document proposal base revision is stale.') {
+    super(message);
+    this.name = 'DocumentProposalConflictError';
+  }
+}
+
+export class DocumentProposalStateError extends Error {
+  readonly code = 'document_proposal_state';
+  readonly status = 409;
+  constructor(readonly proposalId: string, message = 'Document proposal is not in the required state.') {
+    super(message);
+    this.name = 'DocumentProposalStateError';
+  }
+}
+
 type ProjectRow = {
   brain_id: string;
   source_root: string;
@@ -70,6 +122,26 @@ type ProjectRow = {
   retrieval_policy: string;
   created_at: string;
   updated_at: string;
+  state: DocumentProject['state'];
+};
+
+type ProposalRow = {
+  id: string;
+  brain_id: string;
+  document_id: string;
+  logical_path: string;
+  base_revision_id: string;
+  base_source_sha256: string;
+  proposed_body: string;
+  reason: string;
+  evidence_json: string;
+  status: DocumentProposalStatus;
+  actor_id: string;
+  reviewer_id: string | null;
+  created_at: string;
+  updated_at: string;
+  reviewed_at: string | null;
+  applied_at: string | null;
 };
 
 type DocumentRow = {
@@ -141,7 +213,7 @@ export class DocumentProjectStore {
       if (existing !== undefined && resolve(existing.source_root) !== sourceRoot) {
         this.database.prepare("UPDATE documents SET status = 'missing', updated_at = ? WHERE brain_id = ?").run(now, brainId);
         this.database.prepare("UPDATE document_versions SET status = 'missing' WHERE document_id IN (SELECT id FROM documents WHERE brain_id = ?)").run(brainId);
-        this.database.prepare('UPDATE document_projects SET active_revision_id = NULL WHERE brain_id = ?').run(brainId);
+        this.database.prepare("UPDATE document_projects SET active_revision_id = NULL, state = 'drift' WHERE brain_id = ?").run(brainId);
       }
       this.database.prepare(`
         INSERT INTO document_projects (brain_id, source_root, authority_mode, capture_mode, retrieval_policy, created_at, updated_at)
@@ -155,7 +227,7 @@ export class DocumentProjectStore {
   getProject(brainId: string): DocumentProject | undefined {
     const id = UuidV7Schema.parse(brainId);
     const row = this.database.prepare(`
-      SELECT brain_id, source_root, active_revision_id, retrieval_policy, created_at, updated_at
+      SELECT brain_id, source_root, active_revision_id, retrieval_policy, created_at, updated_at, state
       FROM document_projects WHERE brain_id = ?
     `).get(id) as ProjectRow | undefined;
     return row === undefined ? undefined : toProject(row);
@@ -256,16 +328,189 @@ export class DocumentProjectStore {
       }
       this.database.prepare("UPDATE document_revisions SET status = 'superseded' WHERE brain_id = ? AND status = 'active'").run(id);
       this.database.prepare("UPDATE document_revisions SET status = 'active' WHERE id = ?").run(revisionId);
-      this.database.prepare('UPDATE document_projects SET active_revision_id = ?, updated_at = ? WHERE brain_id = ?').run(revisionId, now, id);
+      this.database.prepare("UPDATE document_projects SET active_revision_id = ?, state = 'ready', updated_at = ? WHERE brain_id = ?").run(revisionId, now, id);
     })();
 
     return { revisionId, documents: files.length, sections: sectionCount, sourceManifestSha256 };
+  }
+
+  /** Reconciles the Markdown authority before any document read is exposed. */
+  reconcile(brainId: string): DocumentProject {
+    const id = UuidV7Schema.parse(brainId);
+    const project = this.getProject(id);
+    if (project === undefined) throw new Error('Document project is not configured.');
+    if (project.state === 'repair_required') throw new DocumentProjectNotReadyError(id, project.state);
+    if (project.activeRevisionId === undefined) {
+      this.setProjectState(id, 'drift');
+      throw new DocumentProjectNotReadyError(id, 'not_ready');
+    }
+    let files: SourceFile[];
+    try {
+      files = scanSourceRoot(project.sourceRoot);
+    } catch (error) {
+      this.setProjectState(id, 'repair_required');
+      throw new DocumentProjectNotReadyError(id, 'repair_required', { cause: error });
+    }
+    const manifest = hashText(JSON.stringify(files.map(({ logicalPath, sha256 }) => ({ logicalPath, sha256 }))));
+    const revision = this.database.prepare('SELECT source_manifest_sha256 FROM document_revisions WHERE id = ? AND brain_id = ?').get(project.activeRevisionId, id) as { source_manifest_sha256: string } | undefined;
+    if (revision === undefined || revision.source_manifest_sha256 !== manifest) {
+      this.setProjectState(id, 'drift');
+      throw new DocumentProjectNotReadyError(id, 'drift');
+    }
+    if (project.state !== 'ready') this.setProjectState(id, 'ready');
+    return this.getProject(id)!;
+  }
+
+  propose(input: {
+    readonly agentInstallationId: string;
+    readonly brainId: string;
+    readonly logicalPath: string;
+    readonly proposedBody: string;
+    readonly baseRevisionId: string;
+    readonly baseSourceSha256: string;
+    readonly reason: string;
+    readonly evidence?: Record<string, unknown>;
+  }): DocumentProposal {
+    const agentId = UuidV7Schema.parse(input.agentInstallationId);
+    const brainId = UuidV7Schema.parse(input.brainId);
+    const logicalPath = normalizeDocumentPath(input.logicalPath);
+    const baseRevisionId = UuidV7Schema.parse(input.baseRevisionId);
+    const baseSourceSha256 = normalizeSha256(input.baseSourceSha256);
+    const reason = NonEmptyTextSchema.parse(input.reason);
+    if (typeof input.proposedBody !== 'string') throw new Error('Document proposal body must be text.');
+    this.reconcile(brainId);
+    const current = this.database.prepare(`
+      SELECT d.id, d.active_version_id, v.revision_id, v.source_sha256
+      FROM documents d JOIN document_versions v ON v.id = d.active_version_id
+      WHERE d.brain_id = ? AND d.logical_path = ? AND d.status = 'active' AND v.status = 'active'
+    `).get(brainId, logicalPath) as { id: string; active_version_id: string; revision_id: string; source_sha256: string } | undefined;
+    if (current === undefined || current.revision_id !== baseRevisionId || current.source_sha256 !== baseSourceSha256) {
+      throw new DocumentProposalConflictError(brainId);
+    }
+    const id = createUuidV7();
+    const now = new Date().toISOString();
+    const evidence = input.evidence ?? {};
+    this.database.transaction(() => {
+      this.database.prepare(`
+        INSERT INTO document_proposals (
+          id, brain_id, document_id, logical_path, base_revision_id, base_source_sha256,
+          proposed_body, reason, evidence_json, status, actor_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+      `).run(id, brainId, current.id, logicalPath, baseRevisionId, baseSourceSha256, input.proposedBody, reason, JSON.stringify(evidence), agentId, now, now);
+      this.appendAudit({ brainId, proposalId: id, eventType: 'proposal_created', actorId: agentId, detail: { logicalPath, baseRevisionId } });
+    })();
+    return this.getProposal(id)!;
+  }
+
+  listProposals(brainId: string, status?: DocumentProposalStatus): DocumentProposal[] {
+    const id = UuidV7Schema.parse(brainId);
+    const rows = status === undefined
+      ? this.database.prepare('SELECT * FROM document_proposals WHERE brain_id = ? ORDER BY created_at DESC, id DESC').all(id)
+      : this.database.prepare('SELECT * FROM document_proposals WHERE brain_id = ? AND status = ? ORDER BY created_at DESC, id DESC').all(id, status);
+    return (rows as ProposalRow[]).map(toProposal);
+  }
+
+  reviewProposal(input: { readonly proposalId: string; readonly reviewerId: string; readonly decision: 'approve' | 'reject' }): DocumentProposal {
+    const proposalId = UuidV7Schema.parse(input.proposalId);
+    const reviewerId = UuidV7Schema.parse(input.reviewerId);
+    const row = this.getProposalRow(proposalId);
+    if (row === undefined) throw new Error('Document proposal not found.');
+    if (row.status !== 'pending') throw new DocumentProposalStateError(proposalId);
+    const status: DocumentProposalStatus = input.decision === 'approve' ? 'approved' : 'rejected';
+    const now = new Date().toISOString();
+    this.database.transaction(() => {
+      this.database.prepare('UPDATE document_proposals SET status = ?, reviewer_id = ?, reviewed_at = ?, updated_at = ? WHERE id = ? AND status = \'pending\'').run(status, reviewerId, now, now, proposalId);
+      this.appendAudit({ brainId: row.brain_id, proposalId, eventType: input.decision === 'approve' ? 'proposal_approved' : 'proposal_rejected', actorId: reviewerId, detail: {} });
+    })();
+    return this.getProposal(proposalId)!;
+  }
+
+  applyProposal(input: { readonly proposalId: string; readonly actorId: string }): DocumentProposal {
+    const proposalId = UuidV7Schema.parse(input.proposalId);
+    const actorId = UuidV7Schema.parse(input.actorId);
+    const row = this.getProposalRow(proposalId);
+    if (row === undefined) throw new Error('Document proposal not found.');
+    if (row.status !== 'approved') throw new DocumentProposalStateError(proposalId, 'Only an approved document proposal can be applied.');
+    const project = this.reconcile(row.brain_id);
+    const current = this.database.prepare(`
+      SELECT d.active_version_id, d.status, v.revision_id, v.source_sha256
+      FROM documents d JOIN document_versions v ON v.id = d.active_version_id
+      WHERE d.id = ? AND d.brain_id = ? AND v.status = 'active'
+    `).get(row.document_id, row.brain_id) as { active_version_id: string; status: string; revision_id: string; source_sha256: string } | undefined;
+    if (current === undefined || current.status !== 'active' || current.revision_id !== row.base_revision_id || current.source_sha256 !== row.base_source_sha256) {
+      this.markProposalConflict(row, actorId);
+      throw new DocumentProposalConflictError(row.brain_id);
+    }
+    const absolutePath = safeSourcePath(project.sourceRoot, row.logical_path);
+    const stat = lstatSync(absolutePath);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      this.setProjectState(row.brain_id, 'repair_required');
+      throw new DocumentProjectNotReadyError(row.brain_id, 'repair_required');
+    }
+    const sourceBody = readFileUtf8(absolutePath);
+    if (hashText(sourceBody) !== row.base_source_sha256) {
+      this.markProposalConflict(row, actorId);
+      throw new DocumentProposalConflictError(row.brain_id);
+    }
+    const temporaryPath = `${absolutePath}.${createUuidV7()}.memlume.tmp`;
+    try {
+      writeFileSync(temporaryPath, row.proposed_body, { encoding: 'utf8', flag: 'wx' });
+      renameSync(temporaryPath, absolutePath);
+    } catch (error) {
+      if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
+      throw error;
+    }
+    try {
+      this.sync(row.brain_id);
+    } catch (error) {
+      this.setProjectState(row.brain_id, 'repair_required');
+      this.database.transaction(() => {
+        this.database.prepare("UPDATE document_proposals SET status = 'apply_failed', updated_at = ? WHERE id = ?").run(new Date().toISOString(), proposalId);
+        this.appendAudit({ brainId: row.brain_id, proposalId, eventType: 'proposal_apply_failed', actorId, detail: { error: error instanceof Error ? error.message : String(error) } });
+      })();
+      throw error;
+    }
+    const now = new Date().toISOString();
+    this.database.transaction(() => {
+      this.database.prepare("UPDATE document_proposals SET status = 'applied', applied_at = ?, updated_at = ? WHERE id = ? AND status = 'approved'").run(now, now, proposalId);
+      this.appendAudit({ brainId: row.brain_id, proposalId, eventType: 'proposal_applied', actorId, detail: {} });
+    })();
+    return this.getProposal(proposalId)!;
+  }
+
+  private setProjectState(brainId: string, state: DocumentProject['state']): void {
+    this.database.prepare('UPDATE document_projects SET state = ?, updated_at = ? WHERE brain_id = ?').run(state, new Date().toISOString(), brainId);
+  }
+
+  private getProposalRow(proposalId: string): ProposalRow | undefined {
+    return this.database.prepare('SELECT * FROM document_proposals WHERE id = ?').get(proposalId) as ProposalRow | undefined;
+  }
+
+  getProposal(proposalId: string): DocumentProposal | undefined {
+    const row = this.getProposalRow(proposalId);
+    return row === undefined ? undefined : toProposal(row);
+  }
+
+  private markProposalConflict(row: ProposalRow, actorId: string): void {
+    const now = new Date().toISOString();
+    this.database.transaction(() => {
+      this.database.prepare("UPDATE document_proposals SET status = 'conflict', updated_at = ? WHERE id = ? AND status = 'approved'").run(now, row.id);
+      this.appendAudit({ brainId: row.brain_id, proposalId: row.id, eventType: 'proposal_conflict', actorId, detail: {} });
+    })();
+  }
+
+  private appendAudit(input: { readonly brainId: string; readonly proposalId?: string; readonly eventType: string; readonly actorId: string; readonly detail: Record<string, unknown> }): void {
+    this.database.prepare(`
+      INSERT INTO document_audit_events (id, brain_id, proposal_id, event_type, actor_id, detail_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(createUuidV7(), input.brainId, input.proposalId ?? null, input.eventType, input.actorId, JSON.stringify(input.detail), new Date().toISOString());
   }
 
   search(input: { readonly brainIds: readonly string[]; readonly query: string; readonly documentPaths?: readonly string[]; readonly limit?: number }): DocumentSearchResult[] {
     const brainIds = [...new Set(input.brainIds.map((brainId) => UuidV7Schema.parse(brainId)))];
     const ftsQuery = toFtsQuery(input.query);
     if (ftsQuery === undefined || brainIds.length === 0) return [];
+    for (const brainId of brainIds) this.reconcile(brainId);
     const placeholders = brainIds.map(() => '?').join(', ');
     const pathFilter = pathPredicate(input.documentPaths, 'd.logical_path');
     const rows = this.database.prepare(`
@@ -370,6 +615,7 @@ export class DocumentProjectStore {
 
   private listActiveSections(brainIds: readonly string[], documentPaths: readonly string[]): ContextDocumentSection[] {
     if (brainIds.length === 0) return [];
+    for (const brainId of brainIds) this.reconcile(brainId);
     const placeholders = brainIds.map(() => '?').join(', ');
     const pathFilter = pathPredicate(documentPaths, 'd.logical_path');
     const rows = this.database.prepare(`
@@ -398,10 +644,34 @@ function toProject(row: ProjectRow): DocumentProject {
     sourceRoot: row.source_root,
     authorityMode: 'markdown',
     ...(row.active_revision_id === null ? {} : { activeRevisionId: UuidV7Schema.parse(row.active_revision_id) }),
+    state: row.state,
     captureMode: 'manual_only',
     retrievalPolicy,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function toProposal(row: ProposalRow): DocumentProposal {
+  let evidence: unknown = {};
+  try { evidence = JSON.parse(row.evidence_json); } catch { evidence = {}; }
+  return {
+    id: UuidV7Schema.parse(row.id),
+    brainId: UuidV7Schema.parse(row.brain_id),
+    documentId: UuidV7Schema.parse(row.document_id),
+    logicalPath: normalizeDocumentPath(row.logical_path),
+    baseRevisionId: UuidV7Schema.parse(row.base_revision_id),
+    baseSourceSha256: normalizeSha256(row.base_source_sha256),
+    proposedBody: row.proposed_body,
+    reason: NonEmptyTextSchema.parse(row.reason),
+    evidence: evidence !== null && typeof evidence === 'object' && !Array.isArray(evidence) ? evidence as Record<string, unknown> : {},
+    status: row.status,
+    actorId: NonEmptyTextSchema.parse(row.actor_id),
+    ...(row.reviewer_id === null ? {} : { reviewerId: NonEmptyTextSchema.parse(row.reviewer_id) }),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    ...(row.reviewed_at === null ? {} : { reviewedAt: row.reviewed_at }),
+    ...(row.applied_at === null ? {} : { appliedAt: row.applied_at }),
   };
 }
 
@@ -585,6 +855,28 @@ function normalizeDocumentPath(value: string): string {
     throw new Error('Document path must stay inside the configured source root.');
   }
   return path;
+}
+
+function normalizeSha256(value: string): string {
+  if (!/^[0-9a-f]{64}$/u.test(value)) throw new Error('Document source hash must be a lowercase SHA-256 digest.');
+  return value;
+}
+
+function readFileUtf8(path: string): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(path));
+  } catch (error) {
+    throw new Error(`Invalid UTF-8 Markdown source: ${path}`, { cause: error });
+  }
+}
+
+function safeSourcePath(sourceRoot: string, logicalPath: string): string {
+  const normalized = normalizeDocumentPath(logicalPath);
+  const root = resolve(sourceRoot);
+  const target = resolve(root, normalized);
+  const prefix = root.endsWith(sep) ? root : `${root}${sep}`;
+  if (target !== root && !target.startsWith(prefix)) throw new Error('Document path escapes the configured source root.');
+  return target;
 }
 
 function clampLimit(value: number | undefined): number {

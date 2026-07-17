@@ -35,7 +35,7 @@ import type { SqliteDatabase } from '@memlume/database/internal';
 import { EventBrainConflictError, EventJournal } from '@memlume/event-journal';
 import { assessMemoryConflict, compileMemory, resolveApproval, type MemoryProposal } from '@memlume/memory-compiler';
 import { MemoryStore, OutcomeFeedbackRateLimitError, OutcomeMemoryAccessError, OutcomeReceiptError, OutcomeReceiptRateLimitError, OutcomeStore, SourceEventBrainMismatchError } from '@memlume/retrieval';
-import { BrainStore, DocumentProjectStore, MarkdownRecordStore, ProjectBindingStore, RoutingInboxStore, scanMarkdownRecords } from '@memlume/shared-brains';
+import { BrainStore, DocumentProjectNotReadyError, DocumentProposalConflictError, DocumentProposalStateError, DocumentProjectStore, MarkdownRecordStore, ProjectBindingStore, RoutingInboxStore, scanMarkdownRecords } from '@memlume/shared-brains';
 import { BrainImportConflictError, BrainImportRequiredError, FullBackupAuthenticationRequiredError, FullRestoreRequiredError, RestoreRecoveryError, verifyMarkdownBundle } from '@memlume/backup';
 import { planCapture, type AtomPlan } from './capture-pipeline.js';
 import { SemanticMemoryService } from './semantic-memory-service.js';
@@ -169,7 +169,7 @@ const CreateProjectRequestSchema = z.object({ name: NonEmptyTextSchema }).strict
 const BindProjectRequestSchema = z.object({
   workspacePath: NonEmptyTextSchema,
   role: z.enum(['primary', 'linked']).default('linked'),
-  access: z.enum(['read', 'read_write']).optional(),
+  access: z.enum(['read', 'propose', 'read_write']).optional(),
 }).strict();
 const AddProjectAliasRequestSchema = z.object({ alias: NonEmptyTextSchema }).strict();
 const InspectProjectQuerySchema = z.object({ workspacePath: NonEmptyTextSchema }).strict();
@@ -196,6 +196,20 @@ const DocumentContextQuerySchema = z.object({
   paths: z.array(NonEmptyTextSchema).max(256).optional(),
   contextBudget: z.coerce.number().int().nonnegative().max(100_000).default(320),
 }).strict();
+const DocumentProposalRequestSchema = z.object({
+  brainId: UuidV7Schema,
+  logicalPath: NonEmptyTextSchema,
+  proposedBody: z.string(),
+  baseRevisionId: UuidV7Schema,
+  baseSourceSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  reason: NonEmptyTextSchema,
+  evidence: z.record(z.string(), JsonValueSchema).optional(),
+}).strict();
+const DocumentProposalListQuerySchema = z.object({
+  brainId: UuidV7Schema,
+  status: z.enum(['pending', 'approved', 'rejected', 'applied', 'conflict', 'apply_failed']).optional(),
+}).strict();
+const DocumentProposalReviewRequestSchema = z.object({ decision: z.enum(['approve', 'reject']) }).strict();
 
 const RegisterInstallationRequestSchema = z
   .object({
@@ -1068,7 +1082,8 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
       return;
     }
     const input = DocumentSearchQuerySchema.parse(request.query);
-    const mounted = services.brains.listMountedBrains(installation.id).filter(({ brain }) => brain.kind === 'project');
+    const mounted = services.brains.listMountedBrains(installation.id)
+      .filter(({ brain }) => brain.kind === 'project' && services.documents!.getProject(brain.id) !== undefined);
     const mountedBrainIds = mounted.map(({ brain }) => brain.id);
     const brainIds = input.brainId === undefined ? mountedBrainIds : [input.brainId];
     if (brainIds.length === 0 || brainIds.some((brainId) => !mountedBrainIds.includes(brainId))) {
@@ -1090,7 +1105,7 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
     }
     const input = DocumentContextQuerySchema.parse(request.query);
     const mountedBrainIds = services.brains.listMountedBrains(installation.id)
-      .filter(({ brain }) => brain.kind === 'project')
+      .filter(({ brain }) => brain.kind === 'project' && services.documents!.getProject(brain.id) !== undefined)
       .map(({ brain }) => brain.id);
     if (mountedBrainIds.length === 0) {
       response.status(403).json({ error: 'forbidden' });
@@ -1103,6 +1118,97 @@ export function registerRoutes(app: Express, services: DaemonServices): void {
       ...(input.paths === undefined ? {} : { explicitDocumentPaths: input.paths }),
       allowedBrainIds: mountedBrainIds,
     }) });
+  });
+
+  app.post('/v1/documents/proposals', requireAdapter, (request, response) => {
+    if (services.documents === undefined) {
+      response.status(503).json({ error: 'document_projects_unavailable' });
+      return;
+    }
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const input = DocumentProposalRequestSchema.parse(request.body);
+    try {
+      services.brains.assertAccess(installation.id, input.brainId, 'propose');
+    } catch {
+      response.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    response.status(201).json({ proposal: services.documents.propose({ ...input, agentInstallationId: installation.id }) });
+  });
+
+  app.get('/v1/documents/proposals', requireAdapter, (request, response) => {
+    if (services.documents === undefined) {
+      response.status(503).json({ error: 'document_projects_unavailable' });
+      return;
+    }
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const input = DocumentProposalListQuerySchema.parse(request.query);
+    try {
+      services.brains.assertAccess(installation.id, input.brainId, 'read');
+    } catch {
+      response.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    response.json({ proposals: services.documents.listProposals(input.brainId, input.status) });
+  });
+
+  app.post('/v1/documents/proposals/:proposalId/review', requireAdapter, (request, response) => {
+    if (services.documents === undefined) {
+      response.status(503).json({ error: 'document_projects_unavailable' });
+      return;
+    }
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const { proposalId } = z.object({ proposalId: UuidV7Schema }).strict().parse(request.params);
+    const proposal = services.documents.getProposal(proposalId);
+    if (proposal === undefined) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    try {
+      services.brains.assertAccess(installation.id, proposal.brainId, 'read_write');
+    } catch {
+      response.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const input = DocumentProposalReviewRequestSchema.parse(request.body);
+    response.json({ proposal: services.documents.reviewProposal({ proposalId, reviewerId: installation.id, decision: input.decision }) });
+  });
+
+  app.post('/v1/documents/proposals/:proposalId/apply', requireAdapter, (request, response) => {
+    if (services.documents === undefined) {
+      response.status(503).json({ error: 'document_projects_unavailable' });
+      return;
+    }
+    const installation = authenticatedInstallation(response);
+    if (installation === undefined) {
+      response.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const { proposalId } = z.object({ proposalId: UuidV7Schema }).strict().parse(request.params);
+    const proposal = services.documents.getProposal(proposalId);
+    if (proposal === undefined) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    try {
+      services.brains.assertAccess(installation.id, proposal.brainId, 'read_write');
+    } catch {
+      response.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    response.json({ proposal: services.documents.applyProposal({ proposalId, actorId: installation.id }) });
   });
 
   app.post('/v1/context/resolve', requireAdapter, (request, response) => {
@@ -1439,6 +1545,15 @@ function writableBrainIds(brains: BrainStore, agentInstallationId: string): stri
     .map(({ brain }) => brain.id);
 }
 
+function intersectAccess(
+  left: 'read' | 'propose' | 'read_write',
+  right: 'read' | 'propose' | 'read_write' | undefined,
+): 'read' | 'propose' | 'read_write' {
+  if (right === undefined) return left;
+  const rank = { read: 0, propose: 1, read_write: 2 } as const;
+  return rank[left] <= rank[right] ? left : right;
+}
+
 function redactEventSource(source: z.infer<typeof EventSourceSchema>): z.infer<typeof EventSourceSchema> {
   return EventSourceSchema.parse(
     Object.fromEntries(
@@ -1490,7 +1605,7 @@ type CaptureCatalogEntry = {
   readonly brainId: string;
   readonly kind: 'personal' | 'project';
   readonly role: 'personal' | 'primary' | 'linked';
-  readonly access: 'read' | 'read_write';
+  readonly access: 'read' | 'propose' | 'read_write';
   readonly name: string;
   readonly aliases?: readonly string[];
   readonly keys?: readonly string[];
@@ -1517,7 +1632,7 @@ function captureCatalog(services: DaemonServices, installationId: string, worksp
     if (workspacePath !== undefined && binding === undefined) continue;
     const role: CaptureCatalogEntry['role'] = binding?.role ?? (primaryAssigned ? 'linked' : 'primary');
     primaryAssigned ||= role === 'primary';
-    const effectiveAccess = binding?.access === 'read' || access === 'read' ? 'read' as const : 'read_write' as const;
+    const effectiveAccess = intersectAccess(access, binding?.access);
     const inspection = inspections.get(brain.id);
     catalog.push({
       brainId: brain.id,
@@ -1715,6 +1830,21 @@ function bearerToken(authorization: string | undefined): string | undefined {
 }
 
 const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
+  if (error instanceof DocumentProjectNotReadyError) {
+    response.status(409).json({ error: error.code, brainId: error.brainId, state: error.state });
+    return;
+  }
+
+  if (error instanceof DocumentProposalConflictError) {
+    response.status(409).json({ error: error.code, brainId: error.brainId });
+    return;
+  }
+
+  if (error instanceof DocumentProposalStateError) {
+    response.status(409).json({ error: error.code, proposalId: error.proposalId });
+    return;
+  }
+
   if (error instanceof EventBrainConflictError) {
     response.status(409).json({ error: 'event_brain_conflict' });
     return;

@@ -11,7 +11,7 @@ export type ProjectBindingStoreOptions = {
 };
 
 export type ProjectBindingRole = 'primary' | 'linked';
-export type ProjectBindingAccess = 'read' | 'read_write';
+export type ProjectBindingAccess = 'read' | 'propose' | 'read_write';
 export type ProjectKeyType = 'canonical_path' | 'git_remote';
 
 export type ProjectBinding = {
@@ -285,7 +285,7 @@ function toBrain(row: BrainRow): Brain {
 }
 
 function toBinding(row: ProjectBindingRow): ProjectBinding {
-  if ((row.role !== 'primary' && row.role !== 'linked') || (row.access !== 'read' && row.access !== 'read_write')) throw new Error('Invalid project binding row.');
+  if ((row.role !== 'primary' && row.role !== 'linked') || (row.access !== 'read' && row.access !== 'propose' && row.access !== 'read_write')) throw new Error('Invalid project binding row.');
   return { workspaceKey: row.workspaceKey, brainId: UuidV7Schema.parse(row.brainId), role: row.role, access: row.access, createdAt: row.createdAt, updatedAt: row.updatedAt };
 }
 

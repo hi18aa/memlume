@@ -94,7 +94,7 @@ Memlume 不会自动保存每一条对话，也不会把整个数据库塞进 LL
 - 结构化的 `policy`、`preference`、`fact`、`decision` 记忆。
 - Personal 与 Project Brain、workspace binding，以及 task 层级的 ReadSet 限制。
 - SQLite FTS5 搜索，以及带来源记忆 ID 与 context budget 的确定性 Context Resolver。
-- 既有 Project Brain 上的只读 document project：Markdown source root 扫描、revision/hash/section citation、FTS 搜索，以及有预算的 profile attachment。
+- 既有 Project Brain 上的受治理 document project：Markdown authority、revision/hash/section citation、FTS 搜索、有预算 attachment、proposal 审核、atomic apply、audit 与 drift 防护。
 - 带有每个安装实例挂载设置的共享 Brain、仅限 localhost 的 daemon、CLI，以及 MCP stdio server。
 - Adapter API 使用 Bearer Token 验证；`/v1/health` 仍是公开的本地健康检查。
 - 受治理的记忆编译、candidate 审核与可识别冲突的替换流程。
@@ -102,9 +102,17 @@ Memlume 不会自动保存每一条对话，也不会把整个数据库塞进 LL
 - Hermes、Codex、OpenClaw、Claude Code 的官方本地 Adapter；它们共享同一个已挂载 Brain，不复制 Agent 的原生记忆。
 - Outcome usage、确定性 feedback ranking、retrieval benchmark、公开 guides/examples 与 CI/release 流程。
 
-### 只读 Document Project（Phase B）
+### 受治理 Document Project（Phase C）
 
-Project Brain 可以选择挂接一个 Markdown source root。原始文件仍是唯一 authority；只有明确执行 sync 才会建立 immutable revision、hash 与章节的 SQLite/FTS projection。Profile attachment 可以设置 `always_core`、`task_conditional` 或 `explicit_only`，普通聊天 capture 不会写入 document project，attachment 也不能绕过 Brain mount。
+Project Brain 可以选择挂接一个 Markdown source root。原始文件仍是唯一 authority；只有明确执行 sync 才会建立 immutable revision、hash 与章节的 SQLite/FTS projection。SQLite 只保存可重建 projection、proposal、revision state 与 audit，不是文档 authority。Profile attachment 可以设置 `always_core`、`task_conditional` 或 `explicit_only`，普通聊天 capture 不会写入 document project，attachment 也不能绕过 Brain mount。
+
+文档治理权限分为三层：
+
+- `read`：可以搜索并取得 active sections。
+- `propose`：可以提交完整 Markdown body、base revision/hash、reason 与 evidence，只建立 `pending`，不能 review/apply。
+- `read_write`：可以 approve/reject 与 apply。套用前会再次检查 base revision，使用同目录临时文件与 atomic rename 更新 Markdown，成功 sync 后建立新 revision 并写入 audit。
+
+每次文档搜索与 Context 都会先 reconcile source manifest。手动改文件会进入 `drift`，套用失败会进入 `repair_required`；这两种状态都不会返回旧 SQLite sections。修正原始文件后请明确执行 sync 才会恢复 `ready`。
 
 目前 MVP 通过 daemon API 操作：
 
@@ -121,6 +129,8 @@ curl.exe "$env:MEMLUME_DAEMON_URL/v1/documents/search?q=deployment" `
 ```
 
 先挂载 Project Brain，再创建 installation 的 profile binding，`beforeTask` 才会自动取得文档 Context。搜索与 Context 响应会附上 logical path、heading path、revision ID 与 source SHA-256 citation。
+
+Proposal API 为 `/v1/documents/proposals`、`/review` 与 `/apply`，需要 adapter bearer token；proposal body 是完整替换内容，不是 patch。`propose` installation 不能自行审核或套用。
 
 v0.3.0 尚未实现：
 

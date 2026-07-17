@@ -176,9 +176,13 @@ describe('BrainStore', () => {
     store.mountBrain({ brainId: brain.id, agentInstallationId: installation.id, access: 'read' });
 
     assert.doesNotThrow(() => store.assertAccess(installation.id, brain.id, 'read'));
+    assert.throws(() => store.assertAccess(installation.id, brain.id, 'propose'), /proposal access/i);
     assert.throws(() => store.assertAccess(installation.id, brain.id, 'read_write'), /write access/i);
     assert.throws(() => store.assertAccess(installation.id, unmountedBrain.id, 'read'), /not mounted/i);
 
+    store.mountBrain({ brainId: brain.id, agentInstallationId: installation.id, access: 'propose' });
+    assert.doesNotThrow(() => store.assertAccess(installation.id, brain.id, 'propose'));
+    assert.throws(() => store.assertAccess(installation.id, brain.id, 'read_write'), /write access/i);
     store.mountBrain({ brainId: brain.id, agentInstallationId: installation.id, access: 'read_write' });
     assert.doesNotThrow(() => store.assertAccess(installation.id, brain.id, 'read_write'));
   });

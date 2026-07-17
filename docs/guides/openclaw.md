@@ -27,12 +27,14 @@ node apps/cli/dist/index.js status
 ## Hook 與讀寫
 
 - `before_prompt_build` 呼叫 `beforeTask`，Core 依目前 workspace、任務與 entity 產生 ReadSet。Primary Project 優先，只有命中的 Linked Project 才加入；Personal 需具相關性才注入。
-- profile-level document attachment 若已通過 Brain mount，會在同一個 budget 內提供唯讀 Markdown sections；只有已 sync 的 active revision 能被注入，普通聊天不會污染文件。
+- profile-level document attachment 若已通過 Brain mount，會在同一個 budget 內提供 active Markdown sections；只有已 sync 的 active revision 能被注入，普通聊天不會污染文件。
 - Hook 統一遵守 500ms fail-open contract；`beforeTask` 先讀取 250ms 內的 Context，outbox retry 在讀取完成後以背景工作執行，不阻塞 OpenClaw 原生流程。
 - `message_received` 呼叫 `onUserMessage`。Core 會過濾 Secret、拆分 atom、解析 Personal／Project、檢查衝突，再以 Markdown authority → SQLite projection 寫入。
 - `subagent_spawned` 是 observer，只記錄 child 啟用訊號；child 第一次 `before_prompt_build` 才呼叫 `onSubagentStart`。沒有 child goal 時只讀 Primary Project，不讀取 Personal 或未匹配 Linked Project，也不寫入。
 
 未知或模糊 Project 不會自動建立，也不會回退 Personal，而會進 durable routing Inbox。一般陳述可為 `candidate`，明確授權才可能成為 `active`；事件可為 `event_only`，問候與閒聊則 `ignored`。每個 atom 都有 capture receipt，可用 `memlume status` 查詢 routing／queue 狀態。
+
+文件建議採 `propose` mount：OpenClaw 只能建立含完整 Markdown body 與 base revision/hash 的 pending proposal；`read_write` reviewer 才能 review/apply。apply 成功才會建立新 revision，source manifest 出現 `drift` 或 `repair_required` 時，Core 會停止注入舊文件 Context。
 
 Assistant final 不直接成為記憶。daemon 只在 `.runtime` 暫存最多 64 KiB、24 小時；「可以／同意」會在有效 final buffer 存在時重新路由，「修正」會走 supersedes/conflict 流程。短回覆沒有有效 buffer 時忽略；runtime 資料不進 Brain、FTS、Inbox、outbox 或 backup。
 

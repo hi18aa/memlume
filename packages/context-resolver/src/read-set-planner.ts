@@ -10,7 +10,7 @@ export type ReadSetBrain = {
   readonly kind: 'personal' | 'project';
   readonly name?: string;
   readonly aliases?: readonly string[];
-  readonly access?: 'read' | 'read_write';
+  readonly access?: 'read' | 'propose' | 'read_write';
 };
 
 export type ReadSetPlannerInput = {

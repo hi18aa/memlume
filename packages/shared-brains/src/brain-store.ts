@@ -194,8 +194,9 @@ export class BrainStore {
     }
 
     const access = BrainMountSchema.parse({ ...requested, access: row.access }).access;
-    if (requested.access === 'read_write' && access !== 'read_write') {
-      throw new Error('Brain mount does not grant write access.');
+    const rank = { read: 0, propose: 1, read_write: 2 } as const;
+    if (rank[access] < rank[requested.access]) {
+      throw new Error(requested.access === 'propose' ? 'Brain mount does not grant proposal access.' : 'Brain mount does not grant write access.');
     }
   }
 

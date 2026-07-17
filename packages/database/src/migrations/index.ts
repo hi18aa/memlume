@@ -11,5 +11,6 @@ import { captureReceiptsMigration } from './009_capture_receipts.js';
 import { adapterHeartbeatsMigration } from './010_adapter_heartbeats.js';
 import { outcomeResultsMigration } from './011_outcome_results.js';
 import { documentProjectsMigration } from './012_document_projects.js';
+import { documentGovernanceMigration } from './013_document_governance.js';
 
-export const migrations: readonly Migration[] = [initialMigration, eventReferenceDedupMigration, sharedBrainsMigration, memoryOutcomesMigration, feedbackReceiptsMigration, receiptHardeningMigration, projectModelMigration, recordProjectionMigration, captureReceiptsMigration, adapterHeartbeatsMigration, outcomeResultsMigration, documentProjectsMigration];
+export const migrations: readonly Migration[] = [initialMigration, eventReferenceDedupMigration, sharedBrainsMigration, memoryOutcomesMigration, feedbackReceiptsMigration, receiptHardeningMigration, projectModelMigration, recordProjectionMigration, captureReceiptsMigration, adapterHeartbeatsMigration, outcomeResultsMigration, documentProjectsMigration, documentGovernanceMigration];

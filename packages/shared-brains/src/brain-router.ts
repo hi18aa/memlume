@@ -6,7 +6,7 @@ export interface BrainCatalogEntry {
   readonly brainId: string;
   readonly kind: 'personal' | 'project';
   readonly role?: BrainCatalogRole;
-  readonly access?: 'read' | 'read_write';
+  readonly access?: 'read' | 'propose' | 'read_write';
   readonly writable?: boolean;
   readonly name?: string;
   readonly aliases?: readonly string[];
