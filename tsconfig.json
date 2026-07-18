@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./apps/cli" },
+    { "path": "./apps/daemon" },
+    { "path": "./apps/mcp-server" },
+    { "path": "./packages/adapter-sdk" }
+  ]
+}
