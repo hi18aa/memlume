@@ -1132,5 +1132,5 @@ function isMissingFile(error: unknown): boolean {
 }
 
 function isExistingPath(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST';
+  return typeof error === 'object' && error !== null && 'code' in error && (error.code === 'EEXIST' || error.code === 'EPERM');
 }

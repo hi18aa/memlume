@@ -342,6 +342,29 @@ describe('AdapterClient', () => {
     assert.equal(JSON.parse(fake.calls[0].init.body).brainId, brainId);
   });
 
+  test('retries a transient EPERM while acquiring the outbox lock', async (t) => {
+    const outboxPath = temporaryOutbox();
+    const lockPath = `${outboxPath}.lock`;
+    const originalMkdir = fs.promises.mkdir;
+    let lockAttempts = 0;
+    fs.promises.mkdir = async (path, options) => {
+      if (path === lockPath && lockAttempts++ === 0) {
+        throw Object.assign(new Error('Transient lock handoff.'), { code: 'EPERM', syscall: 'mkdir', path });
+      }
+      return originalMkdir(path, options);
+    };
+    syncBuiltinESMExports();
+    t.after(() => {
+      fs.promises.mkdir = originalMkdir;
+      syncBuiltinESMExports();
+    });
+    const fake = fakeFetch({ status: 201, body: savedCapture() });
+    const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, fetch: fake.fetch });
+
+    assert.deepEqual(await client.onUserMessage(envelope, { messageId: 'transient-lock-handoff', content: 'Remember Vue.', brainId }), { status: 'saved', memoryStatus: 'active' });
+    assert.ok(lockAttempts >= 2);
+  });
+
   test('uses an explicit message Brain instead of the configured default', async () => {
     const explicitBrainId = '00000000-0000-7000-8000-000000000006';
     const fake = fakeFetch({ status: 201, body: savedCapture() });
