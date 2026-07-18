@@ -305,6 +305,8 @@ pnpm build
 pnpm benchmark:retrieval
 ```
 
+`pnpm typecheck` 使用 TypeScript Project References，會視需要產生 `dist/` 與 `.tsbuildinfo`；可執行 `pnpm exec tsc -b --clean` 移除這些產物。
+
 ## 貢獻
 
 請保持變更精簡；非平凡行為請新增或更新最接近的 Vitest coverage，並在開啟 pull request 前執行上述命令。請勿把遠端儲存或 vector search 當作 v0.3.0 的附帶變更加入。

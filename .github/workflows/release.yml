@@ -25,11 +25,25 @@ jobs:
       - name: Install Hermes loader smoke runtime
         run: python -m pip install --disable-pip-version-check --no-cache-dir --no-deps "hermes-agent @ git+https://github.com/NousResearch/hermes-agent.git@a9cc17fd80648bfee0d0b677fa9ea91421f329fc" "PyYAML==6.0.3"
       - run: pnpm install --frozen-lockfile
+      - name: Verify clean TypeScript workspace
+        shell: bash
+        run: |
+          artifacts="$(find apps packages -mindepth 2 -maxdepth 2 \( -type d -name dist -o -type f -name '*.tsbuildinfo' \) -print)"
+          if [[ -n "$artifacts" ]]; then
+            printf 'Unexpected pre-existing TypeScript build artifacts:\n%s\n' "$artifacts"
+            exit 1
+          fi
+      - run: pnpm typecheck
+      - name: Verify project-reference outputs
+        shell: bash
+        run: |
+          test -f packages/backup/dist/index.d.ts
+          test -f packages/backup/dist/tsconfig.tsbuildinfo
+          test -f apps/cli/dist/index.js
       - run: pnpm test
         env:
           HERMES_PYTHON: python
       - run: pnpm test:e2e
-      - run: pnpm typecheck
       - run: pnpm build
       - run: pnpm benchmark:retrieval
       - run: git archive --format=tar.gz --output=memlume-${GITHUB_REF_NAME}.tar.gz HEAD

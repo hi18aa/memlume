@@ -316,6 +316,8 @@ pnpm build
 pnpm benchmark:retrieval
 ```
 
+`pnpm typecheck` uses TypeScript Project References and may create `dist/` and `.tsbuildinfo` artifacts. Run `pnpm exec tsc -b --clean` to remove them.
+
 ## Contributing
 
 Keep changes small, add or update the nearest Vitest coverage for non-trivial behavior, and run the commands above before opening a pull request. Do not add remote storage or vector search as incidental changes to v0.3.0.
