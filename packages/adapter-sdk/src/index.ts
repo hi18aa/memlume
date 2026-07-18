@@ -832,8 +832,22 @@ async function readOutbox(path: string): Promise<OutboxEntry[]> {
 async function writeOutbox(path: string, pending: readonly OutboxEntry[]): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporaryPath = `${path}.${process.pid}.tmp`;
-  await writeFile(temporaryPath, pending.map((entry) => JSON.stringify(entry)).join('\n') + (pending.length === 0 ? '' : '\n'), 'utf8');
-  await rename(temporaryPath, path);
+  try {
+    await writeFile(temporaryPath, pending.map((entry) => JSON.stringify(entry)).join('\n') + (pending.length === 0 ? '' : '\n'), 'utf8');
+    for (let retry = 0; ; retry += 1) {
+      try {
+        await rename(temporaryPath, path);
+        break;
+      } catch (error) {
+        if (typeof error !== 'object' || error === null || !('code' in error) || error.code !== 'EPERM' || retry === 4) {
+          throw error;
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 5 * 2 ** retry));
+      }
+    }
+  } finally {
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
 }
 
 async function withOutboxLock<T>(outboxPath: string, operation: () => Promise<T>, timeoutMs = OUTBOX_LOCK_TIMEOUT_MS): Promise<T> {

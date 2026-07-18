@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, test } from 'node:test';
@@ -446,7 +447,7 @@ describe('AdapterClient', () => {
     assert.equal(readFileSync(outboxPath, 'utf8'), original);
   });
 
-  test('upgrades a legacy capture outbox entry with the configured default Brain before retrying it', async () => {
+  test('upgrades a legacy capture outbox entry with the configured default Brain before retrying it', async (t) => {
     const outboxPath = temporaryOutbox();
     const legacy = {
       state: 'pending',
@@ -468,6 +469,19 @@ describe('AdapterClient', () => {
       },
     };
     writeFileSync(outboxPath, `${JSON.stringify(legacy)}\n`, 'utf8');
+    const originalRename = fs.promises.rename;
+    let renameAttempts = 0;
+    fs.promises.rename = async (source, destination) => {
+      if (destination === outboxPath && renameAttempts++ === 0) {
+        throw Object.assign(new Error('Transient outbox replace failure.'), { code: 'EPERM' });
+      }
+      return originalRename(source, destination);
+    };
+    syncBuiltinESMExports();
+    t.after(() => {
+      fs.promises.rename = originalRename;
+      syncBuiltinESMExports();
+    });
     const fake = fakeFetch({ status: 503, body: { error: 'unavailable' } });
     const client = new AdapterClient({ daemonUrl: 'http://127.0.0.1:3849', token, outboxPath, defaultWriteBrainId: brainId, fetch: fake.fetch });
 
