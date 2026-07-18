@@ -8,9 +8,9 @@
   },
   "files": ["dist"],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "vitest run --pool=threads",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build": "tsc -b --stopBuildOnErrors",
+    "test": "pnpm run build && vitest run --pool=threads",
+    "typecheck": "tsc -b --stopBuildOnErrors"
   },
   "dependencies": {
     "@memlume/backup": "workspace:*",

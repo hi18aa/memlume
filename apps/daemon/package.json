@@ -10,12 +10,11 @@
   "files": ["dist"],
   "scripts": {
     "build:console": "pnpm --filter @memlume/console build",
-    "build:dependencies": "pnpm --filter=@memlume/daemon... --filter=!@memlume/daemon --if-present run build",
-    "build": "pnpm run build:console && pnpm run build:dependencies && tsc -p tsconfig.json",
+    "build": "pnpm run build:console && tsc -b --stopBuildOnErrors",
     "start": "node dist/start.js",
     "test": "pnpm run build && vitest run --pool=threads",
     "test:codex": "vitest --root ../.. run --exclude=.worktrees/** ../../adapters/codex/test/hook.test.ts",
-    "typecheck": "pnpm run build:dependencies && tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -b --stopBuildOnErrors"
   },
   "dependencies": {
     "@memlume/backup": "workspace:*",

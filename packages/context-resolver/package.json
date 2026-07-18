@@ -9,9 +9,9 @@
   "types": "./dist/index.d.ts",
   "files": ["dist"],
   "scripts": {
-    "build": "pnpm --filter @memlume/retrieval build && tsc -p tsconfig.json",
-    "test": "pnpm --filter @memlume/retrieval build && vitest run",
-    "typecheck": "pnpm --filter @memlume/retrieval build && tsc -p tsconfig.json --noEmit"
+    "build": "tsc -b --stopBuildOnErrors",
+    "test": "pnpm run build && vitest run",
+    "typecheck": "tsc -b --stopBuildOnErrors"
   },
   "dependencies": {
     "@memlume/contracts": "workspace:*",

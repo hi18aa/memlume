@@ -13,7 +13,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "pnpm -r --if-present run build",
+    "build": "pnpm --filter @memlume/console build && tsc -b --stopBuildOnErrors",
     "test": "pnpm -r --if-present run test && pnpm run test:hermes && pnpm run test:codex && pnpm run test:openclaw && pnpm run test:claude-code",
     "test:hermes": "pnpm --filter @memlume/adapter-sdk build && node --test adapters/hermes/tests/bridge.test.mjs && python -m unittest discover -s adapters/hermes/tests -p test_*.py",
     "test:codex": "pnpm --filter @memlume/adapter-sdk build && pnpm --dir apps/daemon run test:codex",
@@ -22,7 +22,7 @@
     "test:e2e": "pnpm --filter @memlume/adapter-sdk build && pnpm --filter @memlume/daemon build && pnpm --filter @memlume/daemon exec vitest --root ../.. run --exclude=.worktrees/** apps/daemon/test/shared-brain.e2e.test.ts apps/daemon/test/document-project.e2e.test.ts apps/daemon/test/document-governance.e2e.test.ts test/e2e/adapter-contract.test.ts",
     "benchmark:retrieval": "pnpm --filter @memlume/context-resolver build && node benchmarks/retrieval/run.ts",
     "lint": "pnpm -r --if-present run lint",
-    "typecheck": "pnpm -r --if-present run typecheck"
+    "typecheck": "tsc -b --stopBuildOnErrors"
   },
   "devDependencies": {
     "typescript": "^7.0.2"

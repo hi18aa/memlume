@@ -8,10 +8,9 @@
   },
   "files": ["dist"],
   "scripts": {
-    "build:dependencies": "pnpm --filter=@memlume/mcp-server... --filter=!@memlume/mcp-server --if-present run build",
-    "build": "pnpm run build:dependencies && tsc -p tsconfig.json",
-    "test": "pnpm run build:dependencies && vitest run",
-    "typecheck": "pnpm run build:dependencies && tsc -p tsconfig.json --noEmit"
+    "build": "tsc -b --stopBuildOnErrors",
+    "test": "pnpm run build && vitest run",
+    "typecheck": "tsc -b --stopBuildOnErrors"
   },
   "dependencies": {
     "@memlume/contracts": "workspace:*",
