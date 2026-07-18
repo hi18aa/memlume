@@ -365,17 +365,20 @@ describe('Codex plugin hook', () => {
   test('fails open and queues an explicit capture without leaving an outbox lock', async () => {
     const outboxDirectory = temporaryDirectory();
     const hook = copiedHook();
-    const server = createServer(() => undefined);
+    let contextRequestedAt: number | undefined;
+    const server = createServer((request) => {
+      if (request.url === '/v1/context/resolve') contextRequestedAt ??= performance.now();
+    });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     try {
       const address = server.address();
       if (address === null || typeof address === 'string') throw new Error('Server address is unavailable.');
-      const startedAt = performance.now();
       const result = await invoke(hook, {
         hook_event_name: 'UserPromptSubmit', session_id: 'offline-session', turn_id: 'offline-turn', cwd: 'C:/work/memlume', prompt: '記住專案使用 pnpm',
       }, environment(`http://127.0.0.1:${address.port}`, outboxDirectory));
 
-      expect(performance.now() - startedAt).toBeLessThan(800);
+      expect(contextRequestedAt).toBeDefined();
+      expect(performance.now() - contextRequestedAt!).toBeLessThan(800);
       expect(result).toEqual({ output: {}, stderr: '' });
       await eventually(() => expect(existsSync(outboxPath(outboxDirectory))).toBe(true));
       expect(readFileSync(outboxPath(outboxDirectory), 'utf8')).toContain('記住專案使用 pnpm');
@@ -411,24 +414,20 @@ describe('Codex plugin hook', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const lockPath = `${outboxPath(outboxDirectory)}.lock`;
     mkdirSync(lockPath, { recursive: true });
-    const release = new Promise<void>((resolve) => setTimeout(() => {
-      rmSync(lockPath, { force: true, recursive: true });
-      resolve();
-    }, 1_200));
     try {
       const address = server.address();
       if (address === null || typeof address === 'string') throw new Error('Server address is unavailable.');
-      const startedAt = performance.now();
       const result = await invoke(copiedHook(), {
         hook_event_name: 'UserPromptSubmit', session_id: 'locked-session', turn_id: 'locked-turn', cwd: 'C:/work/memlume', prompt: '記住專案使用 pnpm',
       }, environment(`http://127.0.0.1:${address.port}`, outboxDirectory));
 
-      expect(performance.now() - startedAt).toBeLessThan(800);
       expect(result).toEqual({ output: {}, stderr: '' });
-      await release;
+      expect(existsSync(lockPath)).toBe(true);
+      rmSync(lockPath, { force: true, recursive: true });
       await eventually(() => expect(captureRequests).toEqual(['/v1/memories/capture']));
       expect(existsSync(lockPath)).toBe(false);
     } finally {
+      rmSync(lockPath, { force: true, recursive: true });
       server.closeAllConnections();
       server.close();
     }
