@@ -492,6 +492,7 @@ describe('AdapterClient', () => {
       assert.equal(JSON.parse(capture.init.body).brainId, brainId);
       assert.equal(JSON.parse(readFileSync(outboxPath, 'utf8')).request.brainId, brainId);
     });
+    assert.ok(renameAttempts >= 2);
   });
 
   test('keeps a legacy capture outbox entry pending when this client has no target Brain', async () => {
